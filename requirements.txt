@@ -1,0 +1,46 @@
+# 在线考试系统 Beta — Python 依赖清单
+# Python 3.12, 运行时路径: D:\Python312\python.exe
+# 安装命令: pip install -r requirements.txt
+
+# ── Web 框架 & ORM ──
+Flask==3.1.3
+Flask-SQLAlchemy==3.1.1
+SQLAlchemy==2.0.52
+Flask-Migrate==4.1.0
+alembic==1.19.2
+
+# ── 认证 & 密码 ──
+Flask-Bcrypt==1.0.1
+bcrypt==5.0.0
+PyJWT==2.10.1
+
+# ── 跨域 & HTTP 请求 ──
+flask-cors==6.0.5
+requests==2.34.2
+
+# ── 安全层（CSRF 防护 + 速率限制）──
+Flask-WTF==1.3.0
+WTForms==3.2.2
+Flask-Limiter==4.1.1
+
+# ── 配置 & 缓存 ──
+python-dotenv==1.2.3
+redis==5.3.1
+
+# ── 文档处理（题库导入导出）──
+openpyxl==3.1.5
+python-docx==1.2.0
+
+# ── 二维码生成（考试邀请码 QR 码）──
+qrcode==8.2
+pillow==12.3.0
+
+# ── 实时通信（竞赛/PK 榜单推送，可选，未安装自动降级为前端轮询）──
+Flask-SocketIO==5.6.1
+python-socketio==5.16.4
+simple-websocket==1.1.0
+websocket-client==1.9.2
+
+# ── 生产 WSGI 服务器（DEBUG=false 时使用；纯 Python，Windows/Linux 通用）──
+# 开发模式（FLASK_DEBUG=true）仍用 Werkzeug，不受影响
+waitress==3.0.2
