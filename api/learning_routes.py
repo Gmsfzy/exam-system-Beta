@@ -578,7 +578,7 @@ def api_learning_ask():
 
     try:
         from ai_service.services import ai_generate_analysis
-        analysis = ai_generate_analysis(db, question_id, student_answer) if question_id else ''
+        analysis = ai_generate_analysis(db.session, question_id, student_answer) if question_id else ''
     except Exception:
         logger.exception('AI 答疑失败')
         return jsonify({'message': 'AI 服务暂不可用，请稍后重试'}), 500

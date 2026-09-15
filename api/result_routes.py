@@ -175,7 +175,7 @@ def api_grading_detail(exam_id, student_id):
         for ans in Answer.query.filter_by(session_id=session.id).all():
             q = db.session.get(Question, ans.question_id)
             if not q:
-                logging.warning(f"grading_detail: question {ans.question_id} not found")
+                logger.warning(f"grading_detail: question {ans.question_id} not found")
                 continue
             eq = ExamQuestion.query.filter_by(exam_id=exam_id, question_id=q.id).first()
             answers.append({

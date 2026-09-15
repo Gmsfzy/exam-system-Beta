@@ -173,29 +173,35 @@ const unansweredCount = computed(() => questions.value.length - answeredCount.va
 const switchCount = ref(0)
 const showSwitchWarning = ref(false)
 let switchWarningTimer = null
+let forceLocked = false
 
-const handleVisibilityChange = async () => {
-  if (document.hidden && sessionId.value) {
-    try {
-      const res = await request.post(`/api/exam/${route.params.examId}/report_switch`)
-      switchCount.value = res.data.switch_count
-      showSwitchWarning.value = true
-      if (switchWarningTimer) clearTimeout(switchWarningTimer)
-      switchWarningTimer = setTimeout(() => { showSwitchWarning.value = false }, 4000)
-    } catch (e) { /* 静默失败，不影响答题 */ }
-  }
+const handleSwitchReport = async () => {
+  if (forceLocked) return
+  try {
+    const res = await request.post(`/api/exam/${route.params.examId}/report_switch`)
+    switchCount.value = res.data.switch_count
+    showSwitchWarning.value = true
+    if (switchWarningTimer) clearTimeout(switchWarningTimer)
+    switchWarningTimer = setTimeout(() => { showSwitchWarning.value = false }, 4000)
+    // 切屏达 3 次：服务端已强制交卷并结算，弹窗后跳回首页
+    if (res.data.force_submitted) {
+      forceLocked = true
+      await ElMessageBox.alert(
+        '检测到 3 次切屏行为，系统已强制交卷。您的试卷已提交，成绩将在批改完成后公布。',
+        '已强制交卷',
+        { type: 'warning', confirmButtonText: '我知道了' }
+      )
+      router.push('/')
+    }
+  } catch (e) { /* 静默失败，不影响答题 */ }
 }
 
-const handleWindowBlur = async () => {
-  if (sessionId.value) {
-    try {
-      const res = await request.post(`/api/exam/${route.params.examId}/report_switch`)
-      switchCount.value = res.data.switch_count
-      showSwitchWarning.value = true
-      if (switchWarningTimer) clearTimeout(switchWarningTimer)
-      switchWarningTimer = setTimeout(() => { showSwitchWarning.value = false }, 4000)
-    } catch (e) { /* 静默 */ }
-  }
+const handleVisibilityChange = () => {
+  if (document.hidden && sessionId.value) handleSwitchReport()
+}
+
+const handleWindowBlur = () => {
+  if (sessionId.value) handleSwitchReport()
 }
 
 onMounted(async () => {

@@ -41,6 +41,8 @@ def api_login():
 
 @api_auth_bp.route('/register', methods=['POST'])
 @limiter.limit(RateLimitConfig.AUTH)
+@log_errors
+@log_performance
 def api_register():
     data = request.get_json()
     username = data.get('username')

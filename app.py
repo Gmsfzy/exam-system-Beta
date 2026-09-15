@@ -26,6 +26,21 @@ CORS(app, supports_credentials=True, origins=Config.CORS_ORIGINS)
 db.init_app(app)
 migrate = Migrate(app, db)
 
+# SQLite 并发优化（v4.0）：开启 WAL 日志模式——读不再阻塞单写者，
+# 缓解后台调度线程/请求线程/SocketIO 线程三方并发时的 database is locked。
+# 配合 connect_args timeout=30（busy_timeout）序列化写者竞争；
+# synchronous=NORMAL 是 WAL 官方推荐搭配（崩溃不损库，仅断电极端情况可能丢最后一事务）。
+from sqlalchemy import event as _sa_event
+with app.app_context():
+    @_sa_event.listens_for(db.engine, "connect")
+    def _sqlite_wal_pragma(dbapi_conn, _record):
+        _cur = dbapi_conn.cursor()
+        try:
+            _cur.execute("PRAGMA journal_mode=WAL")
+            _cur.execute("PRAGMA synchronous=NORMAL")
+        finally:
+            _cur.close()
+
 init_redis()
 try:
     init_security(app)
@@ -55,7 +70,25 @@ from competition.team_routes import team_bp
 from bounty.routes import bounty_bp
 # 注意：api/routes.py 已废弃，路由已拆分到以上独立模块
 
-api_bps = [api_auth_bp, api_question_bp, api_course_bp, api_major_bp, api_chapter_bp, api_ai_bp, api_exam_bp, api_student_bp, api_execution_bp, api_result_bp, api_notification_bp, api_log_bp, api_learning_bp, competition_bp, competition_play_bp, pk_bp, gamification_bp, team_bp, bounty_bp]
+api_bps = [api_auth_bp,
+           api_question_bp,
+           api_course_bp,
+           api_major_bp,
+           api_chapter_bp,
+           api_ai_bp,
+           api_exam_bp,
+           api_student_bp,
+           api_execution_bp,
+           api_result_bp,
+           api_notification_bp,
+           api_log_bp,
+           api_learning_bp,
+           competition_bp,
+           competition_play_bp,
+           pk_bp,
+           gamification_bp,
+           team_bp,
+           bounty_bp]
 for bp in api_bps:
     # CSRF 由 security._smart_csrf_check 统一处理：Bearer token 请求自动豁免，其余强制校验
     app.register_blueprint(bp, url_prefix='/api')
@@ -283,7 +316,9 @@ def auto_end_expired_exams():
                     # flush 提前暴露唯一约束冲突（并发交卷竞态），冲突则整场回滚下轮重试
                     db.session.flush()
                     from api.notification_routes import create_exam_result_notification
-                    create_exam_result_notification(result)
+                    # 循环内不逐行 commit：通知随本场考试在循环结束后统一提交，
+                    # 避免反复争抢 SQLite 写锁，也保证整场考试收卷的事务原子性
+                    create_exam_result_notification(result, commit=False)
 
                 db.session.commit()
                 logger.info(f"Auto ended exam: {exam.id}")

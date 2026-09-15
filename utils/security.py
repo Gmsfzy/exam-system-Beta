@@ -115,4 +115,5 @@ class RateLimitConfig:
     EXAM_SUBMIT = "1 per 30 seconds"
     RESULT_QUERY = "30 per minute"
     DATA_WRITE = "20 per minute"
+    LOG_REPORT = "30 per minute"  # 前端日志上报：落盘类接口，严于全局默认 60/min 防灌日志
     DEFAULT = "60 per minute"

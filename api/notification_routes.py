@@ -14,8 +14,13 @@ def _current_user():
         return None, (jsonify({'error': '请先登录'}), 401)
     return user, None
 
-def create_notification(user_id, title, content='', type='info', related_type=None, related_id=None):
-    """创建通知助手函数"""
+def create_notification(user_id, title, content='', type='info', related_type=None, related_id=None, commit=True):
+    """创建通知助手函数。
+
+    commit=True（默认）：立即提交，适合请求路径单次调用；
+    commit=False：仅 add 不提交，由调用方在外层循环结束后统一 commit
+    （如 scheduler 批量收卷，避免循环内逐行提交争抢写锁、提前半提交）。
+    """
     notification = Notification(
         user_id=user_id,
         title=title,
@@ -25,7 +30,8 @@ def create_notification(user_id, title, content='', type='info', related_type=No
         related_id=related_id
     )
     db.session.add(notification)
-    db.session.commit()
+    if commit:
+        db.session.commit()
     return notification
 
 def create_exam_publish_notification(exam):
@@ -41,7 +47,7 @@ def create_exam_publish_notification(exam):
             related_id=exam.id
         )
 
-def create_exam_result_notification(result):
+def create_exam_result_notification(result, commit=True):
     """考试成绩发布时给学生发送通知"""
     create_notification(
         user_id=result.student_id,
@@ -49,7 +55,8 @@ def create_exam_result_notification(result):
         content=f'您在「{result.exam.title}」中的成绩为 {result.score}/{result.total_score}。',
         type='success',
         related_type='result',
-        related_id=result.id
+        related_id=result.id,
+        commit=commit
     )
 
 def create_manual_grade_notification(exam_id):

@@ -1,7 +1,7 @@
 from flask import Blueprint, request, jsonify
 from utils.logger import logger, vue3_logger
 from utils.decorators import log_errors
-from utils.security import verify_token
+from utils.security import verify_token, limiter, RateLimitConfig
 import logging
 
 api_log_bp = Blueprint('api_log', __name__)
@@ -21,6 +21,7 @@ def _clean(value, max_len=_MAX_MSG_LEN):
 
 
 @api_log_bp.route('/logs', methods=['POST'])
+@limiter.limit(RateLimitConfig.LOG_REPORT)
 @log_errors
 def receive_frontend_log():
     if not verify_token():
@@ -43,6 +44,7 @@ def receive_frontend_log():
 
 
 @api_log_bp.route('/logs/vue', methods=['POST'])
+@limiter.limit(RateLimitConfig.LOG_REPORT)
 @log_errors
 def receive_vue_log():
     if not verify_token():

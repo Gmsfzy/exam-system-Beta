@@ -167,10 +167,15 @@ class Exam(db.Model):
     def generate_invitation_code(self):
         import random
         import string
-        code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
-        while Exam.query.filter_by(invitation_code=code).first():
-            code = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
-        self.invitation_code = code
+        # 8 位大写字母+数字（36^8 ≈ 2.82 万亿组合）；设最大重试次数防御性兜底，
+        # 避免极端情况下 while 查重无限循环（正常碰撞概率可忽略）
+        alphabet = string.ascii_uppercase + string.digits
+        for _ in range(10):
+            code = ''.join(random.choices(alphabet, k=8))
+            if not Exam.query.filter_by(invitation_code=code).first():
+                self.invitation_code = code
+                return
+        raise RuntimeError("邀请码生成连续 10 次碰撞，请重试")
 
     def generate_invitation_url(self, base_url):
         # Vue3 SPA 承接：学生仪表盘读取 ?join= 邀请码后调 /api/exam/join/<code> 加入

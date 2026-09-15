@@ -41,6 +41,5 @@ python-socketio==5.16.4
 simple-websocket==1.1.0
 websocket-client==1.9.2
 
-# ── 生产 WSGI 服务器（DEBUG=false 时使用；纯 Python，Windows/Linux 通用）──
 # 开发模式（FLASK_DEBUG=true）仍用 Werkzeug，不受影响
 waitress==3.0.2

@@ -8,6 +8,51 @@ from utils.logger import logger
 
 api_execution_bp = Blueprint('api_execution', __name__)
 
+
+def _finalize_submission(sess):
+    """交卷结算（手动交卷 / 切屏 3 次强制交卷共用）：
+    1. AI 批改（客观题本地比对 + 主观题 AI 语义，AI 失败降级 0 分待人工）；
+    2. 创建 Result 成绩记录（按 exam_id+student_id 幂等，flush 抢占防并发）；
+    3. 发送成绩通知；
+    4. 自动收录错题到错题本（非关键，异常不阻塞）。
+    返回 Result（成绩已存在时返回既有记录）。
+    """
+    from database.models import Result
+    from sqlalchemy import exc as sa_exc
+    from api.notification_routes import create_exam_result_notification
+    from api.learning_routes import sync_wrong_from_exam
+
+    existing = Result.query.filter_by(exam_id=sess.exam_id, student_id=sess.student_id).first()
+    if existing:
+        return existing
+
+    earned_score, total_score = ai_grade_exam(db.session, sess.id)
+
+    result = Result(
+        exam_id=sess.exam_id,
+        student_id=sess.student_id,
+        score=earned_score,
+        total_score=total_score,
+        submitted_at=sess.end_time or utcnow()
+    )
+    db.session.add(result)
+    try:
+        # flush 提前暴露唯一约束冲突（并发交卷竞态），冲突则放弃本次创建
+        db.session.flush()
+    except sa_exc.IntegrityError:
+        db.session.rollback()
+        return Result.query.filter_by(exam_id=sess.exam_id, student_id=sess.student_id).first()
+
+    create_exam_result_notification(result, commit=False)
+    db.session.commit()
+
+    # 自动收录错题（批改已提交、Answer.is_correct 已落库；非关键路径）
+    try:
+        sync_wrong_from_exam(sess.student_id, sess.exam_id)
+    except Exception:
+        logger.exception("错题自动收录失败（非关键）exam_id=%s", sess.exam_id)
+    return result
+
 @api_execution_bp.route('/exam/<int:exam_id>/start', methods=['POST'])
 def api_start_exam(exam_id):
     user = verify_token()
@@ -134,13 +179,7 @@ def api_submit_exam(exam_id):
     db.session.commit()
 
     try:
-        ai_grade_exam(db.session, session.id)
-        # 自动收录错题（AI 批改后 Answers 已有 is_correct）
-        try:
-            from api.learning_routes import sync_wrong_from_exam
-            sync_wrong_from_exam(user.id, exam_id)
-        except Exception:
-            logger.exception("错题自动收录失败（非关键）exam_id=%s", exam_id)
+        _finalize_submission(session)
         return jsonify({'message': '提交成功，正在批改...'})
     except Exception:
         logger.exception("AI 批改异常 session_id=%s", session.id)
@@ -160,11 +199,24 @@ def api_report_switch(exam_id):
     
     # 增加切屏次数
     session.switch_count = (session.switch_count or 0) + 1
+
+    # 切屏达到 3 次：服务端强制交卷并立即结算（本地判分，不等待后续提交）
+    force_submitted = session.switch_count >= 3
+    if force_submitted:
+        session.end_time = utcnow()
+        session.status = 'submitted'
     db.session.commit()
-    
+
+    if force_submitted:
+        try:
+            _finalize_submission(session)
+        except Exception:
+            logger.exception("切屏强制交卷批改异常 session_id=%s", session.id)
+
     return jsonify({
-        'message': '已记录',
-        'switch_count': session.switch_count
+        'message': '已记录' if not force_submitted else '切屏次数已达上限，系统已强制交卷',
+        'switch_count': session.switch_count,
+        'force_submitted': force_submitted
     })
 
 @api_execution_bp.route('/exam/join/<string:code>', methods=['POST'])

@@ -1,7 +1,6 @@
 from ai_service.client import AIClient
 from database.models import Question, Major, QuestionTypeEnum, DifficultyEnum
 from config import Config
-from database import db
 from utils.logger import logger
 import json
 import re
@@ -15,9 +14,13 @@ def clean_json_text(text: str) -> str:
     text = text.strip()
     return text
 
-def ai_generate_questions(db, major_id: int, question_type: str, difficulty: str, count: int = 5, description: str = None, course_id: int = None, source: str = 'ai'):
-    """使用AI生成题目并保存到数据库"""
-    major = db.get(Major, major_id)
+def ai_generate_questions(session, major_id: int, question_type: str, difficulty: str, count: int = 5, description: str = None, course_id: int = None, source: str = 'ai'):
+    """使用AI生成题目并保存到数据库。
+
+    session: SQLAlchemy Session（调用方传 db.session），统一用
+    session.get/add/commit，避免形参名 db 与实际语义不符。
+    """
+    major = session.get(Major, major_id)
     if not major:
         logger.error(f"Failed to generate questions: major {major_id} not found")
         raise ValueError("专业不存在")
@@ -45,9 +48,9 @@ def ai_generate_questions(db, major_id: int, question_type: str, difficulty: str
                         difficulty=difficulty,
                         source=source
                     )
-                    db.add(question)
+                    session.add(question)
                     questions.append(question)
-        db.commit()
+        session.commit()
         logger.info(f"Successfully generated {len(questions)} questions")
         return questions
     except json.JSONDecodeError as e:
@@ -57,15 +60,22 @@ def ai_generate_questions(db, major_id: int, question_type: str, difficulty: str
         logger.error(f"Error generating questions: {str(e)}", exc_info=True)
         raise
 
-def ai_grade_exam(db, exam_id: int, student_id: int):
-    """AI批改考试：客观题本地比对，主观题调AI并标记人工评分"""
+def ai_grade_exam(session, session_id: int):
+    """AI批改考试：客观题本地比对，主观题调AI并标记人工评分。
+
+    session: SQLAlchemy Session（调用方传 db.session）。
+    统一以 session_id 为唯一入参（v4.0 修复）：调用方均持有会话 ID，
+    exam_id/student_id 从会话内部获取，避免传参错配。
+    返回 (earned_score, total_score)，仅负责判分与写 Answer，不创建 Result。
+    """
     from database.models import ExamSession, Answer, ExamQuestion, Question
 
-    session = ExamSession.query.filter_by(exam_id=exam_id, student_id=student_id).first()
-    if not session:
+    exam_session = session.get(ExamSession, session_id)
+    if not exam_session:
         raise ValueError("考试会话不存在")
+    exam_id = exam_session.exam_id
 
-    answers = Answer.query.filter_by(session_id=session.id).all()
+    answers = Answer.query.filter_by(session_id=exam_session.id).all()
 
     total_score = 0
     earned_score = 0
@@ -73,7 +83,7 @@ def ai_grade_exam(db, exam_id: int, student_id: int):
 
     for answer in answers:
         exam_question = ExamQuestion.query.filter_by(exam_id=exam_id, question_id=answer.question_id).first()
-        question = db.get(Question, answer.question_id)
+        question = session.get(Question, answer.question_id)
 
         if not (exam_question and question):
             continue
@@ -116,13 +126,15 @@ def ai_grade_exam(db, exam_id: int, student_id: int):
         answer.score = exam_question.score if is_correct else 0
         earned_score += answer.score
 
-    db.commit()
+    session.commit()
     return earned_score, total_score
 
-def ai_generate_analysis(db, question_id: int, student_answer: str):
-    """生成单题解析"""
-    from database import db as _db
-    question = _db.session.get(Question, question_id)
+def ai_generate_analysis(session, question_id: int, student_answer: str):
+    """生成单题解析。
+
+    session: SQLAlchemy Session（调用方传 db.session）。
+    """
+    question = session.get(Question, question_id)
     if not question:
         raise ValueError("题目不存在")
 
