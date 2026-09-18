@@ -67,3 +67,6 @@ frontend/dist/
 # Trae/Agent 临时文件
 *.tmp
 _tmp_*
+
+# 文档文件
+存在隐患.md

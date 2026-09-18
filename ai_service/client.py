@@ -25,28 +25,21 @@ class AIClient:
         self.timeout = 60  # 超时60秒，AI生成多道题时可能较慢
         self.max_retries = 2  # 超时自动重试1次
 
+    DEFAULT_SYSTEM = "你是专业出题阅卷老师，只输出用户要求的标准JSON，不要多余文字、标题、注释、换行说明"
+
     def _clean_json_text(self, raw_text: str) -> str:
-        """清洗AI返回文本，剔除markdown、多余换行、外层包装，只保留标准JSON数组"""
+        """清洗AI返回文本，剔除markdown、多余换行、外层包装，只保留最外层JSON（对象或数组）"""
         # 移除```json 代码块标记
         raw_text = re.sub(r'```(json)?', '', raw_text)
         raw_text = raw_text.strip()
-        # 匹配最外层[]，只提取数组内容，兼容AI额外套对象的情况
-        match_res = re.search(r'\[.*\]', raw_text, re.S)
+        # 匹配最外层 {} 或 []：左到右扫描，先遇 [ 取数组、先遇 { 取对象，兼容AI额外套文字的情况
+        match_res = re.search(r'\{.*\}|\[.*\]', raw_text, re.S)
         if match_res:
             return match_res.group()
         return raw_text
 
-    def _send_ark_request(self, prompt: str, temp: float = 0.7, max_tok: int = 2000) -> str:
-        """通用火山方舟请求封装，复用逻辑，统一捕获异常"""
-        payload = {
-            "model": self.model_ep_id,
-            "messages": [
-                {"role": "system", "content": "你是专业出题阅卷老师，只输出用户要求的标准JSON，不要多余文字、标题、注释、换行说明"},
-                {"role": "user", "content": prompt.strip()}
-            ],
-            "temperature": temp,
-            "max_tokens": max_tok
-        }
+    def _post_ark(self, payload: dict) -> str:
+        """发送火山方舟请求（含超时重试），返回模型原始回复文本"""
         last_err = None
         for attempt in range(1, self.max_retries + 1):
             try:
@@ -60,12 +53,9 @@ class AIClient:
                 )
                 logger.info(f"API状态码: {resp.status_code}")
                 resp.raise_for_status()  # 4xx/5xx直接抛异常
-                resp_data = resp.json()
-                raw_content = resp_data["choices"][0]["message"]["content"]
+                raw_content = resp.json()["choices"][0]["message"]["content"]
                 logger.info(f"AI原始返回文本:\n{raw_content}")
-                clean_content = self._clean_json_text(raw_content)
-                logger.info(f"清洗后JSON字符串:\n{clean_content}")
-                return clean_content
+                return raw_content
             except requests.exceptions.Timeout as e:
                 last_err = e
                 logger.warning(f"第{attempt}次请求超时: {str(e)}")
@@ -82,6 +72,39 @@ class AIClient:
                 raise Exception(err_msg)
         # 所有重试都超时
         raise Exception(f"网络请求失败（重试{self.max_retries}次均超时）: {str(last_err)}")
+
+    def _send_ark_request(self, prompt: str, temp: float = 0.7, max_tok: int = 2000,
+                          system: str = None, clean_json: bool = True) -> str:
+        """通用单轮请求封装：system 可自定义，clean_json 控制是否提取JSON"""
+        payload = {
+            "model": self.model_ep_id,
+            "messages": [
+                {"role": "system", "content": (system or self.DEFAULT_SYSTEM).strip()},
+                {"role": "user", "content": prompt.strip()}
+            ],
+            "temperature": temp,
+            "max_tokens": max_tok
+        }
+        raw_content = self._post_ark(payload)
+        if not clean_json:
+            return raw_content.strip()
+        clean_content = self._clean_json_text(raw_content)
+        logger.info(f"清洗后JSON字符串:\n{clean_content}")
+        return clean_content
+
+    def generate_json(self, system: str, prompt: str, temp: float = 0.5, max_tok: int = 4000) -> str:
+        """通用JSON生成：自定义system角色，返回清洗后的标准JSON字符串（对象或数组）"""
+        return self._send_ark_request(prompt, temp=temp, max_tok=max_tok, system=system, clean_json=True)
+
+    def chat(self, messages: list, temp: float = 0.6, max_tok: int = 1500) -> str:
+        """多轮对话：messages=[{role, content}]（含system），返回纯文本回复（不做JSON清洗）"""
+        payload = {
+            "model": self.model_ep_id,
+            "messages": messages,
+            "temperature": temp,
+            "max_tokens": max_tok
+        }
+        return self._post_ark(payload).strip()
 
     def generate_question(self, major: str, question_type: str, difficulty: str, count: int = 5, description: str = None, source: str = 'ai'):
         """AI批量生成考试题目，返回可直接loads的纯JSON数组字符串"""

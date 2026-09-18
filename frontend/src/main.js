@@ -1,6 +1,7 @@
 import { createApp } from 'vue'
 import { createPinia } from 'pinia'
 import ElementPlus from 'element-plus'
+import zhCn from 'element-plus/es/locale/lang/zh-cn'
 import 'element-plus/dist/index.css'
 import * as ElementPlusIconsVue from '@element-plus/icons-vue'
 import { library } from '@fortawesome/fontawesome-svg-core'
@@ -24,7 +25,7 @@ app.component('FontAwesomeIcon', FontAwesomeIcon)
 
 app.use(pinia)
 app.use(router)
-app.use(ElementPlus)
+app.use(ElementPlus, { locale: zhCn })
 
 import { useThemeStore } from './stores/theme'
 const theme = useThemeStore()

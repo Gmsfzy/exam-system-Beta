@@ -113,6 +113,9 @@
         <el-button @click="aiDialogVisible = false">关闭</el-button>
       </template>
     </el-dialog>
+
+    <!-- AI 学习助手 -->
+    <AIChatDialog :context="aiContext" :suggestions="aiSuggestions" />
   </div>
 </template>
 
@@ -122,6 +125,7 @@ import { useRouter } from 'vue-router'
 import request from '../utils/request'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Loading } from '@element-plus/icons-vue'
+import AIChatDialog from '../components/AIChatDialog.vue'
 
 const router = useRouter()
 
@@ -135,6 +139,28 @@ const filterSource = ref('')
 
 const unmastered = computed(() => records.value.filter(r => !r.is_mastered).length)
 const mastered = computed(() => records.value.filter(r => r.is_mastered).length)
+
+// ── AI 助手上下文：附上当前页错题的薄弱知识点分布 ──
+const aiContext = computed(() => {
+  const kn = {}
+  records.value.forEach(r => {
+    if (!r.is_mastered && r.knowledge) {
+      String(r.knowledge).split(/[,，]/).forEach(k => {
+        const key = k.trim()
+        if (key) kn[key] = (kn[key] || 0) + 1
+      })
+    }
+  })
+  const topK = Object.entries(kn).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([k, c]) => `${k}(${c}题)`).join('、')
+  return `学生在「错题本」页查看错题，共 ${total.value} 道错题，当前页未掌握 ${unmastered.value} 道、已掌握 ${mastered.value} 道` +
+    (topK ? `，未掌握题目涉及的高频知识点：${topK}` : '') +
+    '。希望 AI 帮忙分析错因、总结薄弱点并给出补救建议。'
+})
+const aiSuggestions = [
+  '帮我分析这些错题的常见错因',
+  '我的薄弱知识点怎么针对性补强？',
+  '错题本应该怎么高效复盘？',
+]
 
 async function load() {
   loading.value = true

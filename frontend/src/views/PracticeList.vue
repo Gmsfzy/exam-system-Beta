@@ -44,14 +44,18 @@
       </div>
       <div class="h-time">{{ s.start_time }}</div>
     </div>
+
+    <!-- AI 学习助手 -->
+    <AIChatDialog :context="aiContext" :suggestions="aiSuggestions" />
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import request from '../utils/request'
 import { ElMessage } from 'element-plus'
+import AIChatDialog from '../components/AIChatDialog.vue'
 
 const router = useRouter()
 const filter = ref({ major_id: null, course_id: null, chapter_id: null, count: 10, title: '' })
@@ -60,6 +64,22 @@ const courses = ref([])
 const chapters = ref([])
 const history = ref([])
 const loading = ref(false)
+
+// ── AI 助手上下文 ──
+const aiContext = computed(() => {
+  const done = history.value.filter(s => s.status === 'completed')
+  const avgRate = done.length
+    ? (done.reduce((acc, s) => acc + (s.score_ratio || 0), 0) / done.length * 100).toFixed(1)
+    : null
+  return `学生在「自由刷题」页准备练习${filter.value.count}道题，最近练习 ${history.value.length} 次` +
+    (avgRate ? `，已完成练习的平均正确率 ${avgRate}%` : '') +
+    '。正在选题练习，希望获得刷题策略和薄弱项建议。'
+})
+const aiSuggestions = [
+  '怎么安排每天的刷题量？',
+  '正确率低应该怎么提升？',
+  '刷题和错题复盘哪个更重要？',
+]
 
 async function loadMajors() {
   try { const res = await request.get('/api/majors'); majors.value = res.data || [] } catch (e) {}

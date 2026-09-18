@@ -9,12 +9,11 @@ api_chapter_bp = Blueprint('api_chapter', __name__)
 
 @api_chapter_bp.route('/chapters', methods=['GET'])
 def get_chapters():
+    # 全民学习：章节为公共目录数据，登录即可读（原教师-only 导致学生侧章节筛选恒空）
     user = verify_token()
     if not user:
         return jsonify({'error': '未登录'}), 401
-    if not user.is_teacher():
-        return jsonify({'error': '无权访问'}), 403
-    
+
     course_id = request.args.get('course_id')
     if not course_id:
         return jsonify({'error': '缺少course_id参数'}), 400
@@ -80,12 +79,11 @@ def create_chapter():
 
 @api_chapter_bp.route('/chapters/<int:chapter_id>', methods=['GET'])
 def get_chapter(chapter_id):
+    # 全民学习：登录即可读
     user = verify_token()
     if not user:
         return jsonify({'error': '未登录'}), 401
-    if not user.is_teacher():
-        return jsonify({'error': '无权访问'}), 403
-    
+
     chapter = db.session.get(Chapter, chapter_id)
     if not chapter:
         return jsonify({'error': '章节不存在'}), 404

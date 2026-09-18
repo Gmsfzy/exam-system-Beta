@@ -88,12 +88,16 @@
         </tbody>
       </table>
     </div>
+
+    <!-- AI 学习助手 -->
+    <AIChatDialog :context="aiContext" :suggestions="aiSuggestions" />
   </div>
 </template>
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import request from '../utils/request'
+import AIChatDialog from '../components/AIChatDialog.vue'
 
 const overview = ref({
   period_days: 30, total_questions: 0, correct_count: 0, score_ratio: 0,
@@ -103,6 +107,22 @@ const overview = ref({
 })
 const dailyLogs = ref([])
 const loading = ref(false)
+
+// ── AI 助手上下文：注入 30 天报告核心指标 ──
+const aiContext = computed(() => {
+  const o = overview.value
+  const rate = o.total_questions ? (o.correct_count / o.total_questions * 100).toFixed(1) : null
+  const hours = o.total_time_sec ? (o.total_time_sec / 3600).toFixed(1) : 0
+  return `学生在「学习报告」页查看近 ${o.period_days} 天学情：练习/考试共 ${o.total_questions} 题` +
+    (rate ? `，正确率 ${rate}%` : '') + `，学习 ${hours} 小时，共 ${o.sessions_count} 次学习记录，` +
+    `错题 ${o.wrong_total} 道（未掌握 ${o.wrong_unmastered} 道），进行中的学习计划 ${o.active_plans} 个。` +
+    '希望 AI 解读这份报告并给出下阶段学习建议。'
+})
+const aiSuggestions = [
+  '帮我解读最近 30 天的学习报告',
+  '下阶段我应该重点提升什么？',
+  '帮我制定一个每日学习安排',
+]
 
 const dailyArray = computed(() => {
   const d = overview.value.daily || {}

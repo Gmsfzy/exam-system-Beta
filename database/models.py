@@ -327,12 +327,12 @@ class PracticeAnswer(db.Model):
 
 
 class StudyPlan(db.Model):
-    """学习计划：按专业/章节设定目标题数与完成进度"""
+    """学习计划：由多个具体任务条目组成（学知识点/看资源/刷题/自定义），勾选打卡推进"""
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     title = db.Column(db.String(100), nullable=False)
     description = db.Column(db.Text)
-    target_count = db.Column(db.Integer, nullable=False, default=50)  # 目标练习题数
+    target_count = db.Column(db.Integer, nullable=False, default=50)  # 旧题量式字段，保留兼容（任务清单式下不再使用）
     completed_count = db.Column(db.Integer, nullable=False, default=0)
     major_id = db.Column(db.Integer, db.ForeignKey('major.id'))
     course_id = db.Column(db.Integer, db.ForeignKey('course.id'))
@@ -343,6 +343,32 @@ class StudyPlan(db.Model):
     created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
 
     user = db.relationship('User', backref='study_plans', lazy=True)
+    tasks = db.relationship('StudyPlanTask', backref='plan', lazy=True,
+                            cascade='all, delete-orphan', order_by='StudyPlanTask.order_num, StudyPlanTask.id')
+
+
+class StudyPlanTask(db.Model):
+    """学习计划任务条目：计划的最小执行单元，可勾选打卡"""
+    id = db.Column(db.Integer, primary_key=True)
+    plan_id = db.Column(db.Integer, db.ForeignKey('study_plan.id'), nullable=False)
+    title = db.Column(db.String(200), nullable=False)
+    task_type = db.Column(db.String(20), nullable=False, default='custom')
+    # knowledge_point=学知识点 / resource=看资源 / practice=刷题 / custom=自定义
+    knowledge_point_id = db.Column(db.Integer, db.ForeignKey('knowledge_point.id'))
+    resource_id = db.Column(db.Integer, db.ForeignKey('learning_resource.id'))
+    question_count = db.Column(db.Integer)               # 建议刷题数（practice 型）
+    estimated_minutes = db.Column(db.Integer)            # 预计时长
+    status = db.Column(db.String(20), nullable=False, default='pending')  # pending/done
+    done_at = db.Column(UTCDateTime)
+    order_num = db.Column(db.Integer, default=0)
+    created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
+
+    __table_args__ = (
+        db.Index('ix_plan_task_plan', 'plan_id'),
+    )
+
+    knowledge_point = db.relationship('KnowledgePoint')
+    resource = db.relationship('LearningResource')
 
 
 class StudyLog(db.Model):
@@ -358,3 +384,164 @@ class StudyLog(db.Model):
     studied_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
 
     user = db.relationship('User', backref='study_logs', lazy=True)
+
+
+# ── 专业学习路径 + 知识图谱 ──────────────────────────────────────────
+
+# 题目-知识点 多对多关联表（新功能主数据源；Question.knowledge 旧字符串字段保留只读兜底）
+question_knowledge_point = db.Table(
+    'question_knowledge_point',
+    db.Column('question_id', db.Integer, db.ForeignKey('question.id'), primary_key=True),
+    db.Column('knowledge_point_id', db.Integer, db.ForeignKey('knowledge_point.id'), primary_key=True),
+)
+
+
+class KnowledgePoint(db.Model):
+    """知识点：结构化实体，挂到章节下，替代逗号分隔字符串作为知识点主数据源"""
+    id = db.Column(db.Integer, primary_key=True)
+    chapter_id = db.Column(db.Integer, db.ForeignKey('chapter.id'), nullable=False)
+    name = db.Column(db.String(80), nullable=False)
+    description = db.Column(db.Text)
+    order_num = db.Column(db.Integer, default=0)          # 章内顺序
+    difficulty = db.Column(db.String(20), nullable=False, default='easy')  # easy/medium/hard
+    status = db.Column(db.String(20), nullable=False, default='active')    # active/deprecated（软删）
+    created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
+
+    __table_args__ = (
+        db.UniqueConstraint('chapter_id', 'name', name='_chapter_kp_uc'),
+        db.Index('ix_kp_chapter', 'chapter_id'),
+        db.Index('ix_kp_name', 'name'),
+    )
+
+    chapter = db.relationship('Chapter', backref='knowledge_points')
+    questions = db.relationship('Question', secondary=question_knowledge_point,
+                                backref='knowledge_points', lazy=True)
+
+
+class KnowledgeEdge(db.Model):
+    """知识点关系边：prerequisite 前置依赖 / related 关联 / derived 衍生"""
+    id = db.Column(db.Integer, primary_key=True)
+    source_id = db.Column(db.Integer, db.ForeignKey('knowledge_point.id'), nullable=False)  # 前置/源
+    target_id = db.Column(db.Integer, db.ForeignKey('knowledge_point.id'), nullable=False)  # 后继/目标
+    relation_type = db.Column(db.String(20), nullable=False, default='prerequisite')
+    weight = db.Column(db.Float, default=1.0)             # 关联强度，预留推荐用
+    created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
+
+    __table_args__ = (
+        db.UniqueConstraint('source_id', 'target_id', 'relation_type', name='_edge_uc'),
+        db.Index('ix_edge_source', 'source_id'),
+        db.Index('ix_edge_target', 'target_id'),
+    )
+
+    source = db.relationship('KnowledgePoint', foreign_keys=[source_id])
+    target = db.relationship('KnowledgePoint', foreign_keys=[target_id])
+
+
+class LearningPath(db.Model):
+    """专业学习路径：学习者为自己规划的结构化学习路线（个人学习计划：目标+周期+节点）"""
+    id = db.Column(db.Integer, primary_key=True)
+    major_id = db.Column(db.Integer, db.ForeignKey('major.id'), nullable=False)
+    title = db.Column(db.String(100), nullable=False)
+    description = db.Column(db.Text)
+    learning_goal = db.Column(db.Text)                   # 学习目标：学完后希望达到什么程度
+    start_date = db.Column(db.Date)                      # 计划开始日期
+    target_end_date = db.Column(db.Date)                 # 计划完成日期
+    target_hours = db.Column(db.Integer)                  # 预计总学时
+    difficulty = db.Column(db.String(20), default='medium')
+    version = db.Column(db.String(20), nullable=False, default='v1')
+    status = db.Column(db.String(20), nullable=False, default='draft')  # draft/published/archived
+    creator_id = db.Column(db.Integer, db.ForeignKey('user.id'))
+    created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
+    updated_at = db.Column(UTCDateTime, default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (
+        db.UniqueConstraint('major_id', 'title', 'version', name='_path_uc'),
+        db.Index('ix_path_major_status', 'major_id', 'status'),
+    )
+
+    creator = db.relationship('User')
+    major = db.relationship('Major', backref='learning_paths')
+    nodes = db.relationship('LearningPathNode', backref='path', lazy=True,
+                            cascade='all, delete-orphan', order_by='LearningPathNode.order_num')
+
+
+class LearningPathNode(db.Model):
+    """路径节点：路径中的一个学习步骤，挂知识点或章节（二选一）"""
+    id = db.Column(db.Integer, primary_key=True)
+    path_id = db.Column(db.Integer, db.ForeignKey('learning_path.id'), nullable=False)
+    node_type = db.Column(db.String(20), nullable=False, default='knowledge_point')  # knowledge_point/chapter
+    knowledge_point_id = db.Column(db.Integer, db.ForeignKey('knowledge_point.id'))
+    chapter_id = db.Column(db.Integer, db.ForeignKey('chapter.id'))
+    order_num = db.Column(db.Integer, nullable=False, default=0)
+    role = db.Column(db.String(20), nullable=False, default='core')  # core/elective/review
+    estimated_minutes = db.Column(db.Integer, default=30)
+
+    __table_args__ = (
+        # 知识点与章节至少挂一个
+        db.CheckConstraint('(knowledge_point_id IS NOT NULL) OR (chapter_id IS NOT NULL)',
+                           name='_node_ref_check'),
+        # 同一路径内顺序号唯一（重排序时先置负数临时值再落最终值）
+        db.UniqueConstraint('path_id', 'order_num', name='_path_node_order_uc'),
+        db.Index('ix_path_node_path', 'path_id'),
+    )
+
+    knowledge_point = db.relationship('KnowledgePoint')
+    chapter = db.relationship('Chapter')
+
+
+class UserPathEnrollment(db.Model):
+    """用户选课：用户加入某条学习路径"""
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    path_id = db.Column(db.Integer, db.ForeignKey('learning_path.id'), nullable=False)
+    enrolled_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
+    status = db.Column(db.String(20), nullable=False, default='active')  # active/completed/abandoned
+    current_node_id = db.Column(db.Integer, db.ForeignKey('learning_path_node.id'))
+    completed_count = db.Column(db.Integer, default=0)
+    total_count = db.Column(db.Integer, default=0)        # 入学时节点总数快照
+    completed_at = db.Column(UTCDateTime)
+
+    __table_args__ = (
+        db.UniqueConstraint('user_id', 'path_id', name='_enroll_uc'),
+        db.Index('ix_enroll_user', 'user_id'),
+    )
+
+    user = db.relationship('User', backref='path_enrollments')
+    path = db.relationship('LearningPath', backref='enrollments')
+    current_node = db.relationship('LearningPathNode')
+
+
+class UserNodeProgress(db.Model):
+    """用户节点进度：用户在路径节点上的学习状态（同 user+node 仅一条）"""
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    path_id = db.Column(db.Integer, db.ForeignKey('learning_path.id'), nullable=False)  # 冗余便于按路径聚合
+    node_id = db.Column(db.Integer, db.ForeignKey('learning_path_node.id'), nullable=False)
+    status = db.Column(db.String(20), nullable=False, default='not_started')  # not_started/in_progress/mastered/skipped
+    started_at = db.Column(UTCDateTime)
+    mastered_at = db.Column(UTCDateTime)
+    time_spent_sec = db.Column(db.Integer, default=0)
+    attempts_count = db.Column(db.Integer, default=0)
+
+    __table_args__ = (
+        db.UniqueConstraint('user_id', 'node_id', name='_user_node_uc'),
+        db.Index('ix_unp_user_path', 'user_id', 'path_id'),
+    )
+
+    node = db.relationship('LearningPathNode', backref='user_progress')
+
+
+class LearningResource(db.Model):
+    """学习资源：挂在知识点或章节下的学习材料（文本/视频/练习/外链）"""
+    id = db.Column(db.Integer, primary_key=True)
+    title = db.Column(db.String(120), nullable=False)
+    type = db.Column(db.String(20), nullable=False, default='text')  # text/video/exercise/external_link
+    content = db.Column(db.Text)                          # 文本内容/嵌入代码
+    url = db.Column(db.String(500))                       # 视频/外链地址
+    knowledge_point_id = db.Column(db.Integer, db.ForeignKey('knowledge_point.id'))
+    chapter_id = db.Column(db.Integer, db.ForeignKey('chapter.id'))
+    creator_id = db.Column(db.Integer, db.ForeignKey('user.id'))
+    order_num = db.Column(db.Integer, default=0)
+    created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
+
+    knowledge_point = db.relationship('KnowledgePoint', backref='resources')

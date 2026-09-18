@@ -2,7 +2,7 @@
   <div class="learning-home">
     <div class="page-header">
       <h1 class="page-title">自我学习</h1>
-      <p class="page-subtitle">错题回顾 · 自由刷题 · 目标规划 · 数据分析</p>
+      <p class="page-subtitle">专业路径 · 知识图谱 · 错题回顾 · 自由刷题</p>
     </div>
 
     <!-- 概览卡片 -->
@@ -47,6 +47,22 @@
 
     <!-- 功能模块卡片 -->
     <div class="module-grid">
+      <div class="module-card" @click="$router.push('/learning/paths')">
+        <div class="module-icon" style="background: linear-gradient(135deg, #06b6d4 0%, #0891b2 100%)">
+          <el-icon :size="28" color="white"><School /></el-icon>
+        </div>
+        <h3>专业路径</h3>
+        <p>为自己规划学习目标与周期，按结构化节点一步步学完</p>
+        <span class="module-action">进入 →</span>
+      </div>
+      <div class="module-card" @click="$router.push('/learning/graph')">
+        <div class="module-icon" style="background: linear-gradient(135deg, #3b82f6 0%, #8b5cf6 100%)">
+          <el-icon :size="28" color="white"><Connection /></el-icon>
+        </div>
+        <h3>知识图谱</h3>
+        <p>全景可视化知识点关系，理清前置依赖再学习</p>
+        <span class="module-action">进入 →</span>
+      </div>
       <div class="module-card" @click="$router.push('/learning/wrong')">
         <div class="module-icon" style="background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%)">
           <el-icon :size="28" color="white"><CollectionTag /></el-icon>

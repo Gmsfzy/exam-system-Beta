@@ -1,5 +1,9 @@
 from ai_service.client import AIClient
-from database.models import Question, Major, QuestionTypeEnum, DifficultyEnum
+from database.models import (
+    Question, Major, QuestionTypeEnum, DifficultyEnum,
+    Chapter, KnowledgePoint, KnowledgeEdge,
+    LearningPath, LearningPathNode,
+)
 from config import Config
 from utils.logger import logger
 import json
@@ -141,3 +145,170 @@ def ai_generate_analysis(session, question_id: int, student_answer: str):
     result = ai_client.generate_analysis(question.content, question.answer, student_answer)
 
     return result
+
+
+# ── 三期：AI 生成路径骨架 / AI 学习助手对话 ──────────────────────────
+
+_EDGE_RELATIONS = ('prerequisite', 'related', 'derived')
+
+
+def ai_generate_path_skeleton(session, major_id: int, title: str, chapter_ids: list,
+                              description: str = None, estimated_minutes: int = 30,
+                              creator_id: int = None, learning_goal: str = None,
+                              start_date=None, target_end_date=None):
+    """AI 生成学习路径骨架：按章节拆解知识点 + 依赖边 + 推荐顺序，落库为草稿路径。
+
+    session: SQLAlchemy Session（调用方传 db.session）。
+    返回 (path, stats)：stats 含 kp_created/kp_existing/edges_created/nodes_created。
+    知识点按 (chapter_id, name) 幂等 upsert：已存在直接复用，不重复创建。
+    """
+    major = session.get(Major, major_id)
+    if not major:
+        raise ValueError("专业不存在")
+    chapters = [c for c in (session.get(Chapter, cid) for cid in chapter_ids) if c]
+    if not chapters:
+        raise ValueError("请至少选择一个有效章节")
+
+    chapter_brief = "\n".join(
+        f"{i}. 章节「{ch.name}」（所属课程：{ch.course.name if ch.course else '未知'}）"
+        for i, ch in enumerate(chapters, 1)
+    )
+    prompt = f"""请为{major.name}专业设计一条学习路径的知识骨架，覆盖以下章节：
+{chapter_brief}
+
+要求：
+1. 每个章节拆解 3~6 个核心知识点，知识点名称在整条路径内必须唯一、简洁（不超过20字）
+2. 标注知识点难度（easy/medium/hard）、章内顺序 order_num（从1开始）、所属章节下标 chapter_index（从0开始，对应上面章节编号-1）
+3. 给出知识点之间的依赖关系边，relation_type 只能是 prerequisite（先学）/ related（关联）/ derived（衍生）
+4. 给出推荐学习顺序 node_order：按学习先后排列的知识点名称列表
+5. description 用一句话说明该知识点学什么
+
+仅输出标准 JSON 对象，禁止任何多余文字、markdown、注释：
+{{
+    "knowledge_points": [
+        {{"name": "知识点名", "description": "一句话说明", "difficulty": "easy", "chapter_index": 0, "order_num": 1}}
+    ],
+    "edges": [
+        {{"source_name": "前置知识点名", "target_name": "后继知识点名", "relation_type": "prerequisite"}}
+    ],
+    "node_order": ["知识点名1", "知识点名2"]
+}}"""
+
+    system = "你是课程设计专家，只输出标准JSON，不要多余文字、标题、注释、换行说明"
+    logger.info(f"AI generating path skeleton for major {major.name}, chapters={chapter_ids}")
+    try:
+        raw = ai_client.generate_json(system, prompt, temp=0.5, max_tok=4000)
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        logger.error(f"AI path skeleton returned invalid JSON: {str(e)}", exc_info=True)
+        raise Exception("AI返回内容不是有效JSON，请重试")
+    except Exception:
+        logger.exception("AI 生成路径骨架失败")
+        raise
+
+    if not isinstance(data, dict):
+        raise Exception("AI返回结构不符合预期，请重试")
+
+    # 1) 知识点幂等 upsert：按 (chapter_id, name) 查重，存在复用、不存在新建
+    name_to_kp = {}
+    stats = {'kp_created': 0, 'kp_existing': 0, 'edges_created': 0, 'nodes_created': 0}
+    for item in data.get('knowledge_points') or []:
+        name = str(item.get('name') or '').strip()[:80]
+        if not name:
+            continue
+        idx = item.get('chapter_index')
+        chapter = chapters[idx] if isinstance(idx, int) and 0 <= idx < len(chapters) else chapters[0]
+        difficulty = item.get('difficulty') if item.get('difficulty') in ('easy', 'medium', 'hard') else 'easy'
+        try:
+            order_num = max(0, int(item.get('order_num') or 0))
+        except (TypeError, ValueError):
+            order_num = 0
+        kp = KnowledgePoint.query.filter_by(chapter_id=chapter.id, name=name).first()
+        if kp:
+            stats['kp_existing'] += 1
+        else:
+            kp = KnowledgePoint(
+                chapter_id=chapter.id, name=name,
+                description=(str(item.get('description') or '').strip() or None),
+                order_num=order_num, difficulty=difficulty,
+            )
+            session.add(kp)
+            session.flush()  # 立即拿 id，供建边与建节点使用
+            stats['kp_created'] += 1
+        name_to_kp[name] = kp
+
+    # 2) 依赖边：名称映射回 id，跳过缺失/自环/重复
+    for e in data.get('edges') or []:
+        src = name_to_kp.get(str(e.get('source_name') or '').strip())
+        dst = name_to_kp.get(str(e.get('target_name') or '').strip())
+        if not src or not dst or src.id == dst.id:
+            continue
+        relation = e.get('relation_type') if e.get('relation_type') in _EDGE_RELATIONS else 'related'
+        exists = KnowledgeEdge.query.filter_by(
+            source_id=src.id, target_id=dst.id, relation_type=relation).first()
+        if exists:
+            continue
+        session.add(KnowledgeEdge(source_id=src.id, target_id=dst.id, relation_type=relation, weight=1.0))
+        stats['edges_created'] += 1
+
+    # 3) 创建草稿路径：同 major+title 撞唯一约束时自动升版本
+    version = 'v1'
+    while session.query(LearningPath.id).filter_by(
+            major_id=major_id, title=title, version=version).first():
+        num = int(version[1:]) + 1
+        version = f'v{num}'
+    path = LearningPath(
+        major_id=major_id, title=title, description=description,
+        learning_goal=learning_goal,
+        start_date=start_date, target_end_date=target_end_date,
+        difficulty='medium', version=version, creator_id=creator_id,
+    )
+
+    # 4) 按 node_order 生成节点序列；node_order 缺失时按创建顺序兜底
+    ordered_names = [str(n).strip() for n in (data.get('node_order') or [])]
+    ordered_kps = [name_to_kp[n] for n in ordered_names if n in name_to_kp]
+    for name, kp in name_to_kp.items():
+        if kp not in ordered_kps:
+            ordered_kps.append(kp)
+
+    session.add(path)
+    session.flush()
+    for i, kp in enumerate(ordered_kps, 1):
+        session.add(LearningPathNode(
+            path_id=path.id, node_type='knowledge_point',
+            knowledge_point_id=kp.id, chapter_id=kp.chapter_id,
+            order_num=i, role='core', estimated_minutes=estimated_minutes,
+        ))
+        stats['nodes_created'] += 1
+
+    session.commit()
+    logger.info(f"Path skeleton created: path={path.id}, stats={stats}")
+    return path, stats
+
+
+def ai_chat_reply(session, messages: list, context: str = None):
+    """AI 学习助手多轮对话（服务端无状态，历史由前端持有）。
+
+    session: SQLAlchemy Session（调用方传 db.session，本函数不直接读写库）。
+    messages: [{'role': 'user'|'assistant', 'content': str}]，服务端截取最近12条防超长。
+    context: 页面背景摘要（前端按所在页面拼接），注入 system 提升建议针对性。
+    返回纯文本回复。
+    """
+    system = (
+        "你是「智汇学场」学习平台的 AI 学习助手，擅长讲解知识点、分析错题错因、"
+        "规划学习路径和给出复习建议。要求：用简体中文回答；友好耐心、结构清晰（可分点）；"
+        "控制在300字以内；只讨论与学习相关的话题，拒绝提供任何考试作弊帮助。"
+    )
+    if context:
+        system += f"\n学生当前所在的页面背景：{context}"
+
+    cleaned = [
+        {'role': m['role'], 'content': str(m.get('content') or '').strip()}
+        for m in messages
+        if isinstance(m, dict) and m.get('role') in ('user', 'assistant')
+        and str(m.get('content') or '').strip()
+    ][-12:]
+    if not cleaned:
+        raise ValueError("对话内容为空")
+
+    return ai_client.chat([{'role': 'system', 'content': system}] + cleaned)

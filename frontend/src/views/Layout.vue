@@ -6,7 +6,7 @@
           <div class="brand-icon">
             <el-icon :size="28"><School /></el-icon>
           </div>
-          <span v-if="!isCollapsed" class="brand-text">考试系统</span>
+          <span v-if="!isCollapsed" class="brand-text">{{ brandName }}</span>
         </div>
         <el-button
           class="collapse-btn"
@@ -161,7 +161,7 @@ import {
   SwitchButton, ArrowDown, School, Fold, Expand, Grid,
   Star, Calendar, VideoPlay, TrendCharts, Medal, Trophy, Lightning,
   Sunny, Moon, Check, Warning, InfoFilled,
-  Money, EditPen, Tickets, Close, Reading
+  Money, EditPen, Tickets, Close, Reading, Connection
 } from '@element-plus/icons-vue'
 
 const route = useRoute()
@@ -358,7 +358,7 @@ const iconMap = {
   Document, Collection, HomeFilled, Bell, User, Setting,
   SwitchButton, ArrowDown, School, Fold, Expand, Grid,
   Star, Calendar, VideoPlay, TrendCharts, Medal, Trophy, Lightning,
-  Money, EditPen, Tickets, Reading
+  Money, EditPen, Tickets, Reading, Connection
 }
 
 // 按模块分组的菜单：与路由 meta.module 对应，新增模块只需在此加分组
@@ -406,6 +406,8 @@ const moduleMenus = {
   learning: {
     teacher: [
       { path: '/learning', label: '学习首页', icon: iconMap.Reading },
+      { path: '/learning/paths', label: '专业路径', icon: iconMap.School },
+      { path: '/learning/graph', label: '知识图谱', icon: iconMap.Connection },
       { path: '/learning/wrong', label: '错题本', icon: iconMap.Document },
       { path: '/learning/practice', label: '自由刷题', icon: iconMap.EditPen },
       { path: '/learning/plan', label: '学习计划', icon: iconMap.Star },
@@ -413,6 +415,8 @@ const moduleMenus = {
     ],
     student: [
       { path: '/learning', label: '学习首页', icon: iconMap.Reading },
+      { path: '/learning/paths', label: '专业路径', icon: iconMap.School },
+      { path: '/learning/graph', label: '知识图谱', icon: iconMap.Connection },
       { path: '/learning/wrong', label: '错题本', icon: iconMap.Document },
       { path: '/learning/practice', label: '自由刷题', icon: iconMap.EditPen },
       { path: '/learning/plan', label: '学习计划', icon: iconMap.Star },
@@ -422,6 +426,15 @@ const moduleMenus = {
 }
 
 const currentModule = computed(() => route.meta?.module || 'exam')
+
+// 侧边栏品牌名随当前模块动态切换（与 Portal 模块卡片命名一致）
+const moduleBrandNames = {
+  exam: '在线考试',
+  competition: '答题竞赛',
+  bounty: '征集悬赏',
+  learning: '自我学习'
+}
+const brandName = computed(() => moduleBrandNames[currentModule.value] || '智汇学场')
 
 const menuItems = computed(() => {
   const role = auth.user?.role === 'teacher' ? 'teacher' : 'student'
