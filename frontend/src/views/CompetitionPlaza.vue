@@ -11,6 +11,13 @@
       </el-button>
     </div>
 
+    <div class="code-join">
+      <el-input v-model="joinCode" placeholder="输入邀请码报名受限竞赛" clearable style="max-width: 260px" @keyup.enter="joinByCode">
+        <template #prefix><el-icon><Key /></el-icon></template>
+      </el-input>
+      <el-button type="primary" plain :loading="joining" @click="joinByCode">邀请码报名</el-button>
+    </div>
+
     <div v-if="loading" class="loading-box">
       <el-skeleton :rows="4" animated />
     </div>
@@ -54,6 +61,24 @@
         </div>
       </div>
     </div>
+
+    <!-- 系列赛分区 -->
+    <div v-if="seriesList.length" class="series-section">
+      <div class="series-head">
+        <h3><el-icon :size="18"><Connection /></el-icon> 多轮系列赛</h3>
+        <el-button text type="primary" @click="router.push('/competitions/series')">查看全部 ›</el-button>
+      </div>
+      <div class="series-strip">
+        <div v-for="s in seriesList" :key="s.id" class="series-chip" @click="router.push('/competitions/series')">
+          <div class="chip-top">
+            <span class="chip-title">{{ s.title }}</span>
+            <el-tag v-if="s.ongoing" size="small" type="success" effect="dark">进行中</el-tag>
+          </div>
+          <div class="chip-meta">{{ s.round_count }} 轮 · {{ s.scoring_mode === 'best_n' ? (s.best_n > 0 ? `最佳${s.best_n}场` : '全部场次') : '总积分' }}</div>
+          <div v-if="s.my_rank" class="chip-rank">我的系列排名：第 {{ s.my_rank }} 名</div>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -62,11 +87,14 @@ import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import request from '../utils/request'
-import { Calendar, Clock, List, User, Trophy } from '@element-plus/icons-vue'
+import { Calendar, Clock, List, User, Trophy, Connection, Key } from '@element-plus/icons-vue'
 
 const router = useRouter()
 const competitions = ref([])
+const seriesList = ref([])
 const loading = ref(true)
+const joinCode = ref('')
+const joining = ref(false)
 
 const statusLabel = (s) => ({ published: '未开始', ongoing: '进行中', ended: '已结束' }[s] || s)
 const statusTag = (s) => ({ published: 'primary', ongoing: 'success', ended: 'danger' }[s] || 'info')
@@ -107,6 +135,20 @@ const join = async (comp) => {
   loadCompetitions()
 }
 
+const joinByCode = async () => {
+  const code = (joinCode.value || '').trim()
+  if (!code) return ElMessage.warning('请输入邀请码')
+  joining.value = true
+  try {
+    const res = await request.post('/api/competitions/join-by-code', { code })
+    ElMessage.success(`已报名「${res.data.title}」`)
+    joinCode.value = ''
+    loadCompetitions()
+  } catch (e) { /* 拦截器已提示 */ } finally {
+    joining.value = false
+  }
+}
+
 const takeCompetition = (comp) => {
   router.push(`/competition/take/${comp.id}`)
 }
@@ -115,7 +157,17 @@ const viewLeaderboard = (comp) => {
   router.push(`/competitions/${comp.id}/leaderboard`)
 }
 
-onMounted(loadCompetitions)
+const loadSeries = async () => {
+  try {
+    const res = await request.get('/api/series/available')
+    seriesList.value = res.data || []
+  } catch (e) { /* ignore */ }
+}
+
+onMounted(() => {
+  loadCompetitions()
+  loadSeries()
+})
 </script>
 
 <style scoped>
@@ -143,6 +195,13 @@ onMounted(loadCompetitions)
 
 .loading-box {
   padding: 20px;
+}
+
+.code-join {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 22px;
 }
 
 .comp-grid {
@@ -230,6 +289,77 @@ onMounted(loadCompetitions)
 }
 
 .dark .comp-card {
+  background: var(--glass-bg);
+  border-color: var(--glass-border);
+}
+
+.series-section {
+  margin-top: 34px;
+}
+
+.series-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
+.series-head h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.series-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 14px;
+}
+
+.series-chip {
+  padding: 16px 18px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 14px;
+  cursor: pointer;
+  transition: all 0.25s ease;
+}
+
+.series-chip:hover {
+  transform: translateY(-2px);
+  border-color: rgba(245, 158, 11, 0.5);
+}
+
+.chip-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.chip-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.chip-meta {
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+.chip-rank {
+  margin-top: 8px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #d97706;
+}
+
+.dark .series-chip {
   background: var(--glass-bg);
   border-color: var(--glass-border);
 }

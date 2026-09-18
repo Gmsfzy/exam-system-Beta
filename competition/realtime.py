@@ -51,3 +51,13 @@ def notify_user(user_id, event, payload):
     if not _socketio:
         return
     _socketio.emit(event, payload, room=f'user_{int(user_id)}')
+
+
+def notify_discussion(competition_id, post):
+    """赛后讨论区新帖/回复：向竞赛房间广播（未初始化 SocketIO 时静默降级）。"""
+    if not _socketio:
+        return
+    _socketio.emit('discussion_new', {
+        'competition_id': competition_id,
+        'post': post,
+    }, room=f'competition_{competition_id}')

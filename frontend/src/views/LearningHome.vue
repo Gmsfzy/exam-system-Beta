@@ -5,8 +5,38 @@
       <p class="page-subtitle">专业路径 · 知识图谱 · 错题回顾 · 自由刷题</p>
     </div>
 
+    <!-- 今日学习入口大卡片 -->
+    <div class="today-banner" @click="$router.push('/learning/today')">
+      <div class="tb-icon"><el-icon :size="26" color="white"><Sunny /></el-icon></div>
+      <div class="tb-main">
+        <span class="tb-title">今日学习</span>
+        <span class="tb-sub">打卡连击 {{ today.streak_days }} 天 · 到期复习 {{ today.due_review_count }} 道 · 待办任务 {{ today.todo_tasks.length }} 项</span>
+      </div>
+      <div class="tb-actions">
+        <el-button type="primary" round>开始今日学习 →</el-button>
+      </div>
+    </div>
+
     <!-- 概览卡片 -->
     <div class="overview-grid">
+      <div class="overview-card" @click.stop="$router.push('/learning/today')">
+        <div class="overview-icon streak">
+          <el-icon :size="22"><Star /></el-icon>
+        </div>
+        <div class="overview-info">
+          <span class="overview-value">{{ today.streak_days }}</span>
+          <span class="overview-label">连续打卡天数</span>
+        </div>
+      </div>
+      <div class="overview-card">
+        <div class="overview-icon review">
+          <el-icon :size="22"><Bell /></el-icon>
+        </div>
+        <div class="overview-info">
+          <span class="overview-value">{{ today.due_review_count }}</span>
+          <span class="overview-label">到期复习题</span>
+        </div>
+      </div>
       <div class="overview-card">
         <div class="overview-icon wrong">
           <el-icon :size="22"><Warning /></el-icon>
@@ -110,11 +140,17 @@ const overview = ref({
   active_plans: 0, period_days: 30,
 })
 
+const today = ref({ streak_days: 0, due_review_count: 0, todo_tasks: [] })
+
 onMounted(async () => {
   try {
     const res = await request.get('/api/learning/report/overview?days=30')
     Object.assign(overview.value, res.data)
   } catch (e) { /* 首次使用可能无数据，静默忽略 */ }
+  try {
+    const res = await request.get('/api/learning/today')
+    today.value = { streak_days: res.data.streak_days, due_review_count: res.data.due_review_count, todo_tasks: res.data.todo_tasks || [] }
+  } catch (e) { /* 静默 */ }
 })
 </script>
 
@@ -140,6 +176,48 @@ onMounted(async () => {
   color: var(--text-muted);
   margin: 0;
 }
+
+.today-banner {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 20px 24px;
+  margin-bottom: 20px;
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.10) 0%, rgba(6, 182, 212, 0.10) 100%);
+  border: 1px solid rgba(99, 102, 241, 0.30);
+  border-radius: 16px;
+  cursor: pointer;
+  transition: all 0.3s ease;
+}
+
+.today-banner:hover {
+  border-color: rgba(99, 102, 241, 0.6);
+  box-shadow: 0 10px 28px rgba(99, 102, 241, 0.15);
+  transform: translateY(-2px);
+}
+
+.tb-icon {
+  width: 52px;
+  height: 52px;
+  border-radius: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, #6366f1 0%, #06b6d4 100%);
+  flex-shrink: 0;
+}
+
+.tb-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.tb-title { font-size: 18px; font-weight: 700; color: var(--text-primary); }
+.tb-sub { font-size: 13px; color: var(--text-muted); }
+.tb-actions { flex-shrink: 0; }
 
 .overview-grid {
   display: grid;
@@ -172,6 +250,8 @@ onMounted(async () => {
 .overview-icon.practice { background: linear-gradient(135deg, #10b981 0%, #059669 100%); }
 .overview-icon.ratio { background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%); }
 .overview-icon.plan { background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%); }
+.overview-icon.streak { background: linear-gradient(135deg, #f59e0b 0%, #ef4444 100%); }
+.overview-icon.review { background: linear-gradient(135deg, #06b6d4 0%, #0891b2 100%); }
 
 .overview-info {
   display: flex;

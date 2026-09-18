@@ -33,6 +33,7 @@ def get_leaderboard(competition_id, limit=100):
             'score': p.score,
             'used_time': p.used_time,
             'status': p.status,
+            'sanctioned': bool(p.user and p.user.is_sanctioned),
             'finished_at': iso_local(p.finished_at),
         })
     return leaderboard

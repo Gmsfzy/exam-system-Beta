@@ -20,13 +20,17 @@ def _run(app):
         from app import auto_end_expired_exams
         from competition.gamification import settle_pending_competitions
         from competition.season import ensure_seasons
+        from competition.reminder import send_competition_reminders
+        from api.learning_engine import learning_daily_tick
 
         while not _stop_event.is_set():
-            # 三个任务独立 try/except，单点失败不阻塞其余任务
+            # 各任务独立 try/except，单点失败不阻塞其余任务
             for name, task in (
                 ('auto_end_expired_exams', auto_end_expired_exams),
                 ('settle_pending_competitions', settle_pending_competitions),
                 ('ensure_seasons', ensure_seasons),
+                ('send_competition_reminders', send_competition_reminders),
+                ('learning_daily_tick', learning_daily_tick),
             ):
                 try:
                     task()

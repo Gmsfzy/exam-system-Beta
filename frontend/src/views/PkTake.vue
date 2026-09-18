@@ -17,6 +17,11 @@
       </div>
     </header>
 
+    <div v-if="state.sanctioned" class="sanction-banner">
+      <el-icon :size="16"><Warning /></el-icon>
+      你的竞技账号已被教师标记受限，本场对战不计入积分与排名。
+    </div>
+
     <!-- 实时比分条 -->
     <div class="score-bar">
       <div class="player-score" :class="{ leading: amLeading }">
@@ -28,7 +33,8 @@
         <span class="vs-label">VS</span>
       </div>
       <div class="player-score" :class="{ leading: !amLeading && opponentJoined }">
-        <span class="p-name">{{ opponentName }}</span>
+        <router-link v-if="opponentId && !state.battle.is_bot" class="p-name p-link" :to="'/rank/player/' + opponentId">{{ opponentName }}</router-link>
+        <span v-else class="p-name">{{ opponentName }}</span>
         <span class="p-score">{{ opponentScore }}</span>
         <span class="p-answered">已答{{ opponentAnswered }}题</span>
       </div>
@@ -123,7 +129,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import request from '../utils/request'
 import { getSocket, authToken } from '../utils/socket'
 import { useAuthStore } from '../stores/auth'
-import { Trophy, Clock, CircleCheckFilled, CircleCloseFilled } from '@element-plus/icons-vue'
+import { Trophy, Clock, CircleCheckFilled, CircleCloseFilled, Warning } from '@element-plus/icons-vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -151,6 +157,8 @@ const currentQuestion = computed(() => state.value.questions?.[currentIndex.valu
 const opponentName = computed(() =>
   role.value === 'challenger' ? (state.value.battle.opponent || '等待中') : state.value.battle.challenger)
 const opponentJoined = computed(() => role.value === 'challenger' ? !!state.value.battle.opponent_id : true)
+const opponentId = computed(() => role.value === 'challenger'
+  ? state.value.battle.opponent_id : state.value.battle.challenger_id)
 const myScore = computed(() => role.value === 'challenger'
   ? state.value.battle.challenger_score : state.value.battle.opponent_score)
 const opponentScore = computed(() => role.value === 'challenger'
@@ -289,11 +297,17 @@ const showResult = () => {
   const result = !b.winner_id ? 'draw'
     : b.winner_id === auth.user?.id ? 'win' : 'lose'
   const text = { win: '恭喜，你赢了！', lose: '惜败，再接再厉！', draw: '平局，势均力敌！' }[result]
-  ElMessageBox.alert(
+  ElMessageBox.confirm(
     `最终比分 ${b.challenger_score} : ${b.opponent_score}`,
     text,
-    { confirmButtonText: '返回PK大厅', type: result === 'win' ? 'success' : result === 'lose' ? 'error' : 'info' }
-  ).then(() => router.replace('/competitions/pk')).catch(() => router.replace('/competitions/pk'))
+    {
+      confirmButtonText: '观看回放 / 战报',
+      cancelButtonText: '返回PK大厅',
+      type: result === 'win' ? 'success' : result === 'lose' ? 'error' : 'info',
+      distinguishCancelAndClose: true,
+    }
+  ).then(() => router.replace(`/competitions/pk/${battleId}/replay`))
+   .catch(() => router.replace('/competitions/pk'))
 }
 
 const submitAnswer = async () => {
@@ -387,6 +401,17 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   background: var(--bg-secondary);
+}
+
+.sanction-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 32px;
+  font-size: 13.5px;
+  color: #f56c6c;
+  background: rgba(245, 108, 108, 0.12);
+  border-bottom: 1px solid rgba(245, 108, 108, 0.3);
 }
 
 .take-header {
@@ -493,6 +518,15 @@ onUnmounted(() => {
   font-size: 13px;
   color: var(--text-muted);
   font-weight: 600;
+}
+
+.p-link {
+  text-decoration: none;
+}
+
+.p-link:hover {
+  color: #d97706;
+  text-decoration: underline;
 }
 
 .p-score {

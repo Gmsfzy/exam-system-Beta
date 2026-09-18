@@ -5,6 +5,10 @@
         <h2><el-icon :size="24" class="title-icon"><Medal /></el-icon> 我的段位</h2>
         <p><span class="sub-info">当前赛季 {{ me.season || currentSeasonLabel }} · 竞技积分决定你的段位</span></p>
       </div>
+      <el-button type="warning" plain @click="$router.push('/competitions/certificates')">
+        <el-icon :size="16" style="margin-right: 4px"><Trophy /></el-icon>
+        我的赛季证书
+      </el-button>
     </div>
 
     <!-- 段位档案卡 -->
@@ -22,7 +26,10 @@
           <div class="progress-line" v-if="me.tier_progress.next_tier">
             <el-progress :percentage="me.tier_progress.percent" :stroke-width="8"
                          :color="me.tier_progress.tier_color" :show-text="false" class="tier-progress" />
-            <span class="progress-text">距 {{ me.tier_progress.next_tier }} 还需 {{ Math.max(0, me.tier_progress.next_at - me.tier_progress.points) }} 分</span>
+            <span class="progress-text" v-if="me.tier_progress.gated">
+              积分已达标，需再冲进赛季 <b class="gate-hi">前 {{ me.tier_progress.next_rank_top_pct }}%</b> 方可晋升 {{ me.tier_progress.next_tier }}
+            </span>
+            <span class="progress-text" v-else>距 {{ me.tier_progress.next_tier }} 还需 {{ Math.max(0, me.tier_progress.next_at - me.tier_progress.points) }} 分</span>
           </div>
           <div class="progress-line" v-else>
             <span class="progress-text max">已达最高段位</span>
@@ -39,6 +46,32 @@
       </div>
     </div>
 
+    <!-- 对战等级分 Elo（跨赛季持久） -->
+    <div v-if="me.arena" class="arena-card">
+      <div class="arena-item">
+        <span class="a-value">{{ me.arena.elo }}</span>
+        <span class="a-label">对战等级分 Elo</span>
+      </div>
+      <div class="arena-item">
+        <span class="a-value peak">{{ me.arena.peak_elo }}</span>
+        <span class="a-label">历史峰值</span>
+      </div>
+      <div class="arena-item">
+        <span class="a-value">{{ me.arena.games }}</span>
+        <span class="a-label">计入场次</span>
+      </div>
+      <div class="arena-hint">Elo 跨赛季持久，只随对战胜负变动，反映你的真实对战实力</div>
+    </div>
+
+    <!-- 积分 / Elo 历史曲线 -->
+    <div v-if="me.season" class="history-card">
+      <h3 class="history-title">本赛季积分走势</h3>
+      <div class="history-box">
+        <Line v-if="historyData" :data="historyData" :options="historyOptions" />
+        <el-empty v-else description="本赛季还没有积分记录，参加竞赛或 PK 即可生成" :image-size="70" />
+      </div>
+    </div>
+
     <!-- 赛季排行 / 往届归档 -->
     <el-tabs v-model="activeTab" class="rank-tabs">
       <el-tab-pane label="本赛季排行" name="current">
@@ -49,7 +82,12 @@
               <span class="rank-badge" :class="rankClass(row.rank)">{{ row.rank <= 3 ? '' : row.rank }}</span>
             </template>
           </el-table-column>
-          <el-table-column prop="username" label="选手" min-width="120" />
+          <el-table-column label="选手" min-width="120">
+            <template #default="{ row }">
+              <router-link class="user-link" :to="'/rank/player/' + row.user_id">{{ row.username }}</router-link>
+              <el-tag v-if="row.sanctioned" size="small" type="danger" effect="dark" class="sanc-tag">已受限</el-tag>
+            </template>
+          </el-table-column>
           <el-table-column label="段位" width="90" align="center">
             <template #default="{ row }">
               <span class="tier-mini" :style="{ color: tierColor(row.tier) }">{{ row.tier }}</span>
@@ -71,7 +109,11 @@
         <el-empty v-if="!seasonBoard.length" description="选择已结算的赛季查看归档排名" />
         <el-table v-else :data="seasonBoard" stripe>
           <el-table-column prop="rank" label="名次" width="80" align="center" />
-          <el-table-column prop="username" label="选手" min-width="120" />
+          <el-table-column label="选手" min-width="120">
+            <template #default="{ row }">
+              <router-link class="user-link" :to="'/rank/player/' + row.user_id">{{ row.username }}</router-link>
+            </template>
+          </el-table-column>
           <el-table-column label="段位" width="90" align="center">
             <template #default="{ row }">
               <span class="tier-mini" :style="{ color: tierColor(row.tier) }">{{ row.tier }}</span>
@@ -101,26 +143,72 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { Medal, ArrowLeft } from '@element-plus/icons-vue'
+import { Medal, ArrowLeft, Trophy } from '@element-plus/icons-vue'
+import { Chart as ChartJS, LinearScale, CategoryScale, PointElement, LineElement, Filler, Tooltip, Legend } from 'chart.js'
+import { Line } from 'vue-chartjs'
 import request from '../utils/request'
+
+ChartJS.register(LinearScale, CategoryScale, PointElement, LineElement, Filler, Tooltip, Legend)
 
 const router = useRouter()
 const TIER_COLORS = {
   青铜: '#b08d57', 白银: '#a8b4c4', 黄金: '#f0c14b',
-  铂金: '#7fd8d8', 钻石: '#7db9f5', 王者: '#ff7a45',
+  铂金: '#7fd8d8', 钻石: '#7db9f5', 星耀: '#c084fc', 王者: '#ff7a45',
 }
 
-const me = ref({ season: '', tier_progress: {}, stats: {}, total_players: 0 })
+const me = ref({ season: '', tier_progress: {}, stats: {}, total_players: 0, arena: null })
 const currentSeasonLabel = ref('')
 const board = ref([])
 const seasons = ref([])
 const selectedSeason = ref('')
 const seasonBoard = ref([])
 const badges = ref([])
+const history = ref([])
 const activeTab = ref('current')
 let pollTimer = null
+
+const historyData = computed(() => {
+  const h = history.value || []
+  if (!h.length) return null
+  return {
+    labels: h.map((x) => x.day),
+    datasets: [
+      {
+        label: '竞技积分',
+        data: h.map((x) => x.points),
+        borderColor: '#f0c14b',
+        backgroundColor: 'rgba(240, 193, 75, 0.16)',
+        yAxisID: 'y',
+        fill: true,
+        tension: 0.35,
+        pointRadius: 3,
+      },
+      {
+        label: '对战 Elo',
+        data: h.map((x) => x.elo),
+        borderColor: '#7db9f5',
+        backgroundColor: 'rgba(125, 185, 245, 0.12)',
+        yAxisID: 'y1',
+        fill: false,
+        tension: 0.35,
+        pointRadius: 3,
+      },
+    ],
+  }
+})
+
+const historyOptions = {
+  responsive: true,
+  maintainAspectRatio: false,
+  interaction: { mode: 'index', intersect: false },
+  scales: {
+    y: { position: 'left', title: { display: true, text: '积分' }, ticks: { precision: 0 } },
+    y1: { position: 'right', grid: { drawOnChartArea: false }, title: { display: true, text: 'Elo' } },
+  },
+  plugins: { legend: { display: true, labels: { boxWidth: 12 } } },
+}
 
 const tierColor = (t) => TIER_COLORS[t] || 'inherit'
 
@@ -136,6 +224,12 @@ const loadMe = async () => {
   const res = await request.get('/api/rank/me')
   me.value = res.data
   currentSeasonLabel.value = res.data.season
+}
+const loadHistory = async () => {
+  try {
+    const res = await request.get('/api/rank/points-history')
+    history.value = res.data.series || []
+  } catch (e) { /* ignore */ }
 }
 const loadBoard = async () => {
   const res = await request.get(`/api/rank/season/${currentSeasonLabel.value || 'current'}`)
@@ -167,7 +261,8 @@ onMounted(async () => {
   loadBoard()
   loadSeasons()
   loadBadges()
-  pollTimer = setInterval(() => { loadMe(); loadBoard() }, 30000)
+  loadHistory()
+  pollTimer = setInterval(() => { loadMe(); loadBoard(); loadHistory() }, 30000)
 })
 onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
 </script>
@@ -176,6 +271,14 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
 .page-wrapper {
   max-width: 860px;
   margin: 0 auto;
+}
+
+.page-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 20px;
 }
 
 .page-header h2 {
@@ -327,6 +430,17 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
   font-weight: 700;
 }
 
+.user-link {
+  color: inherit;
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.user-link:hover {
+  color: #d97706;
+  text-decoration: underline;
+}
+
 .season-select {
   margin-bottom: 14px;
 }
@@ -387,5 +501,72 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
 
 .badge-lock {
   margin-top: 8px;
+}
+
+.gate-hi {
+  color: #f56c6c;
+}
+
+.sanc-tag {
+  margin-left: 6px;
+}
+
+.arena-card {
+  display: flex;
+  align-items: center;
+  gap: 30px;
+  flex-wrap: wrap;
+  padding: 16px 28px;
+  margin-bottom: 20px;
+  border-radius: 14px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+}
+
+.arena-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.a-value {
+  font-size: 24px;
+  font-weight: 800;
+  color: #7db9f5;
+}
+
+.a-value.peak {
+  color: var(--text-primary);
+}
+
+.a-label {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.arena-hint {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--text-light);
+}
+
+.history-card {
+  padding: 18px 24px;
+  margin-bottom: 20px;
+  border-radius: 14px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+}
+
+.history-title {
+  margin: 0 0 12px 0;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.history-box {
+  height: 260px;
+  position: relative;
 }
 </style>

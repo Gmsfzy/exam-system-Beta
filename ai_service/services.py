@@ -312,3 +312,117 @@ def ai_chat_reply(session, messages: list, context: str = None):
         raise ValueError("对话内容为空")
 
     return ai_client.chat([{'role': 'system', 'content': system}] + cleaned)
+
+
+def ai_polish_note(session, kp_name: str, note_text: str):
+    """AI 润色/提炼个人知识点笔记：保留木意、结构化、纠正表述，返回纯文本。
+
+    session: SQLAlchemy Session（调用方传 db.session，本函数不直接读写库）。
+    """
+    if not (note_text or '').strip():
+        raise ValueError("笔记内容为空")
+    system = (
+        "你是学习笔记整理助手。把学生写的知识点笔记润色得更清晰、准确、结构化，"
+        "保留原意与关键术语，修正错别字与概念表述，适当分点。用简体中文，"
+        f"围绕知识点「{kp_name}」。只输出润色后的笔记正文，不要额外解释、标题或前缀。"
+    )
+    user_msg = (note_text or '').strip()[:4000]
+    return ai_client.chat([{'role': 'system', 'content': system},
+                           {'role': 'user', 'content': user_msg}], temp=0.5, max_tok=1200)
+
+
+def ai_suggest_daily_tasks(session, context_text: str):
+    """AI 生成每日学习任务建议：根据今日学习状态快照输出 3~5 条可执行任务。
+
+    session: SQLAlchemy Session（调用方传 db.session，本函数不直接读写库）。
+    context_text: 调用方聚合的用户现状描述（到期复习/待办计划/路径节点/薄弱项等）。
+    返回任务标题字符串列表；输出异常抛 ValueError，由调用方降级为规则建议。
+    """
+    if not (context_text or '').strip():
+        raise ValueError("学习状态快照为空")
+    system = (
+        "你是学习规划助手。根据学生今日学习状态，给出 3~5 条具体可执行的每日学习任务建议。"
+        "要求：每条不超过 30 字、动词开头、可量化（题数/时长/知识点名）；"
+        "优先覆盖：到期复习、薄弱知识点巩固、学习路径推进、计划待办。"
+        "只讨论学习相关内容。仅输出标准 JSON 字符串数组，禁止多余文字："
+        '["完成 10 道到期复习题", "学习路径节点「XXX」"]'
+    )
+    raw = ai_client.generate_json(system, context_text.strip()[:2000], temp=0.6, max_tok=600)
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        logger.error(f"AI daily task suggestions returned invalid JSON: {raw[:200]}")
+        raise ValueError("AI 建议输出格式异常")
+    if not isinstance(data, list):
+        raise ValueError("AI 建议输出结构异常")
+    out = [str(x).strip()[:200] for x in data if str(x or '').strip()]
+    if not out:
+        raise ValueError("AI 未返回有效建议")
+    return out[:5]
+
+
+def ai_suggest_plan_tasks(session, goal_text: str, kp_lines: str, days: int, allowed_kp_ids=None):
+    """AI 拆解学习目标为学习计划任务清单（4~8 条）。
+
+    session: SQLAlchemy Session（本函数不直接读写库）。
+    goal_text: 计划标题+目标描述；kp_lines: 可用知识点 "id|名称" 多行文本（可为空）；
+    days: 计划周期天数；allowed_kp_ids: 允许引用的知识点 id 集合（防幻觉）。
+    返回任务 dict 列表（含 due_day 第几天）；输出异常抛 ValueError，由调用方降级规则拆解。
+    """
+    if not (goal_text or '').strip():
+        raise ValueError("计划目标为空")
+    days = max(1, min(int(days or 14), 365))
+    allowed_kp_ids = set(allowed_kp_ids or [])
+    system = (
+        "你是学习规划助手。把学生的学习目标拆解成 4~8 个按时间递进、可执行的任务。要求："
+        "task_type 只能取 knowledge_point（学某个知识点）/ practice（刷题）/ custom（其他，如看书/整理笔记）；"
+        "knowledge_point_id 只能来自给定知识点列表，没有合适项则置 null；"
+        "任务按周期均匀分布，due_day 为第几天完成（1~"
+        f"{days}的整数，递增）；estimated_minutes 为单次投入时长(10~180)。"
+        "只讨论学习相关内容。仅输出标准 JSON 数组，禁止多余文字："
+        '[{"title":"掌握「栈与队列」并配套练习","task_type":"knowledge_point",'
+        '"knowledge_point_id":12,"question_count":5,"estimated_minutes":45,"due_day":3}]'
+    )
+    prompt = (f"学习目标：{goal_text.strip()[:1000]}\n计划周期：{days} 天内完成\n"
+              f"可用知识点（格式 id|名称）：\n{(kp_lines or '（无）')[:1500]}\n请输出任务拆解 JSON 数组。")
+    raw = ai_client.generate_json(system, prompt, temp=0.5, max_tok=1500)
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        logger.error(f"AI plan tasks returned invalid JSON: {raw[:200]}")
+        raise ValueError("AI 拆解输出格式异常")
+    if not isinstance(data, list) or not data:
+        raise ValueError("AI 拆解输出结构异常")
+    out = []
+    for item in data[:8]:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get('title') or '').strip()[:200]
+        if not title:
+            continue
+        ttype = item.get('task_type') if item.get('task_type') in ('knowledge_point', 'practice', 'custom') else 'custom'
+        try:
+            kp_id = int(item.get('knowledge_point_id')) if item.get('knowledge_point_id') else None
+        except (TypeError, ValueError):
+            kp_id = None
+        if kp_id not in allowed_kp_ids:
+            kp_id = None
+        if ttype == 'knowledge_point' and kp_id is None:
+            ttype = 'custom'   # 无有效知识点Id时降为自定义，避免前端展示断层
+        def _clip(v, lo, hi, default=None):
+            try:
+                v = int(v)
+            except (TypeError, ValueError):
+                return default
+            return max(lo, min(v, hi))
+        try:
+            due_day = max(1, min(int(item.get('due_day') or 0), days)) or None
+        except (TypeError, ValueError):
+            due_day = None
+        out.append({'title': title, 'task_type': ttype, 'knowledge_point_id': kp_id,
+                    'question_count': _clip(item.get('question_count'), 1, 50) if ttype == 'practice' else (_clip(item.get('question_count'), 1, 50, 5) if ttype == 'knowledge_point' else None),
+                    'estimated_minutes': _clip(item.get('estimated_minutes'), 5, 240, 45),
+                    'due_day': due_day})
+    if not out:
+        raise ValueError("AI 未返回有效任务")
+    return out

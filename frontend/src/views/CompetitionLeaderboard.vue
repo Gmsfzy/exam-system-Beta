@@ -44,7 +44,8 @@
         </el-table-column>
         <el-table-column prop="username" label="选手" min-width="140">
           <template #default="{ row }">
-            <span>{{ row.username }}</span>
+            <router-link class="user-link" :to="'/rank/player/' + row.user_id">{{ row.username }}</router-link>
+            <el-tag v-if="row.sanctioned" size="small" type="danger" effect="dark" style="margin-left: 8px">已受限</el-tag>
             <el-tag v-if="row.status === 'playing'" size="small" type="warning" effect="plain" style="margin-left: 8px">答题中</el-tag>
           </template>
         </el-table-column>
@@ -59,8 +60,25 @@
         <el-table-column label="完成时间" width="170" align="center">
           <template #default="{ row }">{{ fmtTime(row.finished_at) }}</template>
         </el-table-column>
+        <el-table-column label="操作" width="90" align="center">
+          <template #default="{ row }">
+            <el-button v-if="row.status === 'finished'" link type="primary" size="small"
+                       :icon="VideoCamera" @click="openReplay(row)">回放</el-button>
+            <span v-else>—</span>
+          </template>
+        </el-table-column>
       </el-table>
     </div>
+
+    <DiscussionPanel v-if="comp.id" :competition-id="comp.id" />
+
+    <el-dialog v-model="replayVisible" :title="replayTitle" width="640px" append-to-body>
+      <div v-loading="replayLoading">
+        <ReplayTimeline v-if="!replayLoading && replayTimeline.length"
+                        :timeline="replayTimeline" :duration="replayDuration" />
+        <el-empty v-else-if="!replayLoading" description="该选手没有可回放的作答记录" :image-size="70" />
+      </div>
+    </el-dialog>
   </div>
 </template>
 
@@ -69,7 +87,9 @@ import { ref, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import request from '../utils/request'
 import { getSocket, authToken } from '../utils/socket'
-import { ArrowLeft, Trophy } from '@element-plus/icons-vue'
+import { ArrowLeft, Trophy, VideoCamera } from '@element-plus/icons-vue'
+import ReplayTimeline from '../components/ReplayTimeline.vue'
+import DiscussionPanel from '../components/DiscussionPanel.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -81,6 +101,31 @@ const my = ref(null)
 const liveMode = ref(false)
 let pollTimer = null
 let socket = null
+
+const replayVisible = ref(false)
+const replayLoading = ref(false)
+const replayTitle = ref('作答回放')
+const replayTimeline = ref([])
+const replayDuration = ref(0)
+
+const openReplay = async (row) => {
+  replayVisible.value = true
+  replayLoading.value = true
+  replayTimeline.value = []
+  replayDuration.value = 0
+  replayTitle.value = `${row.username} · 作答回放`
+  try {
+    const res = await request.get(`/api/competitions/${compId}/participants/${row.user_id}/replay`)
+    const d = res.data || {}
+    // 单人回放：注入 side/username 供 ReplayTimeline 分组渲染
+    replayTimeline.value = (d.timeline || []).map((e) => ({
+      ...e, side: 'self', username: d.player?.username || row.username,
+    }))
+    replayDuration.value = d.competition?.duration || 0
+  } catch (e) { /* 拦截器已提示 */ } finally {
+    replayLoading.value = false
+  }
+}
 
 const statusLabel = (s) => ({ draft: '草稿', published: '未开始', ongoing: '进行中', ended: '已结束' }[s] || s)
 const statusTag = (s) => ({ draft: 'info', published: 'primary', ongoing: 'success', ended: 'danger' }[s] || 'info')
@@ -295,6 +340,17 @@ onUnmounted(() => {
 .score-text {
   font-weight: 700;
   color: #d97706;
+}
+
+.user-link {
+  color: inherit;
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.user-link:hover {
+  color: #d97706;
+  text-decoration: underline;
 }
 
 .dark .board-card {

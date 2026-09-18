@@ -8,7 +8,7 @@ from competition.models import (
     SeasonMeta, SeasonArchive, UserPointsProfile,
 )
 from competition.gamification import (
-    tier_of, current_season, settle_pending_competitions, _grant,
+    tier_of, current_season, settle_pending_competitions, _grant, cert_grade,
 )
 
 
@@ -46,6 +46,7 @@ def archive_season(season):
                     .filter(UserPointsProfile.season == season)
                     .all())
         profiles.sort(key=lambda p: (-p.points, p.last_played_at or aware_min()))
+        total = len(profiles)
         prev_key, rank = None, 0
         for i, p in enumerate(profiles, start=1):
             key = (p.points, p.last_played_at)
@@ -56,7 +57,7 @@ def archive_season(season):
                 user_id=p.user_id,
                 rank=rank,
                 points=p.points,
-                tier=tier_of(p.points),
+                tier=tier_of(p.points, rank, total),
                 pk_win=p.pk_win,
                 pk_total=p.pk_win + p.pk_lose + p.pk_draw,
                 timed_finished=p.timed_finished,
@@ -68,6 +69,7 @@ def archive_season(season):
                 SeasonArchive.rank <= 3).all():
             if _grant(a.user_id, 'season_top3', season=season, related_id=None):
                 db.session.commit()
+        _issue_season_certificates(season, total)
         return True
     except Exception:
         db.session.rollback()
@@ -76,3 +78,43 @@ def archive_season(season):
         if meta and meta.archived:
             return True
         raise
+
+
+def _issue_season_certificates(season, total):
+    """按最终积分分等级颁发赛季证书（幂等：一人一赛季一份）。"""
+    from competition.models import CompetitionCertificate
+    try:
+        from api.learning_engine import gen_serial_no
+    except Exception:
+        gen_serial_no = None
+    for a in SeasonArchive.query.filter_by(season=season).all():
+        graded = cert_grade(a.points)
+        if not graded:
+            continue
+        code, label = graded
+        exists = CompetitionCertificate.query.filter_by(
+            user_id=a.user_id, season=season).first()
+        if exists:
+            continue
+        cert = CompetitionCertificate(
+            user_id=a.user_id, season=season,
+            serial_no=(gen_serial_no() if gen_serial_no
+                       else f'CERT-{season}-{a.user_id}'),
+            grade=code, tier=a.tier, rank=a.rank, points=a.points,
+            total_players=total,
+            summary={'season_label': season, 'grade_label': label,
+                     'pk_total': a.pk_total, 'timed_finished': a.timed_finished,
+                     'earned_date': utcnow().date().isoformat()},
+        )
+        db.session.add(cert)
+        db.session.flush()  # 暴露唯一约束竞态
+        try:
+            from api.notification_routes import create_notification
+            create_notification(
+                a.user_id, f'恭喜获得赛季{label}',
+                f'你在 {season} 赛季以 {a.points} 分获得{label}段位证书（赛季第 {a.rank} 名）。',
+                type='success', related_type='competition_cert',
+                related_id=cert.id, commit=False)
+        except Exception:
+            pass
+    db.session.commit()

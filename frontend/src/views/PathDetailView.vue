@@ -75,6 +75,18 @@
         </span>
       </div>
 
+      <!-- 结业测评 / 证书入口 -->
+      <div v-if="myCert || enrollmentCompleted" class="final-banner" :class="{ certified: myCert }">
+        <div class="fb-icon">{{ myCert ? '🏅' : '🎓' }}</div>
+        <div class="fb-main">
+          <span class="fb-title">{{ myCert ? '你已获得本路径结业证书' : '全部节点已掌握，参加一次结业测评即可获颁证书' }}</span>
+          <span v-if="myCert" class="fb-sub">编号 {{ myCert.serial_no }} · 终测 {{ Math.round((myCert.final_score || 0) * 100) }} 分</span>
+          <span v-else class="fb-sub">结业测评达到 80% 通过，从核心知识点自动组卷，可反复重考</span>
+        </div>
+        <el-button v-if="myCert" type="warning" @click="$router.push(`/learning/certificates/${myCert.id}`)">查看证书 →</el-button>
+        <el-button v-else type="primary" @click="finalDlg = true">参加结业测评</el-button>
+      </div>
+
       <!-- 知识图谱导航（懒加载） -->
       <div class="graph-panel">
         <div class="graph-panel-head" @click="toggleGraph">
@@ -197,6 +209,9 @@
           <el-button type="primary" :loading="savingEdit" @click="saveEdit">保存</el-button>
         </template>
       </el-dialog>
+
+      <!-- 结业测评弹窗 -->
+      <QuizDialog v-model="finalDlg" :payload="{ path_id: pathId }" title="路径结业测评" @finished="onFinalFinished" />
     </template>
   </div>
 </template>
@@ -208,6 +223,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowLeft, Connection, Aim, Calendar, Edit } from '@element-plus/icons-vue'
 import request from '../utils/request'
 import KnowledgeGraph from '../components/KnowledgeGraph.vue'
+import QuizDialog from '../components/QuizDialog.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -224,6 +240,26 @@ const nodeForm = ref({ knowledge_point_id: null, role: 'core', estimated_minutes
 
 const currentNodeId = computed(() => path.value?.my_enrollment?.current_node_id ?? null)
 
+// ── 结业测评与证书 ──
+const finalDlg = ref(false)
+const myCert = ref(null)
+const enrollmentCompleted = computed(() =>
+  path.value?.my_enrollment?.status === 'completed')
+
+const loadMyCert = async () => {
+  myCert.value = null
+  if (!path.value?.my_enrollment) return
+  try {
+    const res = await request.get('/api/learning/certificates/mine')
+    myCert.value = (res.data || []).find(c => c.path_id === pathId) || null
+  } catch (e) { /* 静默 */ }
+}
+
+const onFinalFinished = async () => {
+  await loadPath()
+  await loadMyCert()
+}
+
 // 距计划完成日的天数（无完成日期为 null）
 const daysLeft = computed(() => {
   const end = path.value?.target_end_date
@@ -238,6 +274,7 @@ const loadPath = async () => {
   try {
     const res = await request.get(`/api/learning/paths/${pathId}`)
     path.value = res.data
+    loadMyCert()
   } catch (e) { /* 拦截器已提示 */ }
   loading.value = false
 }
@@ -532,6 +569,27 @@ onMounted(loadPath)
   color: var(--text-muted);
   white-space: nowrap;
 }
+
+.final-banner {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 12px;
+  padding: 16px 20px;
+  background: linear-gradient(135deg, rgba(245, 158, 11, 0.10) 0%, rgba(239, 68, 68, 0.08) 100%);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  border-radius: 14px;
+}
+
+.final-banner.certified {
+  background: linear-gradient(135deg, rgba(16, 185, 129, 0.08) 0%, rgba(245, 158, 11, 0.08) 100%);
+  border-color: rgba(16, 185, 129, 0.35);
+}
+
+.fb-icon { font-size: 30px; }
+.fb-main { flex: 1; display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.fb-title { font-size: 15px; font-weight: 600; color: var(--text-primary); }
+.fb-sub { font-size: 12px; color: var(--text-muted); }
 
 .graph-panel {
   background: var(--bg-card);

@@ -9,6 +9,10 @@
         <el-icon><Plus /></el-icon>
         创建竞赛
       </el-button>
+      <el-button type="warning" plain @click="router.push('/competitions/series')">
+        <el-icon><Connection /></el-icon>
+        系列赛
+      </el-button>
     </div>
 
     <div v-if="loading" class="loading-box">
@@ -25,6 +29,7 @@
             <el-tag :type="statusTag(comp.status)" effect="dark" size="small">
               {{ statusLabel(comp.status) }}
             </el-tag>
+            <el-tag v-if="comp.access_mode === 'restricted'" size="small" type="warning" effect="plain">受限</el-tag>
           </div>
           <p class="comp-desc">{{ comp.description || '暂无描述' }}</p>
           <div class="comp-meta">
@@ -42,6 +47,7 @@
           <el-button v-if="comp.status === 'draft'" size="small" type="success" @click="publish(comp)">发布</el-button>
           <el-button v-if="comp.status === 'ongoing'" size="small" type="warning" @click="endCompetition(comp)">结束</el-button>
           <el-button size="small" @click="viewLeaderboard(comp)">排行榜</el-button>
+          <el-button v-if="comp.status === 'ended' || comp.status === 'ongoing'" size="small" type="warning" plain @click="openIntegrity(comp)">公平审查</el-button>
           <el-button v-if="comp.status !== 'ongoing'" size="small" type="danger" text @click="remove(comp)">删除</el-button>
         </div>
       </div>
@@ -71,6 +77,25 @@
         <el-form-item label="PK对战">
           <el-switch v-model="editForm.allowPk" />
           <span class="form-tip">允许学生基于本题库发起1v1对战</span>
+        </el-form-item>
+        <el-form-item label="访问权限">
+          <el-radio-group v-model="editForm.accessMode">
+            <el-radio value="public">公开</el-radio>
+            <el-radio value="restricted">受限（邀请码）</el-radio>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item v-if="editForm.accessMode === 'restricted'" label="邀请码">
+          <template v-if="editForm.inviteCode">
+            <el-input v-model="editForm.inviteCode" readonly style="width: 140px" />
+            <el-button size="small" @click="copyCode">复制</el-button>
+            <el-button size="small" :disabled="!editForm.id" @click="resetCode">重置邀请码</el-button>
+          </template>
+          <span v-else class="form-tip">保存后自动生成邀请码（或在此指定）</span>
+          <el-input v-if="!editForm.inviteCode" v-model="editForm.inviteCode" placeholder="自定义邀请码（可留空）" style="width: 200px; margin-left: 8px" maxlength="16" />
+        </el-form-item>
+        <el-form-item label="开赛提醒">
+          <el-input-number v-model="editForm.remindBefore" :min="0" :max="1440" :step="5" />
+          <span class="form-tip">开赛前 N 分钟向已报名选手推送提醒，0 = 关闭</span>
         </el-form-item>
         <el-form-item label="计分规则">
           <div class="rule-row">
@@ -140,6 +165,40 @@
         <el-button @click="manageVisible = false">关闭</el-button>
       </template>
     </el-dialog>
+    <!-- 公平性审查对话框 -->
+    <el-dialog v-model="integrityVisible" :title="`公平性审查 - ${integrityComp?.title || ''}`" width="820px">
+      <el-alert v-if="integrityLoading" type="info" :closable="false" title="分析中..." />
+      <template v-else>
+        <div class="integ-tip">系统根据正确率、用时与跨场异常自动标记可疑选手，可一键施加/解除竞技受限。</div>
+        <el-table :data="integrityRows" max-height="420" size="small">
+          <el-table-column prop="username" label="选手" min-width="100" />
+          <el-table-column label="名次" width="60" align="center">
+            <template #default="{ row }">{{ row.rank ?? '—' }}</template>
+          </el-table-column>
+          <el-table-column label="正确率" width="80" align="center">
+            <template #default="{ row }">{{ Math.round(row.accuracy * 100) }}%</template>
+          </el-table-column>
+          <el-table-column label="均用时" width="80" align="center">
+            <template #default="{ row }">{{ row.avg_time }}s</template>
+          </el-table-column>
+          <el-table-column label="异常标记" min-width="200">
+            <template #default="{ row }">
+              <el-tag v-if="!row.suspicious" size="small" type="success" effect="plain">正常</el-tag>
+              <span v-else class="susp-reasons">{{ row.reasons.join('；') }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="140" align="center">
+            <template #default="{ row }">
+              <el-button v-if="!row.sanctioned" size="small" type="danger" text @click="doSanction(row)">标记受限</el-button>
+              <el-button v-else size="small" type="success" text @click="undoSanction(row)">解除受限</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+      </template>
+      <template #footer>
+        <el-button @click="integrityVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -148,7 +207,7 @@ import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import request from '../utils/request'
-import { Calendar, Clock, List, Star, User, Plus } from '@element-plus/icons-vue'
+import { Calendar, Clock, List, Star, User, Plus, Connection } from '@element-plus/icons-vue'
 
 const router = useRouter()
 const competitions = ref([])
@@ -166,6 +225,11 @@ let currentComp = null
 const manageVisible = ref(false)
 const manageComp = ref(null)
 const manageQuestions = ref([])
+
+const integrityVisible = ref(false)
+const integrityLoading = ref(false)
+const integrityComp = ref(null)
+const integrityRows = ref([])
 
 const statusLabel = (s) => ({ draft: '草稿', published: '已发布', ongoing: '进行中', ended: '已结束' }[s] || s)
 const statusTag = (s) => ({ draft: 'info', published: 'primary', ongoing: 'success', ended: 'danger' }[s] || 'info')
@@ -188,21 +252,29 @@ const loadCompetitions = async () => {
 }
 
 const openCreate = () => {
-  editForm.value = { id: null, title: '', description: '', timeRange: [], duration: 10, baseRatio: 0.7, speedRatio: 0.3, drawCount: 0, allowPk: true }
+  editForm.value = { id: null, title: '', description: '', timeRange: [], duration: 10, baseRatio: 0.7, speedRatio: 0.3, drawCount: 0, allowPk: true, accessMode: 'public', inviteCode: '', remindBefore: 0 }
   editVisible.value = true
 }
 
-const openEdit = (comp) => {
+const openEdit = async (comp) => {
+  let detail = comp
+  try {
+    const res = await request.get(`/api/competitions/${comp.id}`)
+    detail = { ...comp, ...res.data }
+  } catch (e) { /* 降级用列表数据 */ }
   editForm.value = {
     id: comp.id,
-    title: comp.title,
-    description: comp.description || '',
-    timeRange: [comp.start_time, comp.end_time],
-    duration: comp.duration,
-    baseRatio: comp.scoring_rule.base_ratio ?? 0.7,
-    speedRatio: comp.scoring_rule.speed_ratio ?? 0.3,
-    drawCount: comp.draw_count ?? 0,
-    allowPk: comp.allow_pk ?? true,
+    title: detail.title,
+    description: detail.description || '',
+    timeRange: [detail.start_time, detail.end_time],
+    duration: detail.duration,
+    baseRatio: detail.scoring_rule.base_ratio ?? 0.7,
+    speedRatio: detail.scoring_rule.speed_ratio ?? 0.3,
+    drawCount: detail.draw_count ?? 0,
+    allowPk: detail.allow_pk ?? true,
+    accessMode: detail.access_mode || 'public',
+    inviteCode: detail.invite_code || '',
+    remindBefore: detail.remind_before ?? 0,
   }
   editVisible.value = true
 }
@@ -219,8 +291,11 @@ const saveCompetition = async () => {
     duration: f.duration,
     draw_count: f.drawCount,
     allow_pk: f.allowPk,
+    access_mode: f.accessMode,
+    remind_before: f.remindBefore,
     scoring_rule: { base_ratio: f.baseRatio, speed_ratio: f.speedRatio },
   }
+  if (f.accessMode === 'restricted' && f.inviteCode) payload.invite_code = f.inviteCode
   if (f.id) {
     await request.put(`/api/competitions/${f.id}`, payload)
     ElMessage.success('更新成功')
@@ -306,6 +381,53 @@ const remove = (comp) => {
 
 const viewLeaderboard = (comp) => {
   router.push(`/competitions/${comp.id}/leaderboard`)
+}
+
+const copyCode = async () => {
+  try {
+    await navigator.clipboard.writeText(editForm.value.inviteCode)
+    ElMessage.success('邀请码已复制')
+  } catch (e) {
+    ElMessage.warning('复制失败，请手动选择')
+  }
+}
+
+const resetCode = async () => {
+  if (!editForm.value.id) return ElMessage.warning('请先保存竞赛')
+  const res = await request.post(`/api/competitions/${editForm.value.id}/invite/reset`)
+  editForm.value.inviteCode = res.data.invite_code
+  ElMessage.success('邀请码已重置')
+}
+
+const openIntegrity = async (comp) => {
+  integrityComp.value = comp
+  integrityRows.value = []
+  integrityVisible.value = true
+  integrityLoading.value = true
+  try {
+    const res = await request.get(`/api/competitions/${comp.id}/integrity`)
+    integrityRows.value = res.data.participants || []
+  } finally {
+    integrityLoading.value = false
+  }
+}
+
+const doSanction = async (row) => {
+  try {
+    const { value } = await ElMessageBox.prompt(
+      `将选手「${row.username}」标记为竞技受限（成绩不计入排行），请填写原因：`,
+      '标记受限', { confirmButtonText: '确定', cancelButtonText: '取消', inputPlaceholder: '例如：反应时异常 / 跨场正确率异常' }
+    )
+    await request.post(`/api/competitions/${integrityComp.value.id}/participants/${row.user_id}/sanction`, { reason: value || '异常行为' })
+    ElMessage.success('已标记受限')
+    openIntegrity(integrityComp.value)
+  } catch (e) { /* 取消 */ }
+}
+
+const undoSanction = async (row) => {
+  await request.post(`/api/competitions/${integrityComp.value.id}/participants/${row.user_id}/sanction`, { revoke: true })
+  ElMessage.success('已解除受限')
+  openIntegrity(integrityComp.value)
 }
 
 onMounted(loadCompetitions)
@@ -441,6 +563,17 @@ onMounted(loadCompetitions)
 .dark .comp-card {
   background: var(--glass-bg);
   border-color: var(--glass-border);
+}
+
+.integ-tip {
+  font-size: 12.5px;
+  color: var(--text-muted);
+  margin-bottom: 12px;
+}
+
+.susp-reasons {
+  font-size: 12px;
+  color: #f56c6c;
 }
 
 @media (max-width: 768px) {

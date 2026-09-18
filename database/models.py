@@ -5,6 +5,7 @@ from utils.timeutil import utcnow
 class RoleEnum:
     TEACHER = "teacher"
     STUDENT = "student"
+    BOT = "bot"  # 系统训练对手（快速 PK 机器人），不可登录、不参与排行/积分入账
 
 class ExamStatusEnum:
     DRAFT = "draft"
@@ -57,7 +58,13 @@ class User(db.Model):
     email = db.Column(db.String(120), unique=True)  # , nullable=False)
     password_hash = db.Column(db.String(60), nullable=False)
     role = db.Column(db.String(20), nullable=False)
+    sanctioned_at = db.Column(UTCDateTime)          # 竞技处罚时间（NULL=正常）
+    sanction_reason = db.Column(db.String(200))     # 受限原因公示
     created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
+
+    @property
+    def is_sanctioned(self):
+        return self.sanctioned_at is not None
 
     def set_password(self, password):
         from database import bcrypt
@@ -357,9 +364,12 @@ class StudyPlanTask(db.Model):
     knowledge_point_id = db.Column(db.Integer, db.ForeignKey('knowledge_point.id'))
     resource_id = db.Column(db.Integer, db.ForeignKey('learning_resource.id'))
     question_count = db.Column(db.Integer)               # 建议刷题数（practice 型）
+    progress_count = db.Column(db.Integer, nullable=False, default=0)  # 已刷题数（practice 型自动核销累计）
     estimated_minutes = db.Column(db.Integer)            # 预计时长
+    due_date = db.Column(db.Date)                        # 截止日（可空；逾期前端标红）
     status = db.Column(db.String(20), nullable=False, default='pending')  # pending/done
     done_at = db.Column(UTCDateTime)
+    auto_done = db.Column(db.Boolean, nullable=False, default=False)  # 是否由系统自动核销（区别于手动打卡）
     order_num = db.Column(db.Integer, default=0)
     created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
 
@@ -545,3 +555,158 @@ class LearningResource(db.Model):
     created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
 
     knowledge_point = db.relationship('KnowledgePoint', backref='resources')
+
+
+# ── 学习闭环：掌握度/笔记/小测/复习/打卡/证书 ────────────────────────
+
+class KnowledgeMastery(db.Model):
+    """知识点掌握度：答题数据驱动的 KP 级别掌握模型（存原始值，展示时按遗忘曲线衰减）"""
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    knowledge_point_id = db.Column(db.Integer, db.ForeignKey('knowledge_point.id'), nullable=False)
+    level = db.Column(db.Float, nullable=False, default=0.0)   # 原始掌握度 0-100
+    last_verified_at = db.Column(UTCDateTime, nullable=False, default=utcnow)  # 衰减锚点（最近一次验证时间）
+    total_attempts = db.Column(db.Integer, nullable=False, default=0)
+    total_correct = db.Column(db.Integer, nullable=False, default=0)
+    updated_at = db.Column(UTCDateTime, nullable=False, default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (
+        db.UniqueConstraint('user_id', 'knowledge_point_id', name='_user_kp_mastery_uc'),
+        db.Index('ix_mastery_user', 'user_id'),
+    )
+
+    user = db.relationship('User', backref='kp_masteries')
+    knowledge_point = db.relationship('KnowledgePoint', backref='masteries')
+
+
+class UserKpNote(db.Model):
+    """个人知识笔记：每个知识点一篇总结笔记（upsert 语义，学完后沉淀为个人知识资产）"""
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    knowledge_point_id = db.Column(db.Integer, db.ForeignKey('knowledge_point.id'), nullable=False)
+    content = db.Column(db.Text, nullable=False, default='')
+    created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
+    updated_at = db.Column(UTCDateTime, nullable=False, default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (
+        db.UniqueConstraint('user_id', 'knowledge_point_id', name='_user_kp_note_uc'),
+        db.Index('ix_note_user', 'user_id'),
+    )
+
+    user = db.relationship('User', backref='kp_notes')
+    knowledge_point = db.relationship('KnowledgePoint', backref='notes')
+
+
+class QuizAttempt(db.Model):
+    """轻量小测尝试：节点小测/路径终测共用（客观题即时判分，不走正式考试体系）"""
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    scope_type = db.Column(db.String(20), nullable=False)   # node / path_final
+    node_id = db.Column(db.Integer, db.ForeignKey('learning_path_node.id'))
+    path_id = db.Column(db.Integer, db.ForeignKey('learning_path.id'))
+    question_ids = db.Column(JSONType)                       # 组卷快照 [question_id, ...]
+    questions_count = db.Column(db.Integer, nullable=False, default=0)
+    correct_count = db.Column(db.Integer, nullable=False, default=0)
+    score_ratio = db.Column(db.Float)                        # 0-1，完成后写入
+    status = db.Column(db.String(20), nullable=False, default='in_progress')  # in_progress/completed
+    started_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
+    completed_at = db.Column(UTCDateTime)
+
+    __table_args__ = (
+        db.Index('ix_quiz_user_scope', 'user_id', 'scope_type'),
+    )
+
+    user = db.relationship('User', backref='quiz_attempts')
+    node = db.relationship('LearningPathNode')
+    path = db.relationship('LearningPath')
+    answers = db.relationship('QuizAttemptAnswer', backref='attempt', lazy=True,
+                              cascade='all, delete-orphan')
+
+
+class QuizAttemptAnswer(db.Model):
+    """小测单题作答"""
+    id = db.Column(db.Integer, primary_key=True)
+    attempt_id = db.Column(db.Integer, db.ForeignKey('quiz_attempt.id'), nullable=False)
+    question_id = db.Column(db.Integer, db.ForeignKey('question.id'), nullable=False)
+    student_answer = db.Column(db.Text)
+    is_correct = db.Column(db.Boolean)
+    answered_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
+
+    question = db.relationship('Question')
+
+
+class ReviewItem(db.Model):
+    """间隔复习卡（简化 SM-2）：错题/衰减知识点按遗忘曲线排期，到期进入今日复习队列"""
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    question_id = db.Column(db.Integer, db.ForeignKey('question.id'), nullable=False)
+    interval_days = db.Column(db.Integer, nullable=False, default=1)
+    repetitions = db.Column(db.Integer, nullable=False, default=0)   # 连续答对次数
+    ease = db.Column(db.Float, nullable=False, default=2.5)          # 难度因子 1.3~2.8
+    due_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
+    status = db.Column(db.String(20), nullable=False, default='pending')  # pending/retired
+    source_type = db.Column(db.String(20), nullable=False, default='wrong')  # wrong/mastery_decay
+    created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
+
+    __table_args__ = (
+        db.UniqueConstraint('user_id', 'question_id', name='_user_review_uc'),
+        db.Index('ix_review_user_due', 'user_id', 'status', 'due_at'),
+    )
+
+    user = db.relationship('User', backref='review_items')
+    question = db.relationship('Question')
+
+
+class StudyCheckin(db.Model):
+    """学习打卡：有效学习行为（交练/核销/小测/复习）自动写入当日记录，驱动连击天数"""
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    day = db.Column(db.Date, nullable=False)
+    minutes = db.Column(db.Integer, nullable=False, default=0)   # 当日累计学习分钟数
+    tasks_done = db.Column(db.Integer, nullable=False, default=0)
+    created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
+
+    __table_args__ = (
+        db.UniqueConstraint('user_id', 'day', name='_user_day_checkin_uc'),
+        db.Index('ix_checkin_user_day', 'user_id', 'day'),
+    )
+
+    user = db.relationship('User', backref='checkins')
+
+
+class PathCertificate(db.Model):
+    """路径结业证书：完成全部节点 + 终测通过（>=80%）后颁发，幂等"""
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    path_id = db.Column(db.Integer, db.ForeignKey('learning_path.id'), nullable=False)
+    serial_no = db.Column(db.String(32), nullable=False, unique=True)
+    final_score = db.Column(db.Float, nullable=False, default=0.0)  # 终测得分率 0-1
+    summary = db.Column(JSONType)   # 快照：{path_title, major_name, nodes, kps, minutes, earned_date}
+    earned_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
+
+    __table_args__ = (
+        db.UniqueConstraint('user_id', 'path_id', name='_user_path_cert_uc'),
+    )
+
+    user = db.relationship('User', backref='certificates')
+    path = db.relationship('LearningPath', backref='certificates')
+
+
+class DailyTask(db.Model):
+    """每日学习任务：用户自己创建或采纳 AI 学习建议生成，按天归属展示在今日学习页"""
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    day = db.Column(db.Date, nullable=False)
+    title = db.Column(db.String(200), nullable=False)
+    source = db.Column(db.String(10), nullable=False, default='manual')  # manual=自建 ai=AI建议
+    status = db.Column(db.String(10), nullable=False, default='pending')  # pending/done
+    done_at = db.Column(UTCDateTime)
+    created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
+
+    __table_args__ = (
+        db.CheckConstraint("source IN ('manual', 'ai')", name='_daily_source_ck'),
+        db.CheckConstraint("status IN ('pending', 'done')", name='_daily_status_ck'),
+        db.Index('ix_daily_task_user_day', 'user_id', 'day'),
+    )
+
+    user = db.relationship('User', backref='daily_tasks')

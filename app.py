@@ -402,6 +402,14 @@ def init_database():
         upgrade()
         print('[DB] Alembic 迁移已执行至最新版本')
 
+        # 幂等确保快速 PK 训练机器人账号存在（已有库也会补种）
+        try:
+            from database.init_data import ensure_bot_user
+            ensure_bot_user()
+        except Exception as e:
+            db.session.rollback()
+            print(f'[DB] 机器人账号初始化失败: {e}')
+
         # 幂等数据修正（不影响结构，可重复执行）
         try:
             from database.models import Question

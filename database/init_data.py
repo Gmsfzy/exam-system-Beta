@@ -1,6 +1,27 @@
 from database.models import Department, Major, Course, User, RoleEnum
 from database import db
 
+# 快速 PK 机器人（训练对手）账号名；供路由按名取 id
+BOT_USERNAME = '训练对手'
+
+
+def ensure_bot_user():
+    """幂等确保系统训练机器人账号存在（快速 PK 无人匹配时填充）。
+    机器人不可登录（无有效密码）、role=bot 不参与排行/积分入账。
+    """
+    bot = User.query.filter_by(username=BOT_USERNAME).first()
+    if bot is not None:
+        return bot
+    bot = User(username=BOT_USERNAME, email='arena_bot@system.local', role=RoleEnum.BOT)
+    bot.set_password('!disabled-not-login!')  # 占位密码，禁止登录
+    db.session.add(bot)
+    try:
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        bot = User.query.filter_by(username=BOT_USERNAME).first()
+    return bot
+
 def init_data():
     if Department.query.first():
         print('[DB] 数据库已初始化，跳过数据填充')

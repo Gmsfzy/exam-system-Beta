@@ -12,10 +12,12 @@ from competition.models import (
     UserPointsProfile, SeasonMeta, SeasonArchive, UserBadge,
     Competition, CompetitionParticipant, CompetitionQuestion, CompetitionAnswer,
     PkBattle, PkAnswer, PkBattleStatusEnum, ParticipantStatusEnum,
+    ArenaRating, PointsHistory, CompetitionCertificate,
 )
 from competition.gamification import (
     TIERS, TIER_COLORS, tier_of, tier_progress, current_season,
     ensure_profile, season_rank_of, check_and_grant, BADGE_DEFS,
+    get_or_create_rating,
 )
 
 gamification_bp = Blueprint('gamification', __name__)
@@ -41,12 +43,14 @@ def rank_me():
     p = ensure_profile(user.id, season)
     rank = season_rank_of(user.id, season)
     total_players = UserPointsProfile.query.filter_by(season=season).count()
+    rating = get_or_create_rating(user.id)
     return jsonify({
         'season': season,
-        'tier_progress': tier_progress(p.points),
+        'tier_progress': tier_progress(p.points, rank, total_players),
         'stats': p.to_dict(),
         'rank': rank,
         'total_players': total_players,
+        'arena': {'elo': rating.elo, 'peak_elo': rating.peak_elo, 'games': rating.games},
     })
 
 
@@ -91,6 +95,7 @@ def rank_season(season):
                     .order_by(UserPointsProfile.points.desc(),
                               UserPointsProfile.last_played_at.asc())
                     .limit(100).all())
+        total_players = UserPointsProfile.query.filter_by(season=season).count()
         prev_key, rank = None, 0
         for i, p in enumerate(profiles, start=1):
             key = (p.points, p.last_played_at)
@@ -98,9 +103,10 @@ def rank_season(season):
                 rank, prev_key = i, key
             board.append({
                 'rank': rank, 'user_id': p.user_id, 'username': p.user.username,
-                'points': p.points, 'tier': tier_of(p.points),
+                'points': p.points, 'tier': tier_of(p.points, rank, total_players),
                 'pk_win': p.pk_win, 'pk_total': p.pk_win + p.pk_lose + p.pk_draw,
                 'timed_finished': p.timed_finished,
+                'sanctioned': bool(p.user and p.user.is_sanctioned),
             })
         my = next((b for b in board if b['user_id'] == user.id), None)
     return jsonify({'season': season, 'leaderboard': board, 'me': my})
@@ -117,6 +123,110 @@ def rank_archives():
         'season': a.season, 'rank': a.rank, 'points': a.points, 'tier': a.tier,
         'pk_win': a.pk_win, 'pk_total': a.pk_total, 'timed_finished': a.timed_finished,
     } for a in rows])
+
+
+@gamification_bp.route('/rank/points-history', methods=['GET'])
+def rank_points_history():
+    """积分/Elo 历史曲线：默认自己，教师可传 user_id 查他人"""
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    target_id = request.args.get('user_id', type=int) or user.id
+    if target_id != user.id and not user.is_teacher():
+        return jsonify({'message': '仅教师可查询他人历史'}), 403
+    season = request.args.get('season') or current_season()
+    rows = (PointsHistory.query
+            .filter_by(user_id=target_id, season=season)
+            .order_by(PointsHistory.day.asc()).all())
+    return jsonify({
+        'season': season,
+        'series': [{'day': r.day, 'points': r.points, 'elo': r.elo} for r in rows],
+    })
+
+
+@gamification_bp.route('/rank/public/<int:user_id>', methods=['GET'])
+def rank_public_profile(user_id):
+    """公开选手主页（对外只读）：段位/Elo/曲线/勋章/历史赛季；不含处罚原因等敏感信息。"""
+    viewer = verify_token()
+    if not viewer:
+        return jsonify({'message': '未登录'}), 401
+    target = db.session.get(User, user_id)
+    if not target or target.role == 'bot':
+        return jsonify({'message': '选手不存在'}), 404
+    season = request.args.get('season') or current_season()
+    p = UserPointsProfile.query.filter_by(user_id=user_id, season=season).first()
+    points = p.points if p else 0
+    rank = season_rank_of(user_id, season)
+    total_players = UserPointsProfile.query.filter_by(season=season).count()
+    tp = tier_progress(points, rank, total_players)
+    rating = get_or_create_rating(user_id)
+    history = (PointsHistory.query.filter_by(user_id=user_id, season=season)
+               .order_by(PointsHistory.day.asc()).all())
+    mine = {b.badge_code: b for b in UserBadge.query.filter_by(user_id=user_id).all()}
+    badges = [{'code': c, 'name': d['name'], 'icon': d['icon'],
+               'season': mine[c].season, 'granted_at': iso_local(mine[c].granted_at)}
+              for c, d in BADGE_DEFS.items() if c in mine]
+    archives = (SeasonArchive.query.filter_by(user_id=user_id)
+                .order_by(SeasonArchive.season.desc()).limit(6).all())
+    return jsonify({
+        'user': {'user_id': target.id, 'username': target.username,
+                 'sanctioned': bool(target.is_sanctioned)},
+        'arena': {'elo': rating.elo, 'peak_elo': rating.peak_elo, 'games': rating.games},
+        'season': season,
+        'standing': {
+            'tier': tp['tier'], 'tier_color': tp['tier_color'], 'points': points,
+            'rank': rank, 'total_players': total_players,
+            'pk_win': p.pk_win if p else 0, 'pk_lose': p.pk_lose if p else 0,
+            'pk_draw': p.pk_draw if p else 0, 'streak': p.streak if p else 0,
+            'max_streak': p.max_streak if p else 0,
+            'timed_finished': p.timed_finished if p else 0,
+        },
+        'history': [{'day': r.day, 'points': r.points, 'elo': r.elo} for r in history],
+        'badges': badges,
+        'archives': [{'season': a.season, 'rank': a.rank, 'points': a.points,
+                      'tier': a.tier} for a in archives],
+    })
+
+
+# ═══════════════ 赛季证书 ═══════════════
+
+GRADE_LABELS = {'gold': '金奖', 'silver': '银奖', 'bronze': '铜奖', 'merit': '纪念奖'}
+
+
+def _cert_to_dict(c, brief=False):
+    d = {
+        'id': c.id, 'serial_no': c.serial_no, 'season': c.season,
+        'grade': c.grade, 'grade_label': (c.summary or {}).get('grade_label')
+            or GRADE_LABELS.get(c.grade, c.grade),
+        'tier': c.tier, 'rank': c.rank, 'points': c.points,
+        'total_players': c.total_players,
+        'earned_at': iso_local(c.earned_at),
+    }
+    if not brief:
+        d['summary'] = c.summary or {}
+        d['username'] = c.author.username if c.author else None
+    return d
+
+
+@gamification_bp.route('/rank/certificates/mine', methods=['GET'])
+def rank_certificates_mine():
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    certs = (CompetitionCertificate.query.filter_by(user_id=user.id)
+             .order_by(CompetitionCertificate.earned_at.desc()).all())
+    return jsonify([_cert_to_dict(c, brief=True) for c in certs])
+
+
+@gamification_bp.route('/rank/certificates/<int:cert_id>', methods=['GET'])
+def rank_certificate_detail(cert_id):
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    cert = db.session.get(CompetitionCertificate, cert_id)
+    if not cert or cert.user_id != user.id:
+        return jsonify({'message': '证书不存在'}), 404
+    return jsonify(_cert_to_dict(cert, brief=False))
 
 
 # ═══════════════ 勋章 ═══════════════

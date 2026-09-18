@@ -19,6 +19,9 @@ from competition.realtime import notify_leaderboard_update
 
 competition_play_bp = Blueprint('competition_play', __name__)
 
+# 反作弊：单题人类最短反应用时（秒），低于此值标为可疑（照常计分，仅标记）
+MIN_REACT_SECONDS = 1
+
 
 def _require_student():
     user = verify_token()
@@ -79,6 +82,7 @@ def api_competition_lobby():
         return err
 
     comps = Competition.query.filter(
+        Competition.is_quick.is_(False),
         Competition.status.in_([CompetitionStatusEnum.PUBLISHED,
                                 CompetitionStatusEnum.ONGOING,
                                 CompetitionStatusEnum.ENDED])
@@ -106,6 +110,9 @@ def api_competition_lobby():
     result = []
     for c in comps:
         p = my_parts.get(c.id)
+        # 受限竞赛：非成员（未报名）完全不可见
+        if (c.access_mode or 'public') == 'restricted' and p is None:
+            continue
         # 已有 my_parts 行直接复用；未开始答题（JOINED）无排名可算
         my_rank = get_my_rank(c.id, user.id, participant=p)['rank'] \
             if p and p.status != ParticipantStatusEnum.JOINED else None
@@ -150,6 +157,47 @@ def api_leaderboard(comp_id):
     })
 
 
+@competition_play_bp.route('/competitions/<int:comp_id>/participants/<int:uid>/replay', methods=['GET'])
+def api_participant_replay(comp_id, uid):
+    """限时赛单人逐题回放：教师(创建者)或本人可读，重建该参与者得分随时间爬升。"""
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    comp = db.session.get(Competition, comp_id)
+    if not comp:
+        return jsonify({'message': '竞赛不存在'}), 404
+    if not (user.id == uid or user.is_teacher() or comp.creator_id == user.id):
+        return jsonify({'message': '无权查看该回放'}), 403
+    participant = CompetitionParticipant.query.filter_by(
+        competition_id=comp_id, user_id=uid).first()
+    if not participant:
+        return jsonify({'message': '参与者不存在'}), 404
+    started = participant.started_at
+    running = 0.0
+    timeline = []
+    for a in sorted(participant.answers, key=lambda x: (x.answered_at or started or utcnow())):
+        t_sec = round((a.answered_at - started).total_seconds(), 1) if (a.answered_at and started) else 0
+        running = round(running + float(a.gained_score or 0), 2)
+        cq = a.cq
+        timeline.append({
+            't_sec': max(0, t_sec), 'cq_id': a.cq_id,
+            'content': cq.content if cq else '', 'q_type': cq.q_type if cq else None,
+            'is_correct': bool(a.is_correct), 'gained': round(float(a.gained_score or 0), 2),
+            'running_score': running,
+        })
+    return jsonify({
+        'competition': {'id': comp.id, 'title': comp.title, 'duration': comp.duration,
+                        'total_score': comp.total_score},
+        'player': {'user_id': participant.user_id,
+                   'username': participant.user.username if participant.user else None},
+        'started_at': iso_local(started),
+        'timeline': timeline,
+        'final': {'score': participant.score, 'used_time': participant.used_time,
+                  'status': participant.status,
+                  'my_rank': get_my_rank(comp_id, uid, participant)},
+    })
+
+
 @competition_play_bp.route('/competitions/<int:comp_id>/join', methods=['POST'])
 def api_join(comp_id):
     user, err = _require_student()
@@ -169,10 +217,42 @@ def api_join(comp_id):
         competition_id=comp_id, user_id=user.id).first()
     if existing:
         return jsonify({'message': '已报名', 'participant_id': existing.id})
+    # 受限竞赛：非成员报名时需正确邀请码
+    if (comp.access_mode or 'public') == 'restricted':
+        data = request.get_json(silent=True) or {}
+        code = (data.get('invite_code') or '').strip().upper()
+        if not comp.invite_code or code != comp.invite_code.upper():
+            return jsonify({'message': '需要正确的邀请码'}), 403
     participant = CompetitionParticipant(competition_id=comp_id, user_id=user.id)
     db.session.add(participant)
     db.session.commit()
     return jsonify({'message': '报名成功', 'participant_id': participant.id})
+
+
+@competition_play_bp.route('/competitions/join-by-code', methods=['POST'])
+def api_join_by_code():
+    """凭邀请码报名：按码定位处于开放窗口内的受限竞赛并报名。"""
+    user, err = _require_student()
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    code = (data.get('code') or '').strip().upper()
+    if not code:
+        return jsonify({'message': '请输入邀请码'}), 400
+    comp = Competition.query.filter_by(access_mode='restricted', invite_code=code).first()
+    if not comp:
+        return jsonify({'message': '邀请码无效'}), 404
+    comp.sync_status()
+    db.session.commit()
+    if comp.status in (CompetitionStatusEnum.DRAFT, CompetitionStatusEnum.ENDED):
+        return jsonify({'message': '竞赛已结束或未发布'}), 400
+    existing = CompetitionParticipant.query.filter_by(
+        competition_id=comp.id, user_id=user.id).first()
+    if not existing:
+        db.session.add(CompetitionParticipant(competition_id=comp.id, user_id=user.id))
+        db.session.commit()
+    return jsonify({'message': '报名成功',
+                    'competition_id': comp.id, 'title': comp.title})
 
 
 def _assign_questions(comp, participant):
@@ -273,6 +353,7 @@ def _play_payload(comp, participant):
 
     return {
         'status': participant.status,
+        'sanctioned': bool(participant.user and participant.user.is_sanctioned),
         'competition': {
             'id': comp.id, 'title': comp.title, 'duration': comp.duration,
             'total_score': comp.total_score,
@@ -340,6 +421,8 @@ def api_answer(comp_id):
         is_correct=is_correct,
         gained_score=gained,
         time_spent=time_spent,
+        flagged=(time_spent < MIN_REACT_SECONDS),
+        flag_reason=('fast' if time_spent < MIN_REACT_SECONDS else None),
     )
     db.session.add(record)
     db.session.commit()

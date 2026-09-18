@@ -37,6 +37,15 @@ class Competition(db.Model):
     total_score = db.Column(db.Float, nullable=False, default=0)   # 卷面总分（发布时计算）
     allow_pk = db.Column(db.Boolean, nullable=False, default=True)  # 是否允许基于本题库发起PK
     creator_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    # 多轮系列赛与快速对战（迁移 0009 加列）
+    series_id = db.Column(db.Integer)          # 所属 CompetitionSeries（无 FK 约束，应用层维护）
+    series_round = db.Column(db.Integer)       # 系列赛中的轮次（1..N）
+    is_quick = db.Column(db.Boolean, nullable=False, default=False)  # 快速 PK 隐藏题源竞赛，不在广场展示
+    # 运营能力（迁移 0010 加列）：开赛提醒 + 邀请码门禁
+    remind_before = db.Column(db.Integer, nullable=False, default=0)  # 开赛前 N 分钟提醒，0=关闭
+    remind_sent_at = db.Column(UTCDateTime)                           # 提醒已发时间戳（NULL=未发，幂等标记）
+    access_mode = db.Column(db.String(10), nullable=False, default='public')  # public | restricted
+    invite_code = db.Column(db.String(16))                            # 受限竞赛邀请码（public 为 NULL）
     created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
 
     creator = db.relationship('User', backref='competitions', lazy=True)
@@ -116,6 +125,7 @@ class CompetitionParticipant(db.Model):
     assigned_cq_ids = db.Column(db.Text)   # 抽题防作弊：开始答题时固化的题目ID列表 JSON
     started_at = db.Column(UTCDateTime)
     finished_at = db.Column(UTCDateTime)
+    flagged = db.Column(db.Boolean, nullable=False, default=False)  # 公平性异常标记
     created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
 
     user = db.relationship('User', backref='competition_participants', lazy=True)
@@ -146,6 +156,8 @@ class CompetitionAnswer(db.Model):
     is_correct = db.Column(db.Boolean, default=False)
     gained_score = db.Column(db.Float, nullable=False, default=0)
     time_spent = db.Column(db.Integer, nullable=False, default=0)  # 该题用时（秒）
+    flagged = db.Column(db.Boolean, nullable=False, default=False)   # 反作弊：反应时异常
+    flag_reason = db.Column(db.String(20))                          # 如 'fast'
     answered_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
 
     cq = db.relationship('CompetitionQuestion', backref='answers', lazy=True)
@@ -179,6 +191,12 @@ class PkBattle(db.Model):
     started_at = db.Column(UTCDateTime)
     finished_at = db.Column(UTCDateTime)
     created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
+    # 快速 PK 与 Elo / 机器人（迁移 0009 加列）
+    is_bot = db.Column(db.Boolean, nullable=False, default=False)   # 对手为训练机器人
+    quick = db.Column(db.Boolean, nullable=False, default=False)    # 由 /pk/quick 发起
+    bot_plan = db.Column(db.Text)                                   # 机器人逐题计划 JSON：[{cq_id, will_correct, at_sec}]
+    delta_challenger = db.Column(db.Integer, nullable=False, default=0)  # 本场 Elo 变化
+    delta_opponent = db.Column(db.Integer, nullable=False, default=0)
 
     competition = db.relationship('Competition', backref='pk_battles')
     challenger = db.relationship('User', foreign_keys=[challenger_id], backref='pk_as_challenger')
@@ -218,6 +236,8 @@ class PkAnswer(db.Model):
     is_correct = db.Column(db.Boolean, default=False)
     gained_score = db.Column(db.Float, nullable=False, default=0)
     time_spent = db.Column(db.Integer, nullable=False, default=0)
+    flagged = db.Column(db.Boolean, nullable=False, default=False)   # 反作弊：反应时异常
+    flag_reason = db.Column(db.String(20))
     answered_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
 
     battle = db.relationship('PkBattle', backref='answers')
@@ -345,4 +365,109 @@ class TeamMember(db.Model):
 
     __table_args__ = (
         db.UniqueConstraint('user_id', name='_team_member_one_uc'),  # 一人同时只属一队
+    )
+
+
+# ═══════════════ 竞技内核升级（第一批）：Elo / 积分历史 / 系列赛 ═══════════════
+
+class ArenaRating(db.Model):
+    """跨赛季持久化对战等级分（Elo），独立于赛季积分，月度不清零"""
+    __tablename__ = 'arena_rating'
+
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), primary_key=True)
+    elo = db.Column(db.Integer, nullable=False, default=1200)
+    peak_elo = db.Column(db.Integer, nullable=False, default=1200)
+    games = db.Column(db.Integer, nullable=False, default=0)   # 已计入 Elo 的对战场次（定 K 值）
+    updated_at = db.Column(UTCDateTime, nullable=False, default=utcnow, onupdate=utcnow)
+
+    user = db.relationship('User', backref='arena_rating')
+
+    def to_dict(self):
+        return {'elo': self.elo, 'peak_elo': self.peak_elo, 'games': self.games}
+
+
+class PointsHistory(db.Model):
+    """竞技积分 / Elo 按天快照，用于个人主页与段位页的历史曲线（每天 upsert）"""
+    __tablename__ = 'points_history'
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    season = db.Column(db.String(7), nullable=False)     # 'YYYY-MM'
+    day = db.Column(db.String(10), nullable=False)       # 'YYYY-MM-DD'
+    points = db.Column(db.Integer, nullable=False, default=0)
+    elo = db.Column(db.Integer, nullable=False, default=1200)
+    updated_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
+
+    user = db.relationship('User', backref='points_histories')
+
+    __table_args__ = (
+        db.UniqueConstraint('user_id', 'season', 'day', name='_points_history_uc'),
+    )
+
+
+class CompetitionSeries(db.Model):
+    """多轮系列赛：把若干场竞赛归为一个赛季系列，按 best_n 或 sum 结算总冠军"""
+    __tablename__ = 'competition_series'
+
+    id = db.Column(db.Integer, primary_key=True)
+    title = db.Column(db.String(100), nullable=False)
+    description = db.Column(db.Text)
+    scoring_mode = db.Column(db.String(10), nullable=False, default='best_n')  # sum / best_n
+    best_n = db.Column(db.Integer, nullable=False, default=0)   # scoring_mode=best_n 时取最佳 N 场，0=全部
+    creator_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
+
+    creator = db.relationship('User', backref='created_series')
+
+    def to_dict(self):
+        return {
+            'id': self.id, 'title': self.title, 'description': self.description or '',
+            'scoring_mode': self.scoring_mode, 'best_n': self.best_n,
+            'creator_id': self.creator_id,
+            'created_at': iso_local(self.created_at),
+        }
+
+
+# ═══════════════ 竞技内核升级（第二批）：赛后讨论区 ═══════════════
+
+class DiscussionPost(db.Model):
+    """赛后讨论区：以竞赛为单元的帖子/回复（一层线程，回复指向顶层帖）。"""
+    __tablename__ = 'discussion_post'
+
+    id = db.Column(db.Integer, primary_key=True)
+    competition_id = db.Column(db.Integer, db.ForeignKey('competition.id'),
+                               nullable=False, index=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    parent_id = db.Column(db.Integer, db.ForeignKey('discussion_post.id'))  # 回复的顶层帖 id
+    content = db.Column(db.Text, nullable=False)
+    created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
+
+    author = db.relationship('User', backref='discussion_posts', lazy=True)
+    competition = db.relationship('Competition', backref='discussions')
+    parent = db.relationship('DiscussionPost', remote_side=[id],
+                             backref='reply_list', lazy=True)
+
+
+# ═══════════════ 竞技内核升级（第三批）：赛季分等级证书 ═══════════════
+
+class CompetitionCertificate(db.Model):
+    """赛季证书：赛季归档时按最终积分分等级颁发，幂等（一人一赛季一份）。"""
+    __tablename__ = 'competition_certificate'
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    season = db.Column(db.String(7), nullable=False)          # 'YYYY-MM'
+    serial_no = db.Column(db.String(32), nullable=False, unique=True)
+    grade = db.Column(db.String(10), nullable=False)          # gold/silver/bronze/merit
+    tier = db.Column(db.String(10))                           # 最终段位快照
+    rank = db.Column(db.Integer)                              # 赛季名次
+    points = db.Column(db.Integer, nullable=False, default=0)
+    total_players = db.Column(db.Integer, nullable=False, default=0)
+    summary = db.Column(JSONType)   # {season_label, grade_label, pk_total, timed_finished, earned_date}
+    earned_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
+
+    author = db.relationship('User', backref='season_certificates', lazy=True)
+
+    __table_args__ = (
+        db.UniqueConstraint('user_id', 'season', name='_season_cert_uc'),
     )

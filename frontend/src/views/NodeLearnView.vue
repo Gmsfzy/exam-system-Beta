@@ -79,12 +79,21 @@
         <div class="panel">
           <div class="panel-head">
             <h2>配套题目</h2>
-            <el-button
-              size="small" type="primary" plain
-              :loading="startingPractice" @click="startNodePractice"
-            >
-              <el-icon><VideoPlay /></el-icon> 开始本节点练习
-            </el-button>
+            <div class="head-btns">
+              <el-button
+                size="small" type="warning" plain
+                v-if="node.knowledge_point_id"
+                :loading="quiz.starting" @click="startQuiz"
+              >
+                <el-icon><AlarmClock /></el-icon> 节点小测
+              </el-button>
+              <el-button
+                size="small" type="primary" plain
+                :loading="startingPractice" @click="startNodePractice"
+              >
+                <el-icon><VideoPlay /></el-icon> 开始本节点练习
+              </el-button>
+            </div>
           </div>
           <el-empty v-if="questions.length === 0" description="该知识点暂无关联题目" :image-size="70" />
           <div v-else class="question-list">
@@ -96,8 +105,24 @@
               </div>
             </div>
           </div>
-          <div class="panel-hint">点击「开始本节点练习」按本节点知识点出题，答题正确率计入练习记录，完成后可在此标记掌握</div>
+          <div class="panel-hint">「节点小测」限时自测：达到 80% 自动标记本节点已掌握；「练习」可边看答案边做</div>
         </div>
+      </div>
+
+      <!-- 我的笔记（按知识点一篇总结） -->
+      <div v-if="node.knowledge_point_id" class="panel note-panel">
+        <div class="panel-head">
+          <h2>我的笔记</h2>
+          <div class="head-btns">
+            <el-button size="small" type="primary" plain :loading="polishing" @click="polishNote">
+              <el-icon><MagicStick /></el-icon> AI 润色提炼
+            </el-button>
+            <el-button size="small" type="primary" :loading="savingNote" @click="saveNote">保存笔记</el-button>
+          </div>
+        </div>
+        <el-input v-model="noteText" type="textarea" :rows="5" maxlength="5000" show-word-limit
+                  placeholder="用自己的话总结这个知识点：核心概念、易错点、记忆方法…（保存后可在「我的知识库」查看）" />
+        <div v-if="noteUpdatedAt" class="note-updated">上次保存：{{ noteUpdatedAt }}</div>
       </div>
 
       <!-- 视频播放对话框 -->
@@ -111,7 +136,51 @@
         </div>
       </el-dialog>
 
-      <!-- 添加资源对话框（全民共建） -->
+      <!-- 节点小测弹窗 -->
+      <el-dialog v-model="quiz.visible" title="节点小测" width="640px" :close-on-click-modal="false" destroy-on-close>
+        <template v-if="quiz.step === 'quiz' && quiz.questions.length">
+          <div class="qz-head">
+            <span>第 {{ quiz.idx + 1 }} / {{ quiz.questions.length }} 题</span>
+            <el-tag size="small">{{ qTypeLabel(quizCurrent.type) }}</el-tag>
+          </div>
+          <div class="qz-content">{{ quizCurrent.content }}</div>
+          <div v-if="isChoice(quizCurrent.type)" class="qz-options">
+            <div v-for="(opt, i) in (quizCurrent.options || [])" :key="i"
+                 :class="['qz-option', { selected: isPicked(i) }]" @click="pick(i)">
+              <span class="opt-label">{{ String.fromCharCode(65 + i) }}</span>
+              <span>{{ opt }}</span>
+            </div>
+          </div>
+          <div v-else-if="quizCurrent.type === 'true_false'" class="qz-options">
+            <div v-for="lab in ['A', 'B']" :key="lab" :class="['qz-option', { selected: quiz.draft === lab }]" @click="quiz.draft = lab">
+              <span class="opt-label">{{ lab }}</span><span>{{ lab === 'A' ? '正确' : '错误' }}</span>
+            </div>
+          </div>
+          <el-input v-else v-model="quiz.draft" type="textarea" :rows="3" placeholder="请输入答案" />
+          <div class="qz-foot">
+            <el-button :disabled="quiz.idx === 0" @click="prevQuestion">上一题</el-button>
+            <el-button v-if="quiz.idx < quiz.questions.length - 1" type="primary"
+                       :disabled="!quiz.draft.trim()" :loading="quiz.saving" @click="nextQuestion">下一题</el-button>
+            <el-button v-else type="success" :disabled="!quiz.draft.trim()" :loading="quiz.saving" @click="finishQuiz">交卷</el-button>
+          </div>
+        </template>
+
+        <template v-else-if="quiz.step === 'result'">
+          <div class="qz-result" :class="quiz.result.passed ? 'pass' : 'fail'">
+            <div class="qz-score">{{ Math.round((quiz.result.score_ratio || 0) * 100) }} 分</div>
+            <div class="qz-stat">答对 {{ quiz.result.correct_count }} / {{ quiz.result.total }} 题</div>
+            <div class="qz-verdict">
+              {{ quiz.result.passed
+                 ? '🎉 通过！本节点已自动标记为已掌握'
+                 : '未达 80% 通过线，可复习后再考一次' }}
+            </div>
+          </div>
+          <div class="qz-foot">
+            <el-button @click="quiz.visible = false">关闭</el-button>
+            <el-button type="primary" @click="retakeQuiz">再考一次</el-button>
+          </div>
+        </template>
+      </el-dialog>
       <el-dialog v-model="resDlg" title="添加学习资源" width="520px">
         <el-form :model="resForm" label-width="80px">
           <el-form-item label="标题" required>
@@ -142,10 +211,10 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowLeft, Plus, VideoPlay, Link, EditPen, Document } from '@element-plus/icons-vue'
+import { ArrowLeft, Plus, VideoPlay, Link, EditPen, Document, AlarmClock, MagicStick } from '@element-plus/icons-vue'
 import request from '../utils/request'
 
 const route = useRoute()
@@ -167,6 +236,128 @@ const currentVideo = ref(null)
 const startingPractice = ref(false)
 
 const enrollmentId = computed(() => path.value?.my_enrollment?.id ?? null)
+
+// ── 我的笔记 ───────────────────────────────────────────────
+const noteText = ref('')
+const noteUpdatedAt = ref('')
+const savingNote = ref(false)
+const polishing = ref(false)
+
+const loadNote = async () => {
+  const kpId = node.value?.knowledge_point_id
+  if (!kpId) return
+  try {
+    const res = await request.get('/api/learning/kp-notes', { params: { knowledge_point_id: kpId } })
+    noteText.value = res.data.content || ''
+    noteUpdatedAt.value = res.data.updated_at || ''
+  } catch (e) { /* ignore */ }
+}
+watch(node, loadNote)
+
+const saveNote = async () => {
+  if (!node.value?.knowledge_point_id) return
+  savingNote.value = true
+  try {
+    const res = await request.put(`/api/learning/kp-notes/${node.value.knowledge_point_id}`, { content: noteText.value })
+    noteUpdatedAt.value = res.data.updated_at || ''
+    ElMessage.success('笔记已保存')
+  } catch (e) { /* 拦截器已提示 */ }
+  savingNote.value = false
+}
+
+const polishNote = async () => {
+  if (!noteText.value.trim()) { ElMessage.warning('请先输入笔记内容'); return }
+  polishing.value = true
+  try {
+    const res = await request.post(`/api/learning/kp-notes/${node.value.knowledge_point_id}/ai-polish`, { content: noteText.value })
+    noteText.value = res.data.polished
+    ElMessage.success('已用 AI 润色结果替换草稿，确认后请保存')
+  } catch (e) { /* 拦截器已提示 */ }
+  polishing.value = false
+}
+
+// ── 节点小测 ───────────────────────────────────────────────
+const quiz = reactive({
+  visible: false, starting: false, saving: false,
+  step: 'quiz', attemptId: null, questions: [], idx: 0, draft: '',
+  picked: {}, result: {},
+})
+
+const currentQuizQ = computed(() => quiz.questions[quiz.idx])
+const quizCurrent = computed(() => quiz.questions[quiz.idx] || {})
+
+const isChoice = (t) => ['single_choice', 'multiple_choice'].includes(t)
+const isPicked = (i) => (quiz.draft || '').includes(String.fromCharCode(65 + i))
+const pick = (i) => {
+  const label = String.fromCharCode(65 + i)
+  if (currentQuizQ.value?.type === 'single_choice') {
+    quiz.draft = label
+  } else {
+    const set = new Set((quiz.draft || '').split('').filter(Boolean))
+    set.has(label) ? set.delete(label) : set.add(label)
+    quiz.draft = Array.from(set).sort().join('')
+  }
+}
+
+const startQuiz = async () => {
+  quiz.starting = true
+  try {
+    const res = await request.post('/api/learning/quizzes/start', { node_id: nodeId })
+    quiz.attemptId = res.data.attempt_id
+    quiz.questions = res.data.questions || []
+    quiz.idx = 0
+    quiz.draft = ''
+    quiz.picked = {}
+    quiz.step = 'quiz'
+    quiz.visible = true
+  } catch (e) { /* 题量不足等 409 提示由拦截器弹出 */ }
+  quiz.starting = false
+}
+
+const saveCurrentAnswer = async () => {
+  const q = currentQuizQ.value
+  if (!q?.id) return false
+  try {
+    await request.post(`/api/learning/quizzes/${quiz.attemptId}/answer`, {
+      question_id: q.id, student_answer: quiz.draft.trim(),
+    })
+    quiz.picked[q.id] = quiz.draft.trim()
+    return true
+  } catch (e) { return false }
+}
+
+const prevQuestion = async () => {
+  await saveCurrentAnswer()
+  if (quiz.idx > 0) {
+    quiz.idx -= 1
+    quiz.draft = quiz.picked[quizCurrent.value.id] || ''
+  }
+}
+
+const nextQuestion = async () => {
+  quiz.saving = true
+  const ok = await saveCurrentAnswer()
+  quiz.saving = false
+  if (!ok) return
+  quiz.idx += 1
+  quiz.draft = quiz.picked[quizCurrent.value.id] || ''
+}
+
+const finishQuiz = async () => {
+  quiz.saving = true
+  const ok = await saveCurrentAnswer()
+  if (ok) {
+    try {
+      const res = await request.post(`/api/learning/quizzes/${quiz.attemptId}/submit`)
+      quiz.result = res.data
+      quiz.step = 'result'
+      if (res.data.passed) loadPath()  // 通过后节点状态已自动置掌握，刷新页面
+    } catch (e) { /* 拦截器已提示 */ }
+  }
+  quiz.saving = false
+}
+
+const retakeQuiz = () => { startQuiz() }
 const progressStatus = computed(() => {
   const found = path.value?.nodes?.find(n => n.id === nodeId)
   return found?.progress_status || null
@@ -515,6 +706,81 @@ onMounted(() => {
   color: var(--text-muted);
   padding: 40px 0;
 }
+
+.head-btns {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.note-panel {
+  margin-top: 18px;
+}
+
+.note-updated {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 8px;
+}
+
+.qz-head {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  font-size: 13px;
+  color: var(--text-muted);
+  margin-bottom: 10px;
+}
+
+.qz-content {
+  font-size: 15px;
+  line-height: 1.7;
+  color: var(--text-primary);
+  margin-bottom: 16px;
+  white-space: pre-wrap;
+}
+
+.qz-options {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.qz-option {
+  display: flex;
+  gap: 10px;
+  padding: 10px 14px;
+  border: 1px solid var(--border-color);
+  border-radius: 9px;
+  cursor: pointer;
+  transition: all 0.2s;
+  font-size: 14px;
+  color: var(--text-primary);
+}
+
+.qz-option:hover { border-color: #f59e0b; }
+.qz-option.selected { background: rgba(245, 158, 11, 0.1); border-color: #f59e0b; }
+.qz-option .opt-label { font-weight: 600; color: var(--text-muted); }
+
+.qz-foot {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 18px;
+}
+
+.qz-foot > :first-child { margin-right: auto; }
+.qz-foot .el-button + .el-button { margin-left: 8px; }
+
+.qz-result {
+  text-align: center;
+  padding: 26px 0 10px;
+}
+
+.qz-result .qz-score { font-size: 44px; font-weight: 800; }
+.qz-result.pass .qz-score { color: #10b981; }
+.qz-result.fail .qz-score { color: #ef4444; }
+.qz-result .qz-stat { font-size: 14px; color: var(--text-muted); margin-top: 6px; }
+.qz-result .qz-verdict { font-size: 15px; color: var(--text-primary); margin-top: 12px; }
 
 .video-player {
   width: 100%;

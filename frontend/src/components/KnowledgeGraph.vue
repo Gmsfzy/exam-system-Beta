@@ -23,6 +23,7 @@ const props = defineProps({
   height: { type: String, default: '560px' },
   highlightIds: { type: Array, default: () => [] }, // 高亮的知识点 id（如已掌握）
   editable: { type: Boolean, default: false },
+  mastery: { type: Boolean, default: false },        // 掌握度着色模式（节点带 mastery/decay_risk 字段）
 })
 const emit = defineEmits(['node-tap', 'edge-tap', 'background-tap'])
 
@@ -32,6 +33,16 @@ let themeObserver = null
 
 const DIFF_COLORS = { easy: '#10b981', medium: '#f59e0b', hard: '#ef4444' }
 const ACCENT = '#06b6d4'
+// 掌握度着色：未学习灰 / 生疏红 / 学习中黄 / 已掌握绿
+const MASTERY_COLORS = { untouched: '#94a3b8', low: '#ef4444', mid: '#f59e0b', high: '#10b981' }
+
+function masteryColor(n) {
+  const v = n.mastery ?? 0
+  if (v >= 80) return MASTERY_COLORS.high
+  if (v >= 40) return MASTERY_COLORS.mid
+  if (v > 0) return MASTERY_COLORS.low
+  return MASTERY_COLORS.untouched
+}
 
 const isDark = () => document.documentElement.classList.contains('dark')
 
@@ -47,13 +58,17 @@ function buildElements() {
   return [
     ...props.nodes.map(n => {
       const d = deg[n.id] || 0
+      const fill = props.mastery ? masteryColor(n) : (DIFF_COLORS[n.difficulty] || '#10b981')
+      // 掌握模式下遗忘风险节点用红色描边提示
+      const riskEdge = props.mastery && n.decay_risk
       return {
         data: {
           id: `kp-${n.id}`,
           name: n.name,
-          color: DIFF_COLORS[n.difficulty] || '#10b981',
-          'border-color': highlight.has(n.id) ? ACCENT : (isDark() ? '#334155' : '#ffffff'),
-          'border-width': highlight.has(n.id) ? 4 : 2.5,
+          color: fill,
+          'background-opacity': props.mastery && (n.mastery ?? 0) === 0 ? 0.45 : 0.92,
+          'border-color': riskEdge ? '#ef4444' : (highlight.has(n.id) ? ACCENT : (isDark() ? '#334155' : '#ffffff')),
+          'border-width': riskEdge ? 3.5 : (highlight.has(n.id) ? 4 : 2.5),
           size: 38 + Math.min(d, 8) * 3,
           raw: n,
         },
@@ -126,7 +141,7 @@ const render = () => {
           width: 'data(size)',
           height: 'data(size)',
           'background-color': 'data(color)',
-          'background-opacity': 0.92,
+          'background-opacity': 'data(background-opacity)',
           'border-width': 'data(border-width)',
           'border-color': 'data(border-color)',
           // 发光底层：掌握/聚焦节点泛青色光晕

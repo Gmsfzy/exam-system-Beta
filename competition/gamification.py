@@ -12,57 +12,105 @@ from utils.timeutil import current_season as _current_season
 from competition.models import (
     Competition, CompetitionParticipant, PkBattle, PkBattleStatusEnum,
     ParticipantStatusEnum, UserPointsProfile, UserBadge,
-    CompetitionStatusEnum,
+    CompetitionStatusEnum, ArenaRating, PointsHistory,
 )
 from competition.leaderboard import get_leaderboard
 from competition.realtime import notify_user
 
 
 # ═══════════════ 段位定义 ═══════════════
-# (名称, 达到该段位所需最低积分)；王者无上限
+# (名称, 达到该段位所需最低积分, 排名百分位要求|None)
+# 百分位要求：需同时满足「积分门槛」与「赛季排名前 X%」才能定档（对标 Kaggle 相对位置晋升）。
+# 赛季参与人数 < MIN_RANK_PLAYERS 时忽略百分位、只认门槛（解决人少时人人都能封王）。
+MIN_RANK_PLAYERS = 20
 TIERS = [
-    ('青铜', 0),
-    ('白银', 100),
-    ('黄金', 250),
-    ('铂金', 450),
-    ('钻石', 700),
-    ('王者', 1000),
+    ('青铜', 0, None),
+    ('白银', 100, None),
+    ('黄金', 250, None),
+    ('铂金', 450, 0.50),   # 需赛季前 50%
+    ('钻石', 700, 0.15),   # 需赛季前 15%
+    ('星耀', 900, 0.07),   # 需赛季前 7%
+    ('王者', 1200, 0.03),  # 需赛季前 3%（门槛抬高）
 ]
 
 TIER_COLORS = {
     '青铜': '#b08d57', '白银': '#a8b4c4', '黄金': '#f0c14b',
-    '铂金': '#7fd8d8', '钻石': '#7db9f5', '王者': '#ff7a45',
+    '铂金': '#7fd8d8', '钻石': '#7db9f5', '星耀': '#c084fc', '王者': '#ff7a45',
 }
 
+# 无百分位要求的最高基准档（黄金）索引：排名不达标时最低也只保到这一档
+_BASELINE_IDX = max(i for i, t in enumerate(TIERS) if t[2] is None)
 
-def tier_of(points):
-    """积分 -> 段位名称"""
-    tier = TIERS[0][0]
-    for name, floor in TIERS:
+
+# ═══════════════ 赛季证书等级（按最终积分分档，复用段位积分锚点）═══════════════
+# (达到该等级所需最低积分, 等级码, 等级名)
+CERT_GRADES = [
+    (700, 'gold', '金奖'),
+    (450, 'silver', '银奖'),
+    (250, 'bronze', '铜奖'),
+    (1, 'merit', '纪念奖'),
+]
+
+
+def cert_grade(points):
+    """赛季最终积分 -> (等级码, 等级名)；积分 <=0 不发（返回 None）。"""
+    points = int(points or 0)
+    if points <= 0:
+        return None
+    for floor, code, label in CERT_GRADES:
         if points >= floor:
-            tier = name
-    return tier
+            return code, label
+    return None
 
 
-def tier_progress(points):
-    """段位进度信息：当前段位/积分/下一档位/所需积分/进度百分比"""
-    tier = tier_of(points)
-    idx = next(i for i, (name, _) in enumerate(TIERS) if name == tier)
-    next_tier, next_at = (None, None)
+def tier_of(points, rank=None, total=None):
+    """积分 + （可选）赛季排名 -> 段位名称。
+    传入 rank/total 且 total>=MIN_RANK_PLAYERS 时启用百分位封顶，最终档 = min(门槛档, 百分位档)。
+    """
+    floor_idx = 0
+    for i, (_n, floor, _tp) in enumerate(TIERS):
+        if points >= floor:
+            floor_idx = i
+    if rank is not None and total is not None and total >= MIN_RANK_PLAYERS and rank >= 1:
+        ratio = rank / total
+        pct_idx = _BASELINE_IDX  # 排名不达标时只保到基准档
+        for i, (_n, _f, tp) in enumerate(TIERS):
+            if tp is not None and ratio <= tp:
+                pct_idx = i
+        final_idx = min(floor_idx, pct_idx)
+    else:
+        final_idx = floor_idx
+    return TIERS[final_idx][0]
+
+
+def tier_progress(points, rank=None, total=None):
+    """段位进度：当前段位/积分/下一档/门槛/进度百分比 + 是否被排名百分位封顶"""
+    tier = tier_of(points, rank, total)
+    idx = next(i for i, (name, _, _) in enumerate(TIERS) if name == tier)
+    next_tier, next_at, next_tp = (None, None, None)
     if idx + 1 < len(TIERS):
-        next_tier, next_at = TIERS[idx + 1]
+        next_tier, next_at, next_tp = TIERS[idx + 1]
     percent = 100
     if next_at is not None:
         cur_floor = TIERS[idx][1]
         span = next_at - cur_floor
         percent = min(100, round((points - cur_floor) / span * 100))
+    # gated：积分已够上档位，但因排名未达百分位而被封顶
+    gated = False
+    if next_tier is not None and next_tp is not None and total is not None \
+            and total >= MIN_RANK_PLAYERS and points >= next_at:
+        ratio = (rank or total) / total
+        if ratio > next_tp:
+            gated = True
     return {
         'tier': tier,
         'tier_color': TIER_COLORS[tier],
         'points': points,
         'next_tier': next_tier,
         'next_at': next_at,
+        'next_rank_top_pct': (round(next_tp * 100) if next_tp is not None else None),
         'percent': percent,
+        'gated': gated,
     }
 
 
@@ -76,6 +124,11 @@ BADGE_DEFS = {
     'perfect_score':   {'name': '一战封神', 'description': '限时积分赛取得单场满分',    'icon': '💯'},
     'season_top3':     {'name': '季度巅峰', 'description': '赛季结算时全校排名前三',    'icon': '🏆'},
     'team_found':      {'name': '开疆辟土', 'description': '创建了自己的战队',          'icon': '🛡️'},
+    # 学习闭环徽章（api.learning_engine.grant_learning_badges 触发）
+    'study_streak_7':   {'name': '七日之约', 'description': '连续打卡学习 7 天',        'icon': '📅'},
+    'study_streak_21':  {'name': '三周不辍', 'description': '连续打卡学习 21 天',       'icon': '⛓️'},
+    'first_certificate': {'name': '学以致用', 'description': '获得首张学习路径结业证书', 'icon': '📜'},
+    'first_path_complete': {'name': '首程抵达', 'description': '完整掌握首条学习路径',   'icon': '🏁'},
 }
 
 
@@ -116,7 +169,8 @@ def _timed_finish_count(user_id):
 
 def check_and_grant(user_id, triggers, season='', related_id=None):
     """按触发器聚合校验并发放勋章（不 commit，由调用方提交）
-    triggers ⊆ {'first_pk_win','pk_streak_3','pk_streak_5','timed_finish_10','perfect_score'}
+    triggers ⊆ {'first_pk_win','pk_streak_3','pk_streak_5','timed_finish_10','perfect_score',
+                'team_found','study_streak_7','study_streak_21','first_certificate','first_path_complete'}
     返回新发放的勋章 payload 列表
     """
     granted = []
@@ -139,7 +193,30 @@ def check_and_grant(user_id, triggers, season='', related_id=None):
             _try(code, _has_perfect_score(user_id))
         elif code == 'team_found':
             _try(code, True)  # 事件驱动：调用即触发
+        elif code in _LEARNING_BADGE_CODES:
+            _try(code, _learning_cond(user_id, code))
     return granted
+
+
+# 学习闭环徽章：条件校验延迟导入，避免与 api 层循环依赖
+_LEARNING_BADGE_CODES = ('study_streak_7', 'study_streak_21',
+                         'first_certificate', 'first_path_complete')
+
+
+def _learning_cond(user_id, code):
+    db.session.flush()  # 让调用方事务内未提交的变更对下面的查询可见
+    if code in ('study_streak_7', 'study_streak_21'):
+        from api.learning_engine import compute_streak
+        need = 7 if code == 'study_streak_7' else 21
+        return compute_streak(user_id) >= need
+    if code == 'first_certificate':
+        from database.models import PathCertificate
+        return PathCertificate.query.filter_by(user_id=user_id).count() >= 1
+    if code == 'first_path_complete':
+        from database.models import UserPathEnrollment
+        return UserPathEnrollment.query.filter_by(
+            user_id=user_id, status='completed').count() >= 1
+    return False
 
 
 def _has_perfect_score(user_id):
@@ -199,16 +276,101 @@ def season_rank_of(user_id, season=None):
     return None
 
 
+def _tier_ctx(user_id, season):
+    """返回 (rank, total)，供段位百分位封顶使用；无档案时 (None, 0)"""
+    rank = season_rank_of(user_id, season)
+    total = UserPointsProfile.query.filter_by(season=season).count()
+    return rank, total
+
+
+# ═══════════════ 对战等级分 Elo（跨赛季持久） ═══════════════
+
+def is_bot_user(user_id):
+    """机器人（训练对手）判定：不参与积分/排行/Elo/历史入账"""
+    from database.models import User, RoleEnum
+    u = db.session.get(User, user_id)
+    return u is not None and u.role == RoleEnum.BOT
+
+
+def get_or_create_rating(user_id):
+    r = db.session.get(ArenaRating, user_id)
+    if r is None:
+        r = ArenaRating(user_id=user_id, elo=1200, peak_elo=1200)
+        db.session.add(r)
+        try:
+            db.session.flush()
+        except IntegrityError:
+            db.session.rollback()
+            r = db.session.get(ArenaRating, user_id)
+    return r
+
+
+def _expected(ra, rb):
+    return 1.0 / (1.0 + 10 ** ((rb - ra) / 400.0))
+
+
+def apply_elo(battle, winner_id, is_draw):
+    """对真人双方更新 Elo（K=32，双方总场次>=25 时 K=24）。
+    机器人对战不参与 Elo。返回 {user_id: delta}；写回 battle.delta_*。
+    在调用方事务内执行（不 commit）。
+    """
+    if battle.is_bot:
+        return {}
+    c_id, o_id = battle.challenger_id, battle.opponent_id
+    if not o_id or is_bot_user(c_id) or is_bot_user(o_id):
+        return {}
+    rc, ro = get_or_create_rating(c_id), get_or_create_rating(o_id)
+    k = 32 if (rc.games + ro.games) < 25 else 24
+    ec, eo = _expected(rc.elo, ro.elo), _expected(ro.elo, rc.elo)
+    if is_draw:
+        sc = so = 0.5
+    elif winner_id == c_id:
+        sc, so = 1.0, 0.0
+    else:
+        sc, so = 0.0, 1.0
+    dc = round(k * (sc - ec))
+    do = round(k * (so - eo))
+    rc.elo += dc
+    ro.elo += do
+    rc.games += 1
+    ro.games += 1
+    rc.peak_elo = max(rc.peak_elo, rc.elo)
+    ro.peak_elo = max(ro.peak_elo, ro.elo)
+    rc.updated_at = ro.updated_at = utcnow()
+    battle.delta_challenger = dc
+    battle.delta_opponent = do
+    return {c_id: dc, o_id: do}
+
+
+# ═══════════════ 积分历史快照 ═══════════════
+
+def upsert_points_history(user_id, season, points, elo=None):
+    """按天 upsert 当前赛季积分/Elo 快照（同一天覆盖为最新值）。"""
+    if is_bot_user(user_id):
+        return
+    day = utcnow().strftime('%Y-%m-%d')
+    elo_val = elo if elo is not None else get_or_create_rating(user_id).elo
+    row = PointsHistory.query.filter_by(user_id=user_id, season=season, day=day).first()
+    if row is None:
+        row = PointsHistory(user_id=user_id, season=season, day=day)
+        db.session.add(row)
+    row.points = int(points)
+    row.elo = int(elo_val)
+    row.updated_at = utcnow()
+
+
 # ═══════════════ PK 积分结算（即时） ═══════════════
 
 def award_pk_result(battle):
-    """PK 结算发积分：胜 25+连胜加成 / 平 10 / 负 5（保底）
+    """PK 结算：真人发积分（胜 25+连胜加成 / 平 10 / 负 5）+ Elo 更新；机器人不计分。
     在 _settle_battle 主事务内调用（不 commit）；返回 {user_id: {...}} 供推送
     """
     season = season_of(battle.started_at) if battle.started_at else current_season()
     results = {}
 
     def _apply(uid, outcome, final_score):
+        if uid is None or is_bot_user(uid):
+            return
         p = ensure_profile(uid, season)
         old_tier = tier_of(p.points)
         before_streak = p.streak
@@ -230,15 +392,16 @@ def award_pk_result(battle):
             'gained': gained,
             'final_score': final_score,
             'before_tier': old_tier,
+            'season': season,
             'profile': p,
         }
 
     challenger_score = float(battle.challenger_score or 0)
     opponent_score = float(battle.opponent_score or 0)
-    if battle.winner_id is None:
+    is_draw = battle.winner_id is None
+    if is_draw:
         _apply(battle.challenger_id, 'draw', challenger_score)
-        if battle.opponent_id:
-            _apply(battle.opponent_id, 'draw', opponent_score)
+        _apply(battle.opponent_id, 'draw', opponent_score)
     else:
         loser_id = battle.opponent_id if battle.winner_id == battle.challenger_id \
             else battle.challenger_id
@@ -246,6 +409,16 @@ def award_pk_result(battle):
                challenger_score if battle.winner_id == battle.challenger_id else opponent_score)
         _apply(loser_id, 'lose',
                opponent_score if battle.winner_id == battle.challenger_id else challenger_score)
+
+    # Elo：真人双方更新，并将增量回写到结果供推送/战报
+    elo_deltas = apply_elo(battle, battle.winner_id, is_draw)
+    for uid, d in elo_deltas.items():
+        if uid in results:
+            results[uid]['elo_delta'] = d
+            results[uid]['elo'] = get_or_create_rating(uid).elo
+    # 积分历史快照（真人）
+    for uid, info in results.items():
+        upsert_points_history(uid, season, info['profile'].points, info.get('elo'))
 
     # 勋章校验（基于加分后的状态）
     for uid, info in results.items():
@@ -305,11 +478,13 @@ def award_timed_competition(comp):
             p.timed_finished += 1
         p.points += gained
         p.last_played_at = utcnow()
-        results[uid] = {'gained': gained, 'before_tier': old_tier, 'profile': p}
+        results[uid] = {'gained': gained, 'before_tier': old_tier,
+                        'season': season, 'profile': p}
 
     for uid, info in results.items():
         triggers = {'timed_finish_10', 'perfect_score'}
         info['granted'] = check_and_grant(uid, triggers, season=season)
+        upsert_points_history(uid, season, info['profile'].points)
     db.session.commit()
 
     for uid, info in results.items():
@@ -318,16 +493,20 @@ def award_timed_competition(comp):
 
 
 def _notify_profile_update(user_id, info):
-    """积分/段位变化推送（socket 不可用时静默）"""
+    """积分/段位变化推送（含排名百分位封顶与 Elo 增减；socket 不可用时静默）"""
     p = info['profile']
-    progress = tier_progress(p.points)
+    season = info.get('season') or current_season()
+    rank, total = _tier_ctx(user_id, season)
+    progress = tier_progress(p.points, rank, total)
+    old_points = p.points - info['gained']
     payload = {
         'reason': info.get('reason', 'competition'),
         'gained': info['gained'],
         'points': p.points,
         'tier': progress['tier'],
-        'tier_changed': progress['tier'] != info['before_tier'],
-        'old_tier': info['before_tier'],
+        'tier_changed': progress['tier'] != tier_of(old_points, rank, total),
+        'old_tier': info.get('before_tier'),
+        'elo_delta': info.get('elo_delta'),
         'granted_badges': info.get('granted', []),
     }
     notify_user(user_id, 'profile_update', payload)

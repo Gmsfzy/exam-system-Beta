@@ -380,12 +380,14 @@ const moduleMenus = {
   competition: {
     teacher: [
       { path: '/competitions', label: '竞赛管理', icon: iconMap.Trophy },
+      { path: '/competitions/series', label: '系列赛', icon: iconMap.Connection },
       { path: '/teams', label: '战队管理', icon: iconMap.User },
       { path: '/study-profile', label: '学情画像', icon: iconMap.TrendCharts },
     ],
     student: [
       { path: '/competitions', label: '竞赛广场', icon: iconMap.Trophy },
       { path: '/competitions/pk', label: 'PK对战', icon: iconMap.Lightning },
+      { path: '/competitions/series', label: '系列赛', icon: iconMap.Connection },
       { path: '/rank', label: '我的段位', icon: iconMap.Medal },
       { path: '/teams', label: '战队', icon: iconMap.User },
       { path: '/study-profile', label: '学情画像', icon: iconMap.TrendCharts },
@@ -406,8 +408,11 @@ const moduleMenus = {
   learning: {
     teacher: [
       { path: '/learning', label: '学习首页', icon: iconMap.Reading },
+      { path: '/learning/today', label: '今日学习', icon: iconMap.Calendar },
       { path: '/learning/paths', label: '专业路径', icon: iconMap.School },
       { path: '/learning/graph', label: '知识图谱', icon: iconMap.Connection },
+      { path: '/learning/my-knowledge', label: '我的知识库', icon: iconMap.Collection },
+      { path: '/learning/certificates', label: '我的证书', icon: iconMap.Medal },
       { path: '/learning/wrong', label: '错题本', icon: iconMap.Document },
       { path: '/learning/practice', label: '自由刷题', icon: iconMap.EditPen },
       { path: '/learning/plan', label: '学习计划', icon: iconMap.Star },
@@ -415,8 +420,11 @@ const moduleMenus = {
     ],
     student: [
       { path: '/learning', label: '学习首页', icon: iconMap.Reading },
+      { path: '/learning/today', label: '今日学习', icon: iconMap.Calendar },
       { path: '/learning/paths', label: '专业路径', icon: iconMap.School },
       { path: '/learning/graph', label: '知识图谱', icon: iconMap.Connection },
+      { path: '/learning/my-knowledge', label: '我的知识库', icon: iconMap.Collection },
+      { path: '/learning/certificates', label: '我的证书', icon: iconMap.Medal },
       { path: '/learning/wrong', label: '错题本', icon: iconMap.Document },
       { path: '/learning/practice', label: '自由刷题', icon: iconMap.EditPen },
       { path: '/learning/plan', label: '学习计划', icon: iconMap.Star },

@@ -21,6 +21,11 @@
       </div>
     </header>
 
+    <div v-if="state.sanctioned" class="sanction-banner">
+      <el-icon :size="16"><Warning /></el-icon>
+      你的竞技账号已被教师标记受限，成绩将不计入排行榜与赛季积分。
+    </div>
+
     <main v-if="state.questions.length" class="take-main">
       <div class="question-card">
         <div class="q-meta">
@@ -99,7 +104,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import request from '../utils/request'
 import {
-  Trophy, Star, Clock, CircleCheckFilled, CircleCloseFilled
+  Trophy, Star, Clock, CircleCheckFilled, CircleCloseFilled, Warning
 } from '@element-plus/icons-vue'
 
 const route = useRoute()
@@ -289,6 +294,17 @@ onUnmounted(stopTimer)
   display: flex;
   flex-direction: column;
   background: var(--bg-secondary);
+}
+
+.sanction-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 32px;
+  font-size: 13.5px;
+  color: #f56c6c;
+  background: rgba(245, 108, 108, 0.12);
+  border-bottom: 1px solid rgba(245, 108, 108, 0.3);
 }
 
 .take-header {
