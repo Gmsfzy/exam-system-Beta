@@ -5,12 +5,16 @@ from utils.timeutil import utcnow, iso_local
 
 class CompetitionTypeEnum:
     TIMED = "timed"              # 限时积分赛
+    PROJECT = "project"          # 作品提交型竞赛（v4.5：上传作品+教师评审）
+    DS = "ds"                    # 数据科学赛（v4.11：数据集+在线运行+自动指标+公私榜）
     PK = "pk"                    # 实时对战（预留）
     QUICK_ANSWER = "quick_answer"  # 抢答赛（预留）
 
 
 class CompetitionStatusEnum:
     DRAFT = "draft"
+    REVIEWING = "reviewing"      # 发布待审核（v4.5 审核门禁）
+    REJECTED = "rejected"        # 审核驳回，回退修改后可重提
     PUBLISHED = "published"      # 已发布，等待开放
     ONGOING = "ongoing"          # 开放中
     ENDED = "ended"
@@ -46,9 +50,24 @@ class Competition(db.Model):
     remind_sent_at = db.Column(UTCDateTime)                           # 提醒已发时间戳（NULL=未发，幂等标记）
     access_mode = db.Column(db.String(10), nullable=False, default='public')  # public | restricted
     invite_code = db.Column(db.String(16))                            # 受限竞赛邀请码（public 为 NULL）
+    # v4.5 发布审核门禁与作品赛积分托管（迁移 0014 加列）
+    reviewer_id = db.Column(db.Integer, db.ForeignKey('user.id'))     # 审核人
+    reviewed_at = db.Column(UTCDateTime)
+    review_reason = db.Column(db.String(200))                         # 驳回理由
+    prize_points = db.Column(db.Integer, nullable=False, default=0)   # 冠军奖金（积分为 0 则纯荣誉赛）
+    frozen_points = db.Column(db.Integer, nullable=False, default=0)  # 发布时已从钱包冻结的托管积分
+    # v4.11 数据科学赛（DS 型专用，其它类型留空；迁移 0019 加列）
+    ds_metric = db.Column(db.String(20))                        # accuracy/f1_macro/rmse/mae/auc/custom
+    ds_higher_is_better = db.Column(db.Boolean)                # custom 时教师显式设定；预置指标由 metrics 内置方向
+    ds_id_column = db.Column(db.String(50))                    # 预测对齐主键列名
+    ds_target_column = db.Column(db.String(50))                # 预测目标列名
+    ds_public_ratio = db.Column(db.Float, nullable=False, default=0.3)   # 公榜占比（隐藏 1-ratio 为私榜）
+    ds_daily_limit = db.Column(db.Integer, nullable=False, default=5)    # 每人每日提交上限
+    ds_scorer_code = db.Column(db.Text)                        # 自定义 scorer（metric=custom 时启用）
     created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
 
-    creator = db.relationship('User', backref='competitions', lazy=True)
+    creator = db.relationship('User', foreign_keys=[creator_id], backref='competitions', lazy=True)
+    reviewer = db.relationship('User', foreign_keys=[reviewer_id])
     questions = db.relationship('CompetitionQuestion', backref='competition',
                                 lazy=True, cascade='all, delete-orphan',
                                 order_by='CompetitionQuestion.order')
@@ -470,4 +489,63 @@ class CompetitionCertificate(db.Model):
 
     __table_args__ = (
         db.UniqueConstraint('user_id', 'season', name='_season_cert_uc'),
+    )
+
+
+# ═══════════════ v4.5 学习社区升级：赛事运营与作品赛道 ═══════════════
+
+class CompetitionAnnouncement(db.Model):
+    """赛事公告：发布后向全体参赛者广播，竞赛详情页置顶展示"""
+    __tablename__ = 'competition_announcement'
+    id = db.Column(db.Integer, primary_key=True)
+    competition_id = db.Column(db.Integer, db.ForeignKey('competition.id'), nullable=False, index=True)
+    title = db.Column(db.String(100), nullable=False)
+    content = db.Column(db.Text, nullable=False, default='')
+    created_by = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
+
+    competition = db.relationship('Competition', backref='announcements')
+    author = db.relationship('User', backref='competition_announcements')
+
+
+class CompetitionResource(db.Model):
+    """赛事资料包：赛题附件/参考材料，参赛者统一下载"""
+    __tablename__ = 'competition_resource'
+    id = db.Column(db.Integer, primary_key=True)
+    competition_id = db.Column(db.Integer, db.ForeignKey('competition.id'), nullable=False, index=True)
+    title = db.Column(db.String(200), nullable=False)
+    filename = db.Column(db.String(200), nullable=False)      # 原始文件名
+    stored_name = db.Column(db.String(200), nullable=False)   # uploads 下存储名
+    size = db.Column(db.Integer, nullable=False, default=0)
+    uploaded_by = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
+
+    competition = db.relationship('Competition', backref='resources')
+    uploader = db.relationship('User', backref='competition_resources')
+
+
+class CompetitionWork(db.Model):
+    """作品提交（project 型竞赛）：一人一份，重复提交覆盖升版；教师评分后同分取最早提交排冠军"""
+    __tablename__ = 'competition_work'
+    id = db.Column(db.Integer, primary_key=True)
+    competition_id = db.Column(db.Integer, db.ForeignKey('competition.id'), nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    description = db.Column(db.Text, nullable=False, default='')   # 作品说明
+    filename = db.Column(db.String(200))                           # 作品文件（可空=仅文字说明）
+    stored_name = db.Column(db.String(200))
+    size = db.Column(db.Integer, nullable=False, default=0)
+    version = db.Column(db.Integer, nullable=False, default=1)     # 提交次数（每次重交 +1）
+    score = db.Column(db.Float)                                    # 教师评审分（NULL=未评）
+    review_note = db.Column(db.Text)
+    scored_by = db.Column(db.Integer, db.ForeignKey('user.id'))
+    scored_at = db.Column(UTCDateTime)
+    submitted_at = db.Column(UTCDateTime, nullable=False, default=utcnow)  # 首次提交时间（同分 tiebreak）
+    updated_at = db.Column(UTCDateTime, nullable=False, default=utcnow, onupdate=utcnow)
+
+    competition = db.relationship('Competition', backref='works')
+    user = db.relationship('User', foreign_keys=[user_id], backref='competition_works')
+    scorer = db.relationship('User', foreign_keys=[scored_by])
+
+    __table_args__ = (
+        db.UniqueConstraint('competition_id', 'user_id', name='_comp_work_uc'),
     )

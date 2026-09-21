@@ -15,6 +15,7 @@ from competition.models import (
     CompetitionStatusEnum, ArenaRating, PointsHistory,
 )
 from competition.leaderboard import get_leaderboard
+from ledger import core as ledger
 from competition.realtime import notify_user
 
 
@@ -387,6 +388,8 @@ def award_pk_result(battle):
             p.streak = 0
         p.max_streak = max(p.max_streak, p.streak)
         p.points += gained
+        ledger.post(uid, 'points', gained, 'battle', scope=season, ref_type='pk',
+                    ref_id=battle.id, memo='PK 对战结算')
         p.last_played_at = utcnow()
         results[uid] = {
             'gained': gained,
@@ -477,6 +480,8 @@ def award_timed_competition(comp):
                 gained += 10
             p.timed_finished += 1
         p.points += gained
+        ledger.post(uid, 'points', gained, 'settle', scope=season, ref_type='competition',
+                    ref_id=comp.id, memo='限时赛名次结算')
         p.last_played_at = utcnow()
         results[uid] = {'gained': gained, 'before_tier': old_tier,
                         'season': season, 'profile': p}

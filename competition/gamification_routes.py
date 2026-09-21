@@ -5,7 +5,7 @@ from datetime import timedelta
 from flask import Blueprint, request, jsonify
 
 from database import db
-from database.models import User, Exam, ExamQuestion, ExamSession, Answer, Question, Result
+from database.models import User, Exam, ExamQuestion, ExamSession, Answer, Question, Result, QuestionTypeEnum
 from utils.timeutil import utcnow, iso_local
 from utils.security import verify_token
 from competition.models import (
@@ -14,6 +14,7 @@ from competition.models import (
     PkBattle, PkAnswer, PkBattleStatusEnum, ParticipantStatusEnum,
     ArenaRating, PointsHistory, CompetitionCertificate,
 )
+from utils.permissions import require_teacher
 from competition.gamification import (
     TIERS, TIER_COLORS, tier_of, tier_progress, current_season,
     ensure_profile, season_rank_of, check_and_grant, BADGE_DEFS,
@@ -22,11 +23,8 @@ from competition.gamification import (
 
 gamification_bp = Blueprint('gamification', __name__)
 
-QTYPE_LABELS = {
-    'single_choice': '单选题', 'multiple_choice': '多选题', 'true_false': '判断题',
-    'fill_blank': '填空题', 'short_answer': '简答题', 'essay': '论述题',
-    'calculation': '计算题', 'programming': '编程题',
-}
+# 题型中文名单一事实源：QuestionTypeEnum.label()（v4.7 收敛，原本地字典存在
+# short_answer=“简答题”与事实源“问答题”漂移，已归一）
 
 
 # ═══════════════ 段位 / 赛季 ═══════════════
@@ -299,7 +297,7 @@ def _exam_profile(student_id):
     for r in rows:
         type_stats.append({
             'q_type': r.q_type,
-            'label': QTYPE_LABELS.get(r.q_type, r.q_type),
+            'label': QuestionTypeEnum.label(r.q_type),
             'total': int(r.total or 0),
             'correct': int(r.correct or 0),
             'accuracy': round(int(r.correct or 0) / r.total, 4) if r.total else 0,
@@ -345,7 +343,7 @@ def _competition_profile(student_id, season):
         m['total'] += int(r.total or 0)
         m['correct'] += int(r.correct or 0)
     type_stats = [{
-        'q_type': k, 'label': QTYPE_LABELS.get(k, k),
+        'q_type': k, 'label': QuestionTypeEnum.label(k),
         'total': v['total'], 'correct': v['correct'],
         'accuracy': round(v['correct'] / v['total'], 4) if v['total'] else 0,
     } for k, v in merged.items()]
@@ -455,11 +453,9 @@ def study_profile_me():
 
 @gamification_bp.route('/profile/study/<int:student_id>', methods=['GET'])
 def study_profile_of(student_id):
-    user = verify_token()
-    if not user:
-        return jsonify({'message': '未登录'}), 401
-    if not user.is_teacher():
-        return jsonify({'message': '仅教师可查询他人画像'}), 403
+    user, err = require_teacher(deny_msg='仅教师可查询他人画像', unauth_msg='未登录')
+    if err:
+        return err
     target = db.session.get(User, student_id)
     if not target or not target.is_student():
         return jsonify({'message': '学生不存在'}), 404

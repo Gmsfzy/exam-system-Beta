@@ -11,7 +11,8 @@ from utils.timeutil import utcnow, iso_local
 from utils.security import verify_token
 from competition.models import (
     Competition, CompetitionQuestion, CompetitionParticipant,
-    CompetitionAnswer, CompetitionStatusEnum, ParticipantStatusEnum
+    CompetitionAnswer, CompetitionStatusEnum, CompetitionTypeEnum,
+    ParticipantStatusEnum, CompetitionWork,
 )
 from competition.scoring import parse_scoring_rule, grade_objective, calc_question_score
 from competition.leaderboard import get_leaderboard, get_my_rank
@@ -124,6 +125,8 @@ def api_competition_lobby():
             'start_time': iso_local(c.start_time),
             'end_time': iso_local(c.end_time),
             'duration': c.duration,
+            'competition_type': c.competition_type,
+            'prize_points': c.prize_points or 0,
             'total_score': c.total_score,
             'question_count': q_count_map.get(c.id, 0),
             'participant_count': p_count_map.get(c.id, 0),
@@ -458,3 +461,82 @@ def api_finish(comp_id):
         notify_leaderboard_update(comp.id)
     db.session.commit()
     return jsonify({'message': '交卷成功', 'my': get_my_rank(comp_id, user.id)})
+
+
+# ── v4.5 作品型竞赛：作品提交（一人一份，重交覆盖升版） ──
+
+@competition_play_bp.route('/competitions/<int:comp_id>/work', methods=['GET'])
+def api_get_my_work(comp_id):
+    user, err = _require_student()
+    if err:
+        return err
+    work = CompetitionWork.query.filter_by(
+        competition_id=comp_id, user_id=user.id).first()
+    if not work:
+        return jsonify({'work': None})
+    from competition.routes import _work_dict
+    return jsonify({'work': _work_dict(work)})
+
+
+@competition_play_bp.route('/competitions/<int:comp_id>/work', methods=['POST'])
+def api_submit_work(comp_id):
+    """提交/更新作品：multipart（description 必填，file 可选≤50MB）；截止前可反复重交"""
+    from competition.routes import _save_upload, _work_dict, _notify
+    user, err = _require_student()
+    if err:
+        return err
+    comp = db.session.get(Competition, comp_id)
+    if not comp or comp.competition_type != CompetitionTypeEnum.PROJECT:
+        return jsonify({'message': '竞赛不存在或非作品型竞赛'}), 404
+    comp.sync_status()
+    if comp.status not in (CompetitionStatusEnum.PUBLISHED, CompetitionStatusEnum.ONGOING):
+        return jsonify({'message': '竞赛未开放或已结束'}), 400
+    if utcnow() > comp.end_time:
+        return jsonify({'message': '作品提交已截止'}), 400
+    participant = CompetitionParticipant.query.filter_by(
+        competition_id=comp_id, user_id=user.id).first()
+    if not participant:
+        return jsonify({'message': '请先报名该竞赛'}), 400
+
+    description = str(request.form.get('description') or '').strip()[:5000]
+    if not description:
+        return jsonify({'message': '请填写作品说明'}), 400
+    file = request.files.get('file')
+    new_file = None
+    if file and file.filename:
+        try:
+            new_file = _save_upload(file, 'compwork')
+        except ValueError as e:
+            return jsonify({'message': str(e)}), 400
+
+    work = CompetitionWork.query.filter_by(
+        competition_id=comp_id, user_id=user.id).first()
+    old_stored = None
+    if work:
+        work.description = description
+        work.version = (work.version or 1) + 1
+        if new_file:
+            old_stored, work.filename, work.stored_name, work.size = \
+                work.stored_name, file.filename[:200], new_file[0], new_file[1]
+    else:
+        if not new_file and not description:
+            return jsonify({'message': '请提交作品文件或作品说明'}), 400
+        work = CompetitionWork(
+            competition_id=comp_id, user_id=user.id, description=description,
+            version=1, submitted_at=utcnow(),
+            filename=file.filename[:200] if new_file else None,
+            stored_name=new_file[0] if new_file else None,
+            size=new_file[1] if new_file else 0)
+        db.session.add(work)
+    db.session.commit()
+    if old_stored:
+        import os as _os
+        from competition.routes import _UPLOAD_DIR
+        try:
+            _os.remove(_os.path.join(_UPLOAD_DIR, old_stored))
+        except OSError:
+            pass
+    _notify(comp.creator_id, '收到赛事作品提交',
+            f'「{comp.title}」{user.username} 提交了作品（第 {work.version} 版），待你评审。',
+            type='info', related_id=comp.id)
+    return jsonify({'message': '提交成功', 'work': _work_dict(work)})

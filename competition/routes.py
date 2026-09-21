@@ -1,16 +1,20 @@
 """竞赛管理端 API（教师）"""
 import json
+import os
 import secrets
 
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, send_from_directory
 
 from database import db
-from database.models import Question, User
+from database.models import Question, User, RoleEnum
 from utils.timeutil import parse_dt, utcnow, iso_local
 from utils.security import verify_token
+from utils.uploads import save_upload as _unified_save_upload, ALLOWED_EXTENSIONS as _FILE_EXTS
+from ledger import core as ledger
 from competition.models import (
     Competition, CompetitionQuestion, CompetitionStatusEnum, CompetitionTypeEnum,
     CompetitionSeries, CompetitionParticipant, ParticipantStatusEnum, DiscussionPost,
+    CompetitionAnnouncement, CompetitionResource, CompetitionWork,
 )
 from competition.scoring import COMPETITION_QUESTION_TYPES, parse_scoring_rule
 
@@ -18,10 +22,9 @@ competition_bp = Blueprint('competition', __name__)
 
 
 def _require_teacher():
-    user = verify_token()
-    if not user or not user.is_teacher():
-        return None, (jsonify({'message': '无权访问'}), 403)
-    return user, None
+    """委托 utils.permissions 统一实现（RBAC 收敛）；保持未登录/非教师均 403 原语义。"""
+    from utils.permissions import require_teacher
+    return require_teacher(deny_msg='无权访问', unauth_msg='无权访问', unauth_status=403)
 
 
 def _get_own_competition(user, comp_id):
@@ -36,6 +39,29 @@ def _get_own_competition(user, comp_id):
 def _gen_invite_code():
     """生成 8 位十六进制邀请码。"""
     return secrets.token_hex(4).upper()
+
+
+def _notify(user_id, title, content, type='info', related_id=None):
+    from api.notification_routes import create_notification
+    create_notification(user_id=user_id, title=title[:200], content=content,
+                        type=type, related_type='competition', related_id=related_id,
+                        commit=True)
+
+
+def _other_teachers(exclude_id):
+    """v4.5 审核门禁：可参与互审的其他教师列表。"""
+    return User.query.filter(User.role == RoleEnum.TEACHER,
+                             User.id != exclude_id).all()
+
+
+def _refund_frozen(comp, memo='赛事奖金托管退回'):
+    """把尚未发放的托管积分退回创建者钱包（在调用方事务内）。"""
+    amount = int(comp.frozen_points or 0)
+    if amount <= 0:
+        return
+    ledger.post(comp.creator_id, 'bounty', amount, 'refund', ref_type='competition',
+                ref_id=comp.id, memo=memo)
+    comp.frozen_points = 0
 
 
 def _norm_access(value):
@@ -68,6 +94,9 @@ def competition_to_dict(comp, with_questions=False):
         'created_at': iso_local(comp.created_at),
         'access_mode': comp.access_mode or 'public',
         'remind_before': comp.remind_before or 0,
+        'prize_points': comp.prize_points or 0,
+        'frozen_points': comp.frozen_points or 0,
+        'review_reason': comp.review_reason,
     }
     if with_questions:
         data['invite_code'] = comp.invite_code
@@ -114,13 +143,22 @@ def api_create_competition():
     if end_time <= start_time:
         return jsonify({'message': '结束时间必须晚于开始时间'}), 400
 
+    comp_type = data.get('competition_type', CompetitionTypeEnum.TIMED)
+    if comp_type not in (CompetitionTypeEnum.TIMED, CompetitionTypeEnum.PROJECT,
+                         CompetitionTypeEnum.DS):
+        return jsonify({'message': '暂不支持该竞赛类型'}), 400
+
     duration = int(data.get('duration') or 0)
-    if duration <= 0:
+    if comp_type in (CompetitionTypeEnum.PROJECT, CompetitionTypeEnum.DS):
+        duration = max(duration, 0)  # 作品/数据赛型竞赛无答题时长限制
+    elif duration <= 0:
         return jsonify({'message': '答题时长必须大于0分钟'}), 400
 
-    comp_type = data.get('competition_type', CompetitionTypeEnum.TIMED)
-    if comp_type not in (CompetitionTypeEnum.TIMED,):
-        return jsonify({'message': '暂不支持该竞赛类型'}), 400
+    # v4.5 冠军奖金（积分托管，0=纯荣誉赛）
+    try:
+        prize_points = max(0, min(int(data.get('prize_points') or 0), 100000))
+    except (TypeError, ValueError):
+        return jsonify({'message': 'prize_points 必须为整数'}), 400
 
     rule = data.get('scoring_rule') or {}
     base_ratio = float(rule.get('base_ratio', 0.7))
@@ -148,6 +186,7 @@ def api_create_competition():
         remind_before=remind_before,
         access_mode=access_mode,
         invite_code=invite_code,
+        prize_points=prize_points,
     )
     db.session.add(comp)
     db.session.commit()
@@ -175,8 +214,8 @@ def api_update_competition(comp_id):
     comp, err = _get_own_competition(user, comp_id)
     if err:
         return err
-    if comp.status != CompetitionStatusEnum.DRAFT:
-        return jsonify({'message': '仅草稿状态可编辑'}), 400
+    if comp.status not in (CompetitionStatusEnum.DRAFT, CompetitionStatusEnum.REJECTED):
+        return jsonify({'message': '仅草稿/被驳回状态可编辑'}), 400
 
     data = request.get_json() or {}
     if 'title' in data:
@@ -197,8 +236,13 @@ def api_update_competition(comp_id):
         return jsonify({'message': '结束时间必须晚于开始时间'}), 400
     if 'duration' in data:
         comp.duration = int(data['duration'] or 0)
-        if comp.duration <= 0:
+        if comp.competition_type != CompetitionTypeEnum.PROJECT and comp.duration <= 0:
             return jsonify({'message': '答题时长必须大于0分钟'}), 400
+    if 'prize_points' in data:
+        try:
+            comp.prize_points = max(0, min(int(data['prize_points'] or 0), 100000))
+        except (TypeError, ValueError):
+            return jsonify({'message': 'prize_points 必须为整数'}), 400
     if 'scoring_rule' in data:
         rule = data['scoring_rule'] or {}
         comp.scoring_rule = json.dumps({
@@ -250,6 +294,12 @@ def api_delete_competition(comp_id):
         return err
     if comp.status == CompetitionStatusEnum.ONGOING:
         return jsonify({'message': '进行中的竞赛不能删除，请先结束'}), 400
+    # 未发放的托管积分退回创建者钱包
+    _refund_frozen(comp)
+    # v4.5 新表无级联删除关系，先手动清理公告/资料/作品
+    CompetitionWork.query.filter_by(competition_id=comp.id).delete()
+    CompetitionAnnouncement.query.filter_by(competition_id=comp.id).delete()
+    CompetitionResource.query.filter_by(competition_id=comp.id).delete()
     db.session.delete(comp)
     db.session.commit()
     return jsonify({'message': '删除成功'})
@@ -340,9 +390,10 @@ def api_publish_competition(comp_id):
     comp, err = _get_own_competition(user, comp_id)
     if err:
         return err
-    if comp.status != CompetitionStatusEnum.DRAFT:
-        return jsonify({'message': '仅草稿状态可发布'}), 400
-    if not comp.questions:
+    if comp.status not in (CompetitionStatusEnum.DRAFT, CompetitionStatusEnum.REJECTED):
+        return jsonify({'message': '仅草稿/被驳回状态可发布'}), 400
+    is_work = comp.competition_type in (CompetitionTypeEnum.PROJECT, CompetitionTypeEnum.DS)
+    if not is_work and not comp.questions:
         return jsonify({'message': '请先添加题目'}), 400
 
     # 校验快照完整性并重排序号
@@ -354,9 +405,90 @@ def api_publish_competition(comp_id):
 
     comp.total_score = round(sum(cq.score for cq in questions), 2)
     parse_scoring_rule(comp.scoring_rule)  # 校验规则合法
+
+    # v4.5 积分托管：发布时从创建者钱包冻结冠军奖金，余额不足拒绝发布
+    if (comp.prize_points or 0) > 0:
+        if ledger.balance_of(user.id, 'bounty') < comp.prize_points:
+            return jsonify({'message': f'积分钱包余额不足，需托管 {comp.prize_points} 积分作为冠军奖金'}), 400
+        ledger.post(user.id, 'bounty', -comp.prize_points, 'freeze', ref_type='competition',
+                    ref_id=comp.id, memo='赛事冠军奖金托管')
+        comp.frozen_points = comp.prize_points
+
+    # v4.5 发布审核门禁：存在其他教师则交叉审核，仅一名教师时自动通过
+    reviewers = _other_teachers(comp.creator_id)
+    comp.review_reason = None
+    if reviewers:
+        comp.status = CompetitionStatusEnum.REVIEWING
+        comp.reviewer_id = None
+        comp.reviewed_at = None
+        db.session.commit()
+        for t in reviewers[:50]:
+            _notify(t.id, '有赛事待审核',
+                    f'「{comp.title}」已提交发布，待你审核。',
+                    type='info', related_id=comp.id)
+        return jsonify({'message': '已提交审核，通过后将对全体学生开放',
+                        'status': comp.status, 'total_score': comp.total_score})
     comp.status = CompetitionStatusEnum.PUBLISHED
+    comp.reviewed_at = utcnow()
     db.session.commit()
-    return jsonify({'message': '发布成功', 'total_score': comp.total_score})
+    return jsonify({'message': '发布成功', 'status': comp.status,
+                    'total_score': comp.total_score})
+
+
+@competition_bp.route('/competitions/pending', methods=['GET'])
+def api_pending_competitions():
+    """v4.5 审核门禁：待审核赛事列表（教师）"""
+    user, err = _require_teacher()
+    if err:
+        return err
+    comps = (Competition.query.filter_by(status=CompetitionStatusEnum.REVIEWING)
+             .order_by(Competition.created_at.asc()).all())
+    items = []
+    for c in comps:
+        c.sync_status()
+        d = competition_to_dict(c)
+        d['creator'] = c.creator.username if c.creator else None
+        items.append(d)
+    db.session.commit()
+    return jsonify({'items': items})
+
+
+@competition_bp.route('/competitions/<int:comp_id>/review', methods=['POST'])
+def api_review_competition(comp_id):
+    """v4.5 审核门禁：教师交叉审核（审核人不可为创建者）；驳回退回托管积分"""
+    user, err = _require_teacher()
+    if err:
+        return err
+    comp = db.session.get(Competition, comp_id)
+    if not comp or comp.status != CompetitionStatusEnum.REVIEWING:
+        return jsonify({'message': '赛事不存在或不在待审核状态'}), 404
+    if comp.creator_id == user.id:
+        return jsonify({'message': '不能审核自己创建的赛事'}), 403
+    data = request.get_json() or {}
+    action = data.get('action')
+    if action not in ('approve', 'reject'):
+        return jsonify({'message': '参数错误：action 须为 approve/reject'}), 400
+    reason = str(data.get('reason') or '').strip()[:200]
+    comp.reviewer_id = user.id
+    comp.reviewed_at = utcnow()
+    if action == 'approve':
+        comp.status = CompetitionStatusEnum.PUBLISHED
+        comp.review_reason = None
+        db.session.commit()
+        comp.sync_status()
+        db.session.commit()
+        _notify(comp.creator_id, '赛事审核通过',
+                f'「{comp.title}」已通过审核并发布。',
+                type='success', related_id=comp.id)
+        return jsonify({'message': '已通过', 'status': comp.status})
+    comp.status = CompetitionStatusEnum.REJECTED
+    comp.review_reason = reason or '内容不符合发布要求'
+    _refund_frozen(comp, memo='赛事驳回托管退回')
+    db.session.commit()
+    _notify(comp.creator_id, '赛事审核驳回',
+            f'「{comp.title}」驳回原因：{comp.review_reason}。修改后可重新提交发布。',
+            type='warning', related_id=comp.id)
+    return jsonify({'message': '已驳回', 'status': comp.status})
 
 
 @competition_bp.route('/competitions/<int:comp_id>/end', methods=['POST'])
@@ -809,3 +941,321 @@ def api_delete_discussion(comp_id, post_id):
     db.session.delete(post)
     db.session.commit()
     return jsonify({'message': '已删除'})
+
+
+# ═══════════════ v4.5 赛事公告 / 资料包 / 作品评审 / 结算 ═══════════════
+
+_UPLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'uploads')
+# 资料包/作品文件扩展白名单与保存逻辑统一至 utils/uploads.py（v4.6 与学习/悬赏模块共用，含 csv 表格）
+
+
+def _save_upload(file, prefix):
+    """校验并保存上传文件，返回 (stored_name, size)；出错抛 ValueError。"""
+    return _unified_save_upload(file, prefix, _UPLOAD_DIR)
+
+
+def _visible_to_student(comp):
+    return comp.status in (CompetitionStatusEnum.PUBLISHED,
+                           CompetitionStatusEnum.ONGOING,
+                           CompetitionStatusEnum.ENDED)
+
+
+def _announcement_dict(a):
+    return {'id': a.id, 'competition_id': a.competition_id, 'title': a.title,
+            'content': a.content, 'author': a.author.username if a.author else None,
+            'created_at': iso_local(a.created_at)}
+
+
+def _resource_dict(r):
+    return {'id': r.id, 'competition_id': r.competition_id, 'title': r.title,
+            'filename': r.filename, 'size': r.size or 0,
+            'uploader': r.uploader.username if r.uploader else None,
+            'created_at': iso_local(r.created_at)}
+
+
+def _work_dict(w, with_user=False):
+    d = {'id': w.id, 'competition_id': w.competition_id, 'description': w.description,
+         'filename': w.filename, 'size': w.size or 0, 'version': w.version or 1,
+         'score': w.score, 'review_note': w.review_note,
+         'submitted_at': iso_local(w.submitted_at), 'updated_at': iso_local(w.updated_at),
+         'scored_at': iso_local(w.scored_at)}
+    if with_user and w.user:
+        d['user_id'] = w.user_id
+        d['username'] = w.user.username
+    return d
+
+
+@competition_bp.route('/competitions/<int:comp_id>/announcements', methods=['GET'])
+def api_list_announcements(comp_id):
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    comp = db.session.get(Competition, comp_id)
+    if not comp or (user.is_student() and not _visible_to_student(comp)):
+        return jsonify({'message': '竞赛不存在'}), 404
+    rows = (CompetitionAnnouncement.query.filter_by(competition_id=comp_id)
+            .order_by(CompetitionAnnouncement.created_at.desc()).all())
+    return jsonify({'items': [_announcement_dict(a) for a in rows]})
+
+
+@competition_bp.route('/competitions/<int:comp_id>/announcements', methods=['POST'])
+def api_create_announcement(comp_id):
+    """发布赛事公告并向全体参赛者广播通知"""
+    user, err = _require_teacher()
+    if err:
+        return err
+    comp, err = _get_own_competition(user, comp_id)
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    title = str(data.get('title') or '').strip()[:100]
+    content = str(data.get('content') or '').strip()[:5000]
+    if not title or not content:
+        return jsonify({'message': '标题与内容不能为空'}), 400
+    ann = CompetitionAnnouncement(competition_id=comp.id, title=title,
+                                  content=content, created_by=user.id)
+    db.session.add(ann)
+    db.session.flush()
+    for uid in {p.user_id for p in comp.participants}:
+        _notify(uid, f'赛事公告：{title}', content[:120],
+                type='info', related_id=comp.id)
+    db.session.commit()
+    return jsonify({'message': '已发布', 'announcement': _announcement_dict(ann)}), 201
+
+
+@competition_bp.route('/competitions/<int:comp_id>/announcements/<int:aid>', methods=['DELETE'])
+def api_delete_announcement(comp_id, aid):
+    user, err = _require_teacher()
+    if err:
+        return err
+    comp, err = _get_own_competition(user, comp_id)
+    if err:
+        return err
+    ann = db.session.get(CompetitionAnnouncement, aid)
+    if not ann or ann.competition_id != comp.id:
+        return jsonify({'message': '公告不存在'}), 404
+    db.session.delete(ann)
+    db.session.commit()
+    return jsonify({'message': '已删除'})
+
+
+@competition_bp.route('/competitions/<int:comp_id>/resources', methods=['GET'])
+def api_list_resources(comp_id):
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    comp = db.session.get(Competition, comp_id)
+    if not comp or (user.is_student() and not _visible_to_student(comp)):
+        return jsonify({'message': '竞赛不存在'}), 404
+    rows = (CompetitionResource.query.filter_by(competition_id=comp_id)
+            .order_by(CompetitionResource.created_at.desc()).all())
+    return jsonify({'items': [_resource_dict(r) for r in rows]})
+
+
+@competition_bp.route('/competitions/<int:comp_id>/resources', methods=['POST'])
+def api_upload_resource(comp_id):
+    """上传赛题附件/资料包（multipart file，可选 title 字段）"""
+    user, err = _require_teacher()
+    if err:
+        return err
+    comp, err = _get_own_competition(user, comp_id)
+    if err:
+        return err
+    file = request.files.get('file')
+    if not file or not file.filename:
+        return jsonify({'message': '请选择文件'}), 400
+    try:
+        stored, size = _save_upload(file, 'compres')
+    except ValueError as e:
+        return jsonify({'message': str(e)}), 400
+    title = str(request.form.get('title') or '').strip()[:200] or file.filename
+    res = CompetitionResource(competition_id=comp.id, title=title,
+                              filename=file.filename[:200], stored_name=stored,
+                              size=size, uploaded_by=user.id)
+    db.session.add(res)
+    db.session.commit()
+    return jsonify({'message': '上传成功', 'resource': _resource_dict(res)}), 201
+
+
+@competition_bp.route('/competitions/<int:comp_id>/resources/<int:rid>', methods=['DELETE'])
+def api_delete_resource(comp_id, rid):
+    user, err = _require_teacher()
+    if err:
+        return err
+    comp, err = _get_own_competition(user, comp_id)
+    if err:
+        return err
+    res = db.session.get(CompetitionResource, rid)
+    if not res or res.competition_id != comp.id:
+        return jsonify({'message': '资料不存在'}), 404
+    db.session.delete(res)
+    db.session.commit()
+    try:
+        os.remove(os.path.join(_UPLOAD_DIR, res.stored_name))
+    except OSError:
+        pass
+    return jsonify({'message': '已删除'})
+
+
+@competition_bp.route('/competition-resources/<int:rid>/download', methods=['GET'])
+def api_download_resource(rid):
+    """资料下载：教师或已报名学生；UUID 存储名不可枚举"""
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    res = db.session.get(CompetitionResource, rid)
+    if not res:
+        return jsonify({'message': '资料不存在'}), 404
+    if not user.is_teacher():
+        joined = CompetitionParticipant.query.filter_by(
+            competition_id=res.competition_id, user_id=user.id).first()
+        if not joined:
+            return jsonify({'message': '报名竞赛后可下载资料'}), 403
+    return send_from_directory(_UPLOAD_DIR, res.stored_name,
+                               as_attachment=True, download_name=res.filename)
+
+
+@competition_bp.route('/competitions/<int:comp_id>/works', methods=['GET'])
+def api_list_works(comp_id):
+    """教师查看作品提交列表（project 型竞赛）"""
+    user, err = _require_teacher()
+    if err:
+        return err
+    comp, err = _get_own_competition(user, comp_id)
+    if err:
+        return err
+    rows = (CompetitionWork.query.filter_by(competition_id=comp.id)
+            .order_by(CompetitionWork.score.is_(None),
+                      CompetitionWork.score.desc(),
+                      CompetitionWork.submitted_at.asc()).all())
+    return jsonify({'items': [_work_dict(w, with_user=True) for w in rows]})
+
+
+@competition_bp.route('/competition-works/<int:w_id>/score', methods=['POST'])
+def api_score_work(w_id):
+    """教师人工评审：{score: 0-100, note}；仅竞赛创建者可评"""
+    user, err = _require_teacher()
+    if err:
+        return err
+    work = db.session.get(CompetitionWork, w_id)
+    if not work:
+        return jsonify({'message': '作品不存在'}), 404
+    comp = db.session.get(Competition, work.competition_id)
+    if not comp or comp.creator_id != user.id:
+        return jsonify({'message': '无权访问'}), 403
+    data = request.get_json(silent=True) or {}
+    try:
+        score = float(data.get('score'))
+    except (TypeError, ValueError):
+        return jsonify({'message': 'score 必须为数字'}), 400
+    if not 0 <= score <= 100:
+        return jsonify({'message': '评分范围 0-100'}), 400
+    work.score = round(score, 1)
+    work.review_note = str(data.get('note') or '').strip()[:2000] or None
+    work.scored_by = user.id
+    work.scored_at = utcnow()
+    db.session.commit()
+    _notify(work.user_id, '赛事作品已评分',
+            f'「{comp.title}」你的作品得分：{work.score}。'
+            + (f'评语：{work.review_note}' if work.review_note else ''),
+            type='success', related_id=comp.id)
+    return jsonify({'message': '已评分', 'work': _work_dict(work, with_user=True)})
+
+
+@competition_bp.route('/competition-works/<int:w_id>/download', methods=['GET'])
+def api_download_work(w_id):
+    """作品文件下载：竞赛创建者或作品本人"""
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    work = db.session.get(CompetitionWork, w_id)
+    if not work or not work.stored_name:
+        return jsonify({'message': '作品文件不存在'}), 404
+    comp = db.session.get(Competition, work.competition_id)
+    if not (work.user_id == user.id or (comp and comp.creator_id == user.id)):
+        if not user.is_teacher():
+            return jsonify({'message': '无权访问'}), 403
+    return send_from_directory(_UPLOAD_DIR, work.stored_name,
+                               as_attachment=True, download_name=work.filename)
+
+
+@competition_bp.route('/competitions/<int:comp_id>/settle', methods=['POST'])
+def api_settle_competition(comp_id):
+    """结算积分托管：冠军获全部托管积分；同分取最早提交/用时短者；无有效作品流标退回"""
+    user, err = _require_teacher()
+    if err:
+        return err
+    comp, err = _get_own_competition(user, comp_id)
+    if err:
+        return err
+    comp.sync_status()
+    if comp.status != CompetitionStatusEnum.ENDED:
+        return jsonify({'message': '竞赛结束后才能结算'}), 400
+    frozen = int(comp.frozen_points or 0)
+    if frozen <= 0:
+        return jsonify({'message': '无待发放的托管积分（已结算或纯荣誉赛）'})
+
+    winner_id = None
+    if comp.competition_type == CompetitionTypeEnum.DS:
+        # 数据科学赛：按私榜分（全量 gold）决冠军，同分取更早提交；方向依指标
+        from dsci.metrics import higher_is_better
+        scored = [s for s in comp.ds_submissions if s.private_score is not None]
+        if scored:
+            hib = higher_is_better(comp.ds_metric, comp.ds_higher_is_better)
+            best = max(scored, key=lambda s: ((s.private_score if hib else -s.private_score),
+                                              -s.created_at.timestamp()))
+            winner_id = best.user_id
+    elif comp.competition_type == CompetitionTypeEnum.PROJECT:
+        scored = [w for w in comp.works if w.score is not None]
+        if scored:
+            best = max(scored, key=lambda w: (w.score, -(w.submitted_at.timestamp())))
+            winner_id = best.user_id
+    else:
+        fin = [p for p in comp.participants
+               if p.status == ParticipantStatusEnum.FINISHED and (p.score or 0) > 0]
+        if fin:
+            winner_id = min(fin, key=lambda p: (-(p.score or 0), p.used_time or 0)).user_id
+
+    if winner_id:
+        ledger.post(winner_id, 'bounty', frozen, 'release', ref_type='competition',
+                    ref_id=comp.id, memo='赛事冠军奖金')
+        comp.frozen_points = 0
+        db.session.commit()
+        _notify(winner_id, '恭喜获得赛事冠军奖金',
+                f'「{comp.title}」你获得冠军，{frozen} 积分奖金已发放到赏金钱包。',
+                type='success', related_id=comp.id)
+        return jsonify({'message': '结算完成', 'winner_id': winner_id, 'released': frozen})
+    _refund_frozen(comp, memo='赛事流标托管退回')
+    db.session.commit()
+    _notify(comp.creator_id, '赛事奖金流标退回',
+            f'「{comp.title}」无有效获奖作品，托管的 {frozen} 积分已退回你的钱包。',
+            type='warning', related_id=comp.id)
+    return jsonify({'message': '无有效作品，托管积分已退回', 'refunded': frozen})
+
+
+@competition_bp.route('/competitions/<int:comp_id>/archive', methods=['POST'])
+def api_archive_competition(comp_id):
+    """v4.5 赛题归档：结束后赛题正式入公共题库"""
+    user, err = _require_teacher()
+    if err:
+        return err
+    comp, err = _get_own_competition(user, comp_id)
+    if err:
+        return err
+    comp.sync_status()
+    if comp.status != CompetitionStatusEnum.ENDED:
+        return jsonify({'message': '仅已结束竞赛可归档'}), 400
+    archived, majors = 0, set()
+    for cq in comp.questions:
+        q = db.session.get(Question, cq.question_id) if cq.question_id else None
+        if q and not q.is_public:
+            q.is_public = True
+            archived += 1
+            if q.major_id:
+                majors.add(q.major_id)
+    db.session.commit()
+    if archived:
+        from utils.redis_cache import invalidate_question_cache
+        for mid in majors:
+            invalidate_question_cache(major_id=mid)
+    return jsonify({'message': f'已归档 {archived} 题入公共题库', 'archived': archived})
