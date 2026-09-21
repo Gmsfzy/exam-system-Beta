@@ -82,7 +82,7 @@
           <template v-if="nodeQuestions.length">
             <div class="dq-head">关联题目（{{ nodeQuestions.length }}）</div>
             <div v-for="q in nodeQuestions.slice(0, 5)" :key="q.id" class="dq-item">
-              <span class="q-type">{{ qTypeLabel(q.type) }}</span>
+              <span class="q-type">{{ typeLabel(q.type) }}</span>
               <span class="q-content">{{ q.content }}</span>
             </div>
             <div v-if="nodeQuestions.length > 5" class="dq-more">等 {{ nodeQuestions.length }} 道题</div>
@@ -432,16 +432,12 @@ const createEdge = async () => {
   savingEdge.value = false
 }
 
-// ── 文案工具 ──
-const diffLabel = (d) => ({ easy: '简单', medium: '中等', hard: '困难' }[d] || d)
+// ── 文案工具 ──（题型/难度 v4.6.1 收敛至 utils/enums 单一来源，简称统一为全称）
+import { difficultyLabel, typeLabel } from '../utils/enums'
+const diffLabel = difficultyLabel
 const diffTagType = (d) => ({ easy: 'success', medium: 'warning', hard: 'danger' }[d] || 'info')
 const statusLabel = (s) => ({ draft: '草稿', published: '已发布', archived: '已归档' }[s] || s)
 const relationLabel = (t) => ({ prerequisite: '前置依赖', related: '相关', derived: '衍生' }[t] || t)
-const qTypeLabel = (t) => ({
-  single_choice: '单选', multiple_choice: '多选', fill_blank: '填空',
-  true_false: '判断', short_answer: '问答', programming: '编程',
-  application: '应用', calculation: '计算',
-}[t] || t)
 
 onMounted(async () => {
   await loadMajors()

@@ -7,6 +7,15 @@
 
     <!-- 筛选 -->
     <div class="filter-bar">
+      <el-input
+        v-model="searchKey"
+        placeholder="搜索题干 / 知识点"
+        clearable
+        style="width:220px"
+        :prefix-icon="Search"
+        @keyup.enter="refresh"
+        @clear="refresh"
+      />
       <el-select v-model="filterMastered" placeholder="全部状态" clearable style="width:140px">
         <el-option label="待攻克" value="false" />
         <el-option label="已掌握" value="true" />
@@ -68,11 +77,24 @@
         <el-tag v-for="k in rec.knowledge.split(',').filter(Boolean)" :key="k" size="small" type="info">{{ k.trim() }}</el-tag>
       </div>
 
+      <!-- 逐题 AI 归因结果 -->
+      <div v-if="rec.ai_analysis" class="ai-analysis-box">
+        <div class="ai-analysis-head">
+          <el-icon :size="14"><MagicStick /></el-icon>
+          <span>AI 错因归因</span>
+          <span v-if="rec.ai_analyzed_at" class="ai-analysis-time">{{ rec.ai_analyzed_at }}</span>
+        </div>
+        <div class="ai-analysis-text">{{ rec.ai_analysis }}</div>
+      </div>
+
       <div class="wrong-footer">
         <span class="time-info">上次答错：{{ rec.last_wrong_at }}</span>
         <div class="actions">
           <el-button size="small" @click="toggleMastered(rec)">
             {{ rec.is_mastered ? '取消掌握' : '标记已掌握' }}
+          </el-button>
+          <el-button size="small" :loading="analyzingId === rec.id" @click="analyzeWrong(rec)">
+            {{ rec.ai_analysis ? '重新归因' : 'AI 归因' }}
           </el-button>
           <el-button size="small" type="primary" @click="askAI(rec)">AI 答疑</el-button>
           <el-button size="small" type="danger" @click="removeRecord(rec)">移除</el-button>
@@ -124,7 +146,7 @@ import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import request from '../utils/request'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Loading } from '@element-plus/icons-vue'
+import { Loading, Search, MagicStick } from '@element-plus/icons-vue'
 import AIChatDialog from '../components/AIChatDialog.vue'
 
 const router = useRouter()
@@ -134,6 +156,7 @@ const total = ref(0)
 const page = ref(1)
 const perPage = 20
 const loading = ref(false)
+const searchKey = ref('')
 const filterMastered = ref('')
 const filterSource = ref('')
 
@@ -166,6 +189,7 @@ async function load() {
   loading.value = true
   try {
     const params = { page: page.value, per_page: perPage }
+    if (searchKey.value.trim()) params.q = searchKey.value.trim()
     if (filterMastered.value !== '') params.is_mastered = filterMastered.value
     if (filterSource.value) params.source_type = filterSource.value
     const res = await request.get('/api/learning/wrong-records', { params })
@@ -179,9 +203,8 @@ function refresh() { page.value = 1; load() }
 
 function sourceLabel(t) { return { exam: '考试', competition: '竞赛', practice: '练习' }[t] || t }
 function sourceTagType(t) { return { exam: '', competition: 'warning', practice: 'success' }[t] || '' }
-function typeLabel(t) {
-  return { single_choice: '单选题', multiple_choice: '多选题', true_false: '判断题', fill_blank: '填空题', essay: '简答题' }[t] || t
-}
+// v4.6.1 枚举收敛：题型中文名单一来源 frontend/src/utils/enums.js
+import { typeLabel } from '../utils/enums'
 function optionLabel(i) { return String.fromCharCode(65 + i) }
 function isCorrectOption(rec, i) {
   const a = (rec.correct_answer || '').toUpperCase().trim()
@@ -217,6 +240,24 @@ function startPractice() {
     return
   }
   router.push('/learning/practice')
+}
+
+// AI 逐题归因（结果持久化到错题记录，重做前可反复回看）
+const analyzingId = ref(0)
+
+async function analyzeWrong(rec) {
+  analyzingId.value = rec.id
+  try {
+    const res = await request.post(`/api/learning/wrong-records/${rec.id}/analyze`)
+    rec.ai_analysis = res.data.analysis
+    rec.ai_analyzed_at = res.data.ai_analyzed_at
+    if (res.data.source === 'rule') {
+      ElMessage.info('AI 服务暂不可用，已生成规则化建议')
+    } else {
+      ElMessage.success('错因归因已生成')
+    }
+  } catch (e) { /* 拦截器已提示 */ }
+  analyzingId.value = 0
 }
 
 // AI 答疑
@@ -288,6 +329,17 @@ onMounted(load)
 .answer-text { color: var(--text-primary); }
 
 .knowledge-row { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
+
+.ai-analysis-box {
+  background: rgba(6, 182, 212, 0.06); border: 1px solid rgba(6, 182, 212, 0.25);
+  border-radius: 10px; padding: 10px 14px; margin-bottom: 12px;
+}
+.ai-analysis-head {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 12px; font-weight: 600; color: #0891b2; margin-bottom: 6px;
+}
+.ai-analysis-time { margin-left: auto; font-weight: 400; color: var(--text-muted); }
+.ai-analysis-text { font-size: 13px; line-height: 1.7; color: var(--text-primary); white-space: pre-wrap; }
 
 .wrong-footer { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
 .time-info { font-size: 12px; color: var(--text-muted); }

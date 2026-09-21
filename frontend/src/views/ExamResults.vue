@@ -62,6 +62,14 @@
         <el-table-column prop="submitted_at" label="提交时间" width="200">
           <template #default="{ row }">{{ formatDate(row.submitted_at) }}</template>
         </el-table-column>
+        <el-table-column label="申诉" width="110">
+          <template #default="{ row }">
+            <el-button v-if="row.review_status === 'requested'" size="small" type="warning" @click="openReview(row)">处理申诉</el-button>
+            <el-tag v-else-if="row.review_status === 'resolved'" size="small" type="success">已成立</el-tag>
+            <el-tag v-else-if="row.review_status === 'rejected'" size="small" type="info">已驳回</el-tag>
+            <span v-else>—</span>
+          </template>
+        </el-table-column>
         <el-table-column label="操作" width="150">
           <template #default="{ row }">
             <el-button size="small" @click="viewDetail(row.id)">查看详情</el-button>
@@ -78,12 +86,39 @@
       <h3>暂无成绩</h3>
       <p>学生提交答卷后，成绩将显示在这里</p>
     </div>
+
+    <!-- v4.3 申诉处理弹窗 -->
+    <el-dialog v-model="reviewDialog.visible" title="处理成绩申诉" width="560px">
+      <div v-loading="reviewDialog.loading">
+        <el-alert v-if="reviewDialog.reason" :title="`学生申诉理由：${reviewDialog.reason}`" type="warning" :closable="false" show-icon style="margin-bottom: 16px" />
+        <el-form label-width="90px">
+          <el-form-item label="处理结果">
+            <el-radio-group v-model="reviewDialog.action">
+              <el-radio value="approve">申诉成立</el-radio>
+              <el-radio value="reject">驳回申诉</el-radio>
+            </el-radio-group>
+          </el-form-item>
+          <el-form-item v-if="reviewDialog.action === 'approve'" label="调整后分数">
+            <el-input-number v-model="reviewDialog.new_score" :min="0" :max="reviewDialog.total_score || 100" :precision="1" />
+            <span style="margin-left: 8px; color: #94a3b8; font-size: 12px">不调整则保持 {{ reviewDialog.score }} 分</span>
+          </el-form-item>
+          <el-form-item label="复核回复">
+            <el-input v-model="reviewDialog.reply" type="textarea" :rows="3" placeholder="必填，将随通知发送给学生" />
+          </el-form-item>
+        </el-form>
+      </div>
+      <template #footer>
+        <el-button @click="reviewDialog.visible = false">取消</el-button>
+        <el-button type="primary" @click="submitReview">提交处理</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
+import { ElMessage } from 'element-plus'
 import { User, TrendCharts, Trophy, Medal } from '@element-plus/icons-vue'
 import request from '../utils/request'
 
@@ -146,6 +181,53 @@ const getScoreColor = (score, total) => {
   if (ratio >= 0.8) return '#10b981'
   if (ratio >= 0.6) return '#f59e0b'
   return '#ef4444'
+}
+
+// v4.3 申诉处理
+const reviewDialog = reactive({
+  visible: false, loading: false, resultId: null,
+  reason: '', reply: '', action: 'approve',
+  new_score: null, score: null, total_score: null,
+})
+
+const openReview = async (row) => {
+  reviewDialog.visible = true
+  reviewDialog.loading = true
+  reviewDialog.resultId = row.id
+  reviewDialog.action = 'approve'
+  reviewDialog.reply = ''
+  reviewDialog.score = row.score
+  reviewDialog.total_score = row.total_score
+  reviewDialog.new_score = row.score
+  reviewDialog.reason = ''
+  try {
+    // 列表接口不含申诉理由，取详情（教师视角返回 review_reason）
+    const res = await request.get(`/api/results/${row.id}`)
+    reviewDialog.reason = res.data.review_reason || ''
+  } catch (e) {
+    console.error(e)
+  } finally {
+    reviewDialog.loading = false
+  }
+}
+
+const submitReview = async () => {
+  if (!reviewDialog.reply.trim()) {
+    ElMessage.warning('请填写复核回复')
+    return
+  }
+  try {
+    await request.post(`/api/results/${reviewDialog.resultId}/review_handle`, {
+      action: reviewDialog.action,
+      reply: reviewDialog.reply.trim(),
+      new_score: reviewDialog.action === 'approve' ? reviewDialog.new_score : undefined,
+    })
+    ElMessage.success('已处理申诉并通知学生')
+    reviewDialog.visible = false
+    await loadResults(examId.value)
+  } catch (e) {
+    console.error(e)
+  }
 }
 </script>
 

@@ -30,14 +30,25 @@
           <el-tag :type="statusTag(comp.status)" effect="dark" size="small">
             {{ statusLabel(comp.status) }}
           </el-tag>
+          <el-tag v-if="comp.competition_type === 'project'" size="small" type="warning" effect="plain">作品赛</el-tag>
+          <el-tag v-if="comp.competition_type === 'ds'" size="small" type="primary" effect="plain">数据赛</el-tag>
+          <el-tag v-if="comp.prize_points" size="small" type="danger" effect="plain">冠军 {{ comp.prize_points }} 积分</el-tag>
           <span v-if="comp.my_rank" class="my-rank">我的最佳：第{{ comp.my_rank }}名</span>
         </div>
         <h3 class="comp-title">{{ comp.title }}</h3>
         <p class="comp-desc">{{ comp.description || '暂无描述' }}</p>
         <div class="comp-meta">
           <span class="meta-tag"><el-icon :size="14"><Calendar /></el-icon>{{ fmtTime(comp.start_time) }} ~ {{ fmtTime(comp.end_time) }}</span>
-          <span class="meta-tag"><el-icon :size="14"><Clock /></el-icon>限时{{ comp.duration }}分钟</span>
-          <span class="meta-tag"><el-icon :size="14"><List /></el-icon>{{ comp.question_count }}题 / {{ comp.total_score }}分</span>
+          <template v-if="comp.competition_type === 'project'">
+            <span class="meta-tag"><el-icon :size="14"><EditPen /></el-icon>提交作品 · 人工评审</span>
+          </template>
+          <template v-else-if="comp.competition_type === 'ds'">
+            <span class="meta-tag"><el-icon :size="14"><EditPen /></el-icon>在线运行 · 自动评分</span>
+          </template>
+          <template v-else>
+            <span class="meta-tag"><el-icon :size="14"><Clock /></el-icon>限时{{ comp.duration }}分钟</span>
+            <span class="meta-tag"><el-icon :size="14"><List /></el-icon>{{ comp.question_count }}题 / {{ comp.total_score }}分</span>
+          </template>
           <span class="meta-tag"><el-icon :size="14"><User /></el-icon>{{ comp.participant_count }}人参与</span>
         </div>
         <div class="card-footer">
@@ -47,6 +58,12 @@
           <div class="card-actions">
             <el-button v-if="!comp.my_status && comp.status !== 'ended'" size="small" type="primary" @click="join(comp)">
               报名
+            </el-button>
+            <el-button v-if="comp.competition_type === 'project'" size="small" type="success" @click="openProject(comp)">
+              {{ comp.my_status ? '我的作品' : '去提交作品' }}
+            </el-button>
+            <el-button v-if="comp.competition_type === 'ds'" size="small" type="success" @click="openDs(comp)">
+              {{ comp.my_status ? '进入数据赛' : '去参与' }}
             </el-button>
             <el-button v-if="canTake(comp)" size="small" type="success" @click="takeCompetition(comp)">
               {{ comp.my_status === 'playing' ? '继续答题' : '开始答题' }}
@@ -87,7 +104,7 @@ import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import request from '../utils/request'
-import { Calendar, Clock, List, User, Trophy, Connection, Key } from '@element-plus/icons-vue'
+import { Calendar, Clock, List, User, Trophy, Connection, Key, EditPen } from '@element-plus/icons-vue'
 
 const router = useRouter()
 const competitions = ref([])
@@ -105,11 +122,11 @@ const fmtTime = (iso) => {
 }
 
 const canTake = (comp) => {
-  return comp.my_status === 'joined' || comp.my_status === 'playing'
+  return comp.competition_type === 'timed' && (comp.my_status === 'joined' || comp.my_status === 'playing')
 }
 
 const canPk = (comp) => {
-  return comp.status === 'ongoing' &&
+  return comp.competition_type === 'timed' && comp.status === 'ongoing' &&
     (comp.my_status === 'joined' || comp.my_status === 'playing' || comp.my_status === 'finished')
 }
 
@@ -151,6 +168,14 @@ const joinByCode = async () => {
 
 const takeCompetition = (comp) => {
   router.push(`/competition/take/${comp.id}`)
+}
+
+const openProject = (comp) => {
+  router.push(`/competitions/${comp.id}/project`)
+}
+
+const openDs = (comp) => {
+  router.push(`/competitions/${comp.id}/ds`)
 }
 
 const viewLeaderboard = (comp) => {

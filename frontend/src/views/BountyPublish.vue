@@ -24,6 +24,25 @@
                   placeholder="详细说明你需要的题目知识点、难度要求，或答案的解析要求" />
       </el-form-item>
 
+      <el-form-item label="标签">
+        <el-input v-model="form.tags" placeholder="多个标签用逗号分隔，便于搜索发现（选填）" maxlength="200" />
+      </el-form-item>
+
+      <el-form-item label="采纳名额">
+        <el-input-number v-model="form.max_accepts" :min="1" :max="20" />
+        <span class="hint">默认 1（单一中标）；大于 1 可采纳多条优质投稿</span>
+      </el-form-item>
+
+      <el-form-item label="可见范围">
+        <el-radio-group v-model="form.visibility">
+          <el-radio label="public">公开（全体可见）</el-radio>
+          <el-radio label="targeted">定向（仅指定用户）</el-radio>
+        </el-radio-group>
+      </el-form-item>
+      <el-form-item v-if="form.visibility === 'targeted'" label="定向用户ID">
+        <el-input v-model="targetUsers" placeholder="输入可见的用户ID，逗号分隔" />
+      </el-form-item>
+
       <!-- 题目征集：专业/题型/难度 -->
       <template v-if="form.bounty_type === 'question'">
         <el-form-item label="所属专业" required>
@@ -73,7 +92,7 @@
 
       <el-form-item label="赏金（积分）" required>
         <el-input-number v-model="form.reward_points" :min="1" :max="500" :step="5" />
-        <span class="hint">投稿被采纳后发放给投稿人</span>
+        <span class="hint">投稿被采纳后发放给投稿人{{ form.max_accepts > 1 ? `（每条中标各发 ${form.reward_points} 分）` : '' }}</span>
       </el-form-item>
 
       <el-form-item label="截止时间">
@@ -102,11 +121,11 @@ const majors = ref([])
 const questions = ref([])
 const answerMode = ref('existing')
 
-const qTypes = {
-  single_choice: '单选题', multiple_choice: '多选题', fill_blank: '填空题',
-  true_false: '判断题', short_answer: '简答题', essay: '问答题'
-}
-const qDiffs = { easy: '简单', medium: '中等', hard: '困难' }
+// v4.6.1 枚举收敛：题型/难度单一来源 frontend/src/utils/enums.js（顺手修正旧 map 中 short_answer/essay 标签互换的漂移）
+import { QUESTION_TYPE_LABELS, DIFFICULTY_LABELS } from '../utils/enums'
+
+const qTypes = QUESTION_TYPE_LABELS
+const qDiffs = DIFFICULTY_LABELS
 
 const form = reactive({
   bounty_type: 'question',
@@ -118,8 +137,12 @@ const form = reactive({
   reward_points: 10,
   deadline: '',
   target_question_id: null,
+  tags: '',
+  max_accepts: 1,
+  visibility: 'public',
 })
 const snapshot = reactive({ content: '', answer: '' })
+const targetUsers = ref('')
 
 const submit = async () => {
   if (!form.title.trim()) return ElMessage.warning('请填写悬赏标题')
@@ -136,10 +159,21 @@ const submit = async () => {
       payload.target_question_id = null
     }
   }
+  if (form.visibility === 'targeted') {
+    const ids = targetUsers.value.split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n))
+    payload.target = { user_ids: ids, major_ids: [] }
+  } else {
+    payload.target = null
+  }
   submitting.value = true
   try {
-    await request.post('/api/bounties', payload)
-    ElMessage.success('悬赏发布成功')
+    const res = await request.post('/api/bounties', payload)
+    // v4.5 审核门禁：存在其他教师时进入待审核
+    if (res.data?.status === 'reviewing') {
+      ElMessage.success('已提交审核，教师通过后自动上架悬赏广场')
+    } else {
+      ElMessage.success('悬赏发布成功')
+    }
     router.push('/bounties')
   } finally {
     submitting.value = false

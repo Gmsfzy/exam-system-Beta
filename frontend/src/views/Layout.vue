@@ -161,7 +161,7 @@ import {
   SwitchButton, ArrowDown, School, Fold, Expand, Grid,
   Star, Calendar, VideoPlay, TrendCharts, Medal, Trophy, Lightning,
   Sunny, Moon, Check, Warning, InfoFilled,
-  Money, EditPen, Tickets, Close, Reading, Connection
+  Money, EditPen, Tickets, Close, Reading, Connection, Notebook
 } from '@element-plus/icons-vue'
 
 const route = useRoute()
@@ -358,7 +358,7 @@ const iconMap = {
   Document, Collection, HomeFilled, Bell, User, Setting,
   SwitchButton, ArrowDown, School, Fold, Expand, Grid,
   Star, Calendar, VideoPlay, TrendCharts, Medal, Trophy, Lightning,
-  Money, EditPen, Tickets, Reading, Connection
+  Money, EditPen, Tickets, Reading, Connection, Notebook
 }
 
 // 按模块分组的菜单：与路由 meta.module 对应，新增模块只需在此加分组
@@ -414,9 +414,13 @@ const moduleMenus = {
       { path: '/learning/my-knowledge', label: '我的知识库', icon: iconMap.Collection },
       { path: '/learning/certificates', label: '我的证书', icon: iconMap.Medal },
       { path: '/learning/wrong', label: '错题本', icon: iconMap.Document },
+      { path: '/learning/notes', label: '学习笔记', icon: iconMap.Notebook },
+      { path: '/learning/materials', label: '资料库', icon: iconMap.Tickets },
+      { path: '/learning/explore', label: '学习广场', icon: iconMap.Grid },
       { path: '/learning/practice', label: '自由刷题', icon: iconMap.EditPen },
       { path: '/learning/plan', label: '学习计划', icon: iconMap.Star },
       { path: '/learning/report', label: '学习报告', icon: iconMap.TrendCharts },
+      { path: '/learning/ai-governance', label: 'AI 治理', icon: iconMap.Setting },
     ],
     student: [
       { path: '/learning', label: '学习首页', icon: iconMap.Reading },
@@ -426,6 +430,9 @@ const moduleMenus = {
       { path: '/learning/my-knowledge', label: '我的知识库', icon: iconMap.Collection },
       { path: '/learning/certificates', label: '我的证书', icon: iconMap.Medal },
       { path: '/learning/wrong', label: '错题本', icon: iconMap.Document },
+      { path: '/learning/notes', label: '学习笔记', icon: iconMap.Notebook },
+      { path: '/learning/materials', label: '资料库', icon: iconMap.Tickets },
+      { path: '/learning/explore', label: '学习广场', icon: iconMap.Grid },
       { path: '/learning/practice', label: '自由刷题', icon: iconMap.EditPen },
       { path: '/learning/plan', label: '学习计划', icon: iconMap.Star },
       { path: '/learning/report', label: '学习报告', icon: iconMap.TrendCharts },

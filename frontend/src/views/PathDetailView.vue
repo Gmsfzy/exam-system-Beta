@@ -447,9 +447,11 @@ const onGraphTap = (n) => {
   else ElMessage.info(`「${n.name}」不在当前路径中，可前往「知识图谱」页查看`)
 }
 
+// v4.6.1 枚举收敛：难度中文名单一来源 frontend/src/utils/enums.js
+import { difficultyLabel } from '../utils/enums'
 const statusLabel = (s) => ({ draft: '草稿', published: '已发布', archived: '已归档' }[s] || s)
 const statusTagType = (s) => ({ draft: 'info', published: 'success', archived: 'warning' }[s] || 'info')
-const diffLabel = (d) => ({ easy: '简单', medium: '中等', hard: '困难' }[d] || d)
+const diffLabel = difficultyLabel
 const formatMinutes = (min) => {
   if (!min) return '0 分钟'
   if (min < 60) return `${min} 分钟`

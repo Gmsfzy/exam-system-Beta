@@ -40,6 +40,46 @@
         <span style="margin-left: 8px">分钟</span>
       </el-form-item>
 
+      <el-divider>考务设置</el-divider>
+      <el-form-item label="作答次数">
+        <el-input-number v-model="editForm.max_attempts" :min="1" :max="10" />
+        <span class="form-hint">1 = 不允许重考；超出后需逐人补考授权</span>
+      </el-form-item>
+      <el-form-item label="成绩策略">
+        <el-radio-group v-model="editForm.score_strategy">
+          <el-radio value="last">以最近一次为准</el-radio>
+          <el-radio value="best">取最高分</el-radio>
+        </el-radio-group>
+      </el-form-item>
+      <el-form-item label="组卷模式">
+        <el-radio-group v-model="editForm.paper_mode">
+          <el-radio value="unified">统一卷</el-radio>
+          <el-radio value="random">逐人随机抽题（A/B卷）</el-radio>
+        </el-radio-group>
+      </el-form-item>
+      <el-form-item v-if="editForm.paper_mode === 'random'" label="抽题数">
+        <el-input-number v-model="editForm.random_count" :min="0" :max="200" />
+        <span class="form-hint">每人从全卷随机抽此数道题，0 = 不抽题</span>
+      </el-form-item>
+      <el-form-item label="选项乱序">
+        <el-switch v-model="editForm.shuffle_options" />
+        <span class="form-hint">每位学生选择题选项顺序打乱，防按位置抄袭</span>
+      </el-form-item>
+      <el-form-item label="多选给分">
+        <el-radio-group v-model="editForm.multi_score_rule">
+          <el-radio value="all_or_nothing">全部选对得分</el-radio>
+          <el-radio value="partial">漏选按比例给分</el-radio>
+        </el-radio-group>
+      </el-form-item>
+      <el-form-item label="盲评">
+        <el-switch v-model="editForm.anonymous_grading" />
+        <span class="form-hint">批改页隐去学生账号，以“考生编号”展示</span>
+      </el-form-item>
+      <el-form-item label="成绩发布">
+        <el-switch v-model="editForm.results_published" />
+        <span class="form-hint">关闭后学生不可见分数，交卷也暂不发通知；在考试列表可一键发布</span>
+      </el-form-item>
+
       <el-divider>邀请设置</el-divider>
       <el-form-item>
         <el-checkbox
@@ -134,7 +174,16 @@ const editForm = ref({
   description: '',
   start_time: null,
   end_time: null,
-  duration: 60
+  duration: 60,
+  // v4.3 考务设置
+  max_attempts: 1,
+  score_strategy: 'last',
+  paper_mode: 'unified',
+  random_count: 0,
+  shuffle_options: false,
+  multi_score_rule: 'all_or_nothing',
+  anonymous_grading: false,
+  results_published: true
 })
 
 const inviteFlags = reactive({
@@ -163,7 +212,15 @@ const loadExam = async () => {
       description: exam.description || '',
       start_time: exam.start_time ? new Date(exam.start_time) : '',
       end_time: exam.end_time ? new Date(exam.end_time) : '',
-      duration: exam.duration
+      duration: exam.duration,
+      max_attempts: exam.max_attempts ?? 1,
+      score_strategy: exam.score_strategy || 'last',
+      paper_mode: exam.paper_mode || 'unified',
+      random_count: exam.random_count ?? 0,
+      shuffle_options: !!exam.shuffle_options,
+      multi_score_rule: exam.multi_score_rule || 'all_or_nothing',
+      anonymous_grading: !!exam.anonymous_grading,
+      results_published: exam.results_published !== false
     }
     if (exam.invitation_code) {
       invitationData.code = exam.invitation_code
@@ -248,7 +305,15 @@ const saveExam = async () => {
       description: editForm.value.description,
       start_time: editForm.value.start_time.toISOString(),
       end_time: editForm.value.end_time.toISOString(),
-      duration: editForm.value.duration
+      duration: editForm.value.duration,
+      max_attempts: editForm.value.max_attempts,
+      score_strategy: editForm.value.score_strategy,
+      paper_mode: editForm.value.paper_mode,
+      random_count: editForm.value.paper_mode === 'random' ? editForm.value.random_count : 0,
+      shuffle_options: editForm.value.shuffle_options,
+      multi_score_rule: editForm.value.multi_score_rule,
+      anonymous_grading: editForm.value.anonymous_grading,
+      results_published: editForm.value.results_published
     })
     ElMessage.success('修改成功')
     router.push('/exams')
@@ -296,6 +361,12 @@ const goBack = () => {
 
 .edit-form .el-form-item {
   margin-bottom: 20px;
+}
+
+.form-hint {
+  margin-left: 12px;
+  color: #94a3b8;
+  font-size: 12px;
 }
 
 .invite-card {

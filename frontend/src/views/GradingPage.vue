@@ -7,6 +7,7 @@
       </div>
       <div class="header-info">
         <span>学生：{{ gradingData.student_name }}</span>
+        <span v-if="gradingData.attempt_no > 1">第 {{ gradingData.attempt_no }} 次作答</span>
         <span>当前得分：{{ gradingData.current_score }} / {{ gradingData.total_score }}</span>
       </div>
     </div>
@@ -16,6 +17,7 @@
         <div class="question-header">
           <span class="question-number">第 {{ gradingData.answers.indexOf(answer) + 1 }} 题</span>
           <span class="badge-type">{{ typeLabels[answer.type] }}</span>
+          <span v-if="answer.oj_verdict" class="badge-oj" :class="{ ac: answer.oj_verdict === 'AC' }">OJ {{ answer.oj_verdict }}</span>
           <span v-if="answer.needs_manual_grade" class="badge-pending">需人工评分</span>
         </div>
         <div class="question-content">{{ answer.content }}</div>
@@ -61,6 +63,10 @@
           </div>
         </div>
         <div v-else class="graded-section">
+          <div v-if="answer.oj_verdict" class="grading-row">
+            <span class="grading-label">OJ 评测：</span>
+            <span class="grading-value">{{ answer.oj_verdict === 'AC' ? '全部用例通过' : answer.oj_verdict + '（按用例通过率得分）' }}</span>
+          </div>
           <div class="grading-row">
             <span class="grading-label">最终得分：</span>
             <span class="grading-value">{{ answer.manual_score || answer.ai_score || 0 }} / {{ answer.score_weight }}</span>
@@ -75,15 +81,21 @@
 
     <div class="page-footer">
       <el-button @click="goBack">返回</el-button>
+      <el-button
+        v-if="pendingCount > 0"
+        type="warning"
+        plain
+        @click="acceptAiAll"
+      >一键采纳 AI 评分（{{ pendingCount }} 题）</el-button>
       <el-button type="primary" @click="saveGrading">保存评分</el-button>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import request from '../utils/request'
 
 const route = useRoute()
@@ -96,16 +108,10 @@ const gradingData = ref({
   answers: []
 })
 
-const typeLabels = {
-  single_choice: '单选题',
-  multiple_choice: '多选题',
-  fill_blank: '填空题',
-  true_false: '判断题',
-  short_answer: '问答题',
-  programming: '编程题',
-  application: '应用题',
-  calculation: '计算题'
-}
+// v4.6.1 枚举收敛：题型中文名单一来源 frontend/src/utils/enums.js
+import { QUESTION_TYPE_LABELS } from '../utils/enums'
+
+const typeLabels = QUESTION_TYPE_LABELS
 
 onMounted(async () => {
   const examId = parseInt(route.params.examId)
@@ -130,6 +136,28 @@ const getOptions = (optionsStr) => {
     return Object.entries(options).map(([key, value]) => ({ key, value }))
   } catch {
     return []
+  }
+}
+
+const pendingCount = computed(() =>
+  (gradingData.value.answers || []).filter(a => a.needs_manual_grade).length)
+
+// v4.3 批改提效：待人工题一键采用 AI 评分
+const acceptAiAll = async () => {
+  try {
+    await ElMessageBox.confirm(
+      `确认将 ${pendingCount.value} 道待人工题直接采纳 AI 评分？采纳后仍可在保存前手动调整`,
+      '一键采纳 AI 评分', { type: 'warning' }
+    )
+  } catch (e) { return }
+  const examId = parseInt(route.params.examId)
+  const studentId = parseInt(route.params.studentId)
+  try {
+    const res = await request.post(`/api/results/grading/${examId}/${studentId}`, { accept_ai_all: true })
+    ElMessage.success(res.data.message || '已采纳 AI 评分')
+    await loadGrading(examId, studentId)
+  } catch (e) {
+    console.error(e)
   }
 }
 
@@ -236,6 +264,19 @@ const goBack = () => {
   color: #d97706;
   border-radius: 16px;
   font-size: 12px;
+}
+
+.badge-oj {
+  padding: 4px 10px;
+  background: #ffedd5;
+  color: #ea580c;
+  border-radius: 16px;
+  font-size: 12px;
+}
+
+.badge-oj.ac {
+  background: #dcfce7;
+  color: #16a34a;
 }
 
 .question-content {
@@ -386,6 +427,16 @@ const goBack = () => {
 .dark .badge-type {
   background: rgba(99, 102, 241, 0.2);
   color: #a5b4fc;
+}
+
+.dark .badge-oj {
+  background: rgba(234, 88, 12, 0.2);
+  color: #fdba74;
+}
+
+.dark .badge-oj.ac {
+  background: rgba(16, 185, 129, 0.2);
+  color: #34d399;
 }
 
 .dark .badge-pending {

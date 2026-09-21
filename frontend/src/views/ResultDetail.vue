@@ -5,13 +5,35 @@
         <h2>成绩详情</h2>
         <p>{{ resultData.exam_title }}</p>
       </div>
-      <div class="header-score">
+      <div class="header-score" v-if="resultData.published !== false">
         <div class="score-circle">
           <span class="score-num">{{ resultData.score }}</span>
           <span class="score-label">分</span>
         </div>
         <div class="score-total">满分 {{ resultData.total_score }}</div>
       </div>
+    </div>
+
+    <!-- v4.3 成绩发布控制：未发布占位 -->
+    <el-card v-if="resultData.published === false" shadow="never" style="margin-bottom: 24px">
+      <el-result icon="info" title="成绩尚未发布" sub-title="教师发布成绩后，您即可查看得分与每题解析">
+      </el-result>
+      <template #footer>
+        <el-button @click="goBack">返回</el-button>
+      </template>
+    </el-card>
+
+    <!-- v4.3 成绩申诉状态条 -->
+    <div v-if="resultData.published !== false && resultData.review_status && resultData.review_status !== 'none'" :class="['review-bar', resultData.review_status]">
+      <template v-if="resultData.review_status === 'requested'">
+        <el-icon><Clock /></el-icon> 申诉复核中，请耐心等待教师处理
+      </template>
+      <template v-else-if="resultData.review_status === 'resolved'">
+        <el-icon><Check /></el-icon> 申诉已成立<span v-if="resultData.review_reply">：{{ resultData.review_reply }}</span>
+      </template>
+      <template v-else-if="resultData.review_status === 'rejected'">
+        <el-icon><Close /></el-icon> 申诉未通过<span v-if="resultData.review_reply">：{{ resultData.review_reply }}</span>
+      </template>
     </div>
 
     <div v-if="resultData.ai_analysis" class="analysis-card">
@@ -31,12 +53,13 @@
       style="margin-bottom: 16px"
     />
 
-    <div class="questions-section">
+    <div class="questions-section" v-if="resultData.published !== false">
       <h3 class="section-title">答题详情</h3>
       <div v-for="(answer, index) in resultData.answers" :key="answer.question_id" class="question-item" :class="{ correct: answer.is_correct, wrong: !answer.is_correct && answer.student_answer }">
         <div class="question-header">
           <span class="question-number">第 {{ index + 1 }} 题</span>
           <span class="badge-type">{{ typeLabels[answer.type] }}</span>
+          <span v-if="answer.oj_verdict" class="badge-oj" :class="{ ac: answer.oj_verdict === 'AC' }">OJ {{ answer.oj_verdict }}</span>
           <span v-if="answer.is_correct" class="badge-result correct">
             <el-icon><Check /></el-icon>正确
           </span>
@@ -71,7 +94,13 @@
       </div>
     </div>
 
-    <div class="page-footer">
+    <div class="page-footer" v-if="resultData.published !== false">
+      <el-button
+        v-if="resultData.can_review"
+        type="warning"
+        plain
+        @click="submitReview"
+      >成绩申诉</el-button>
       <el-button @click="goBack">返回</el-button>
     </div>
   </div>
@@ -80,7 +109,8 @@
 <script setup>
 import { ref, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { InfoFilled, Check, Close, Minus } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { InfoFilled, Check, Close, Minus, Clock } from '@element-plus/icons-vue'
 import request from '../utils/request'
 
 const route = useRoute()
@@ -94,16 +124,10 @@ const resultData = ref({
   answers: []
 })
 
-const typeLabels = {
-  single_choice: '单选题',
-  multiple_choice: '多选题',
-  fill_blank: '填空题',
-  true_false: '判断题',
-  short_answer: '问答题',
-  programming: '编程题',
-  application: '应用题',
-  calculation: '计算题'
-}
+// v4.6.1 枚举收敛：题型中文名单一来源 frontend/src/utils/enums.js
+import { QUESTION_TYPE_LABELS } from '../utils/enums'
+
+const typeLabels = QUESTION_TYPE_LABELS
 
 onMounted(async () => {
   const resultId = parseInt(route.params.id)
@@ -130,6 +154,22 @@ const getOptions = (optionsStr) => {
 
 const goBack = () => {
   router.push('/results')
+}
+
+// v4.3 成绩申诉
+const submitReview = async () => {
+  try {
+    const { value } = await ElMessageBox.prompt(
+      '请说明申诉理由（如：某题答案应为正确、评分系统误判等），教师将人工复核',
+      '成绩申诉',
+      { inputType: 'textarea', inputValidator: (v) => (v && v.trim().length >= 5) || '至少输入 5 个字', confirmButtonText: '提交申诉' }
+    )
+    await request.post(`/api/results/${route.params.id}/review`, { reason: value.trim() })
+    ElMessage.success('申诉已提交，复核结果将通知您')
+    await loadResult(parseInt(route.params.id))
+  } catch (e) {
+    if (e !== 'cancel' && e?.message !== 'cancel') console.error(e)
+  }
 }
 </script>
 
@@ -263,6 +303,20 @@ const goBack = () => {
   font-size: 12px;
 }
 
+.badge-oj {
+  padding: 4px 10px;
+  border-radius: 16px;
+  font-size: 12px;
+  font-weight: 500;
+  background: #ffedd5;
+  color: #ea580c;
+}
+
+.badge-oj.ac {
+  background: #dcfce7;
+  color: #16a34a;
+}
+
 .badge-result {
   padding: 4px 10px;
   border-radius: 16px;
@@ -355,6 +409,46 @@ const goBack = () => {
   margin-top: 24px;
 }
 
+.review-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  border-radius: 12px;
+  margin-bottom: 16px;
+  font-size: 14px;
+}
+
+.review-bar.requested {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.review-bar.resolved {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.review-bar.rejected {
+  background: #f1f5f9;
+  color: #475569;
+}
+
+.dark .review-bar.requested {
+  background: rgba(245, 158, 11, 0.15);
+  color: #fcd34d;
+}
+
+.dark .review-bar.resolved {
+  background: rgba(16, 185, 129, 0.15);
+  color: #34d399;
+}
+
+.dark .review-bar.rejected {
+  background: rgba(100, 116, 139, 0.15);
+  color: #94a3b8;
+}
+
 /* 暗色模式 */
 .dark .header-title h2 {
   color: #f1f5f9;
@@ -402,6 +496,16 @@ const goBack = () => {
 .dark .badge-type {
   background: rgba(99, 102, 241, 0.2);
   color: #a5b4fc;
+}
+
+.dark .badge-oj {
+  background: rgba(234, 88, 12, 0.2);
+  color: #fdba74;
+}
+
+.dark .badge-oj.ac {
+  background: rgba(16, 185, 129, 0.2);
+  color: #34d399;
 }
 
 .dark .badge-result {

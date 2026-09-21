@@ -17,9 +17,39 @@
             <span class="header-title">{{ title }}</span>
             <span class="header-sub">{{ subText }}</span>
           </div>
+          <el-button class="header-btn" text circle title="历史会话" @click="toggleHistory">
+            <el-icon :size="16"><Clock /></el-icon>
+          </el-button>
+          <el-button class="header-btn" text circle title="新建会话" @click="newConversation">
+            <el-icon :size="16"><Plus /></el-icon>
+          </el-button>
           <el-button class="header-close" text circle @click="open = false">
             <el-icon :size="16"><Close /></el-icon>
           </el-button>
+        </div>
+
+        <!-- 历史会话面板 -->
+        <div v-if="showHistory" class="history-panel">
+          <div class="history-head">
+            <span>历史会话</span>
+            <el-button size="small" text @click="showHistory = false">收起</el-button>
+          </div>
+          <div class="history-list">
+            <div v-if="!conversations.length" class="history-empty">暂无历史会话</div>
+            <div
+              v-for="c in conversations" :key="c.id"
+              class="history-item" :class="{ active: c.id === conversationId }"
+              @click="openConversation(c.id)"
+            >
+              <div class="history-info">
+                <span class="history-title">{{ c.title }}</span>
+                <span class="history-meta">{{ c.message_count }} 条 · {{ fmtTime(c.updated_at) }}</span>
+              </div>
+              <el-button class="history-del" text circle size="small" @click.stop="removeConversation(c.id)">
+                <el-icon :size="13"><Delete /></el-icon>
+              </el-button>
+            </div>
+          </div>
         </div>
 
         <div ref="bodyRef" class="chat-body">
@@ -30,10 +60,10 @@
             <div v-if="m.role === 'assistant'" class="msg-avatar">
               <el-icon :size="13"><MagicStick /></el-icon>
             </div>
-            <div class="msg-bubble" :class="{ 'is-error': m.error }">{{ m.content }}</div>
+            <div class="msg-bubble" :class="{ 'is-error': m.error, 'is-degraded': m.degraded, 'is-streaming': m.streaming }">{{ m.content }}</div>
           </div>
 
-          <div v-if="loading" class="msg-row from-ai">
+          <div v-if="loading && !streamingMsg" class="msg-row from-ai">
             <div class="msg-avatar">
               <el-icon :size="13"><MagicStick /></el-icon>
             </div>
@@ -70,7 +100,7 @@
 
 <script setup>
 import { ref, computed, nextTick, watch } from 'vue'
-import { ChatDotRound, MagicStick, Close, Promotion } from '@element-plus/icons-vue'
+import { ChatDotRound, MagicStick, Close, Promotion, Clock, Plus, Delete } from '@element-plus/icons-vue'
 import request from '../utils/request'
 
 const props = defineProps({
@@ -81,7 +111,7 @@ const props = defineProps({
   title: { type: String, default: 'AI 学习助手' },
 })
 
-const WELCOME = '你好，我是你的 AI 学习助手。可以问我知识点讲解、错题分析、复习规划等问题，我会结合你当前的学习情况给出建议。'
+const WELCOME = '你好，我是你的 AI 学习助手。可以问我知识点讲解、错题分析、复习规划等问题，对话会自动保存，下次回来继续聊。'
 
 const open = ref(false)
 const draft = ref('')
@@ -90,7 +120,23 @@ const messages = ref([{ role: 'assistant', content: WELCOME, welcome: true }])
 const bodyRef = ref(null)
 const inputRef = ref(null)
 
-const subText = computed(() => (props.context ? '已了解当前页面情况' : '随时为你解答学习问题'))
+// 会话持久化状态
+const conversationId = ref(null)
+const conversations = ref([])
+const showHistory = ref(false)
+// 当前正在流式接收的助手消息（逐 token 追加）
+const streamingMsg = ref(null)
+
+const subText = computed(() => {
+  if (conversationId.value) return '对话已保存 · 可随时回看'
+  return props.context ? '已了解当前页面情况' : '随时为你解答学习问题'
+})
+
+const fmtTime = (iso) => {
+  if (!iso) return ''
+  const d = new Date(iso)
+  return Number.isNaN(d.getTime()) ? '' : `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
 
 const scrollBottom = async () => {
   await nextTick()
@@ -108,12 +154,49 @@ const onEnter = () => {
   if (!loading.value && draft.value.trim()) send()
 }
 
-// 仅把真实对话（排除欢迎语/错误提示）发给后端，服务端无状态
-const historyPayload = () =>
-  messages.value
-    .filter(m => !m.welcome && !m.error)
-    .map(m => ({ role: m.role, content: m.content }))
+// ── 历史会话管理 ──
+const loadConversations = async () => {
+  try {
+    const res = await request.get('/api/learning/ai-conversations')
+    conversations.value = res.data.items || []
+  } catch (e) { /* 静默 */ }
+}
 
+const toggleHistory = () => {
+  showHistory.value = !showHistory.value
+  if (showHistory.value) loadConversations()
+}
+
+const newConversation = () => {
+  conversationId.value = null
+  showHistory.value = false
+  messages.value = [{ role: 'assistant', content: WELCOME, welcome: true }]
+}
+
+const openConversation = async (cid) => {
+  try {
+    const res = await request.get(`/api/learning/ai-conversations/${cid}/messages`)
+    conversationId.value = cid
+    messages.value = [
+      { role: 'assistant', content: WELCOME, welcome: true },
+      ...(res.data.items || []).map(m => ({
+        role: m.role, content: m.content, degraded: m.degraded,
+      })),
+    ]
+    showHistory.value = false
+    scrollBottom()
+  } catch (e) { /* 拦截器已提示 */ }
+}
+
+const removeConversation = async (cid) => {
+  try {
+    await request.delete(`/api/learning/ai-conversations/${cid}`)
+    if (cid === conversationId.value) newConversation()
+    loadConversations()
+  } catch (e) { /* ignore */ }
+}
+
+// ── 发送：优先 SSE 流式，异常时回退到非流式接口 ──
 const send = async (preset) => {
   const text = (preset !== undefined ? preset : draft.value).trim()
   if (!text || loading.value) return
@@ -127,27 +210,87 @@ const send = async (preset) => {
   loading.value = true
   scrollBottom()
   try {
-    const res = await request.post('/api/learning/ai-chat', {
-      messages: historyPayload(),
-      context: props.context,
-    })
-    messages.value.push({ role: 'assistant', content: res.data.reply || '（AI 未返回内容）' })
+    await streamChat(text)
   } catch (e) {
-    const msg = e?.response?.data?.message || 'AI 服务暂时不可用，请稍后再试'
-    messages.value.push({ role: 'assistant', content: msg, error: true })
+    // 流式失败（含降级）：清掉半截流式气泡，回退非流式端点
+    if (streamingMsg.value) {
+      messages.value = messages.value.filter(m => m !== streamingMsg.value)
+      streamingMsg.value = null
+    }
+    try {
+      const history = messages.value
+        .filter(m => !m.welcome && !m.error)
+        .map(m => ({ role: m.role, content: m.content }))
+      const res = await request.post('/api/learning/ai-chat', {
+        messages: [...history, { role: 'user', content: text }].slice(-12),
+        context: props.context,
+      })
+      messages.value.push({ role: 'assistant', content: res.data.reply || '（AI 未返回内容）' })
+    } catch (e2) {
+      const msg = e2?.response?.data?.message || 'AI 服务暂时不可用，请稍后再试'
+      messages.value.push({ role: 'assistant', content: msg, error: true })
+    }
   }
   loading.value = false
   scrollBottom()
 }
 
-// 清空对话重新开始：关闭再打开即重置
-watch(open, (v) => {
-  if (v) {
-    messages.value = [{ role: 'assistant', content: WELCOME, welcome: true }]
-    scrollBottom()
-    nextTick(() => inputRef.value?.focus())
+const streamChat = async (text) => {
+  const base = import.meta.env.VITE_API_BASE_URL || ''
+  const headers = { 'Content-Type': 'application/json' }
+  const token = localStorage.getItem('token')
+  if (token) headers.Authorization = `Bearer ${token}`
+  const resp = await fetch(`${base}/api/learning/ai-chat/stream`, {
+    method: 'POST',
+    headers,
+    credentials: 'include',
+    body: JSON.stringify({ conversation_id: conversationId.value, message: text, context: props.context }),
+  })
+  if (!resp.ok || !resp.body) throw new Error(`stream http ${resp.status}`)
+
+  const aiMsg = { role: 'assistant', content: '', streaming: true }
+  messages.value.push(aiMsg)
+  streamingMsg.value = aiMsg
+
+  const reader = resp.body.getReader()
+  const decoder = new TextDecoder()
+  let buf = ''
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buf += decoder.decode(value, { stream: true })
+    let idx
+    while ((idx = buf.indexOf('\n\n')) >= 0) {
+      const block = buf.slice(0, idx)
+      buf = buf.slice(idx + 2)
+      for (const line of block.split('\n')) {
+        if (!line.startsWith('data:')) continue
+        const payload = line.slice(5).trim()
+        if (!payload || payload === '[DONE]') continue
+        try {
+          const evt = JSON.parse(payload)
+          if (evt.conversation_id) conversationId.value = evt.conversation_id
+          if (evt.delta) { aiMsg.content += evt.delta; scrollBottom() }
+          if (evt.done) aiMsg.degraded = !!evt.degraded
+        } catch (e) { /* 非 JSON 块忽略 */ }
+      }
+    }
   }
-})
+  aiMsg.streaming = false
+  streamingMsg.value = null
+  if (!aiMsg.content) throw new Error('empty stream')
+}
+
+// 打开面板：保留当前会话；若从未聊过则重置欢迎语
+const onOpen = () => {
+  if (!conversationId.value && !messages.value.some(m => !m.welcome)) {
+    messages.value = [{ role: 'assistant', content: WELCOME, welcome: true }]
+  }
+  scrollBottom()
+  nextTick(() => inputRef.value?.focus())
+}
+
+watch(open, (v) => { if (v) onOpen() })
 </script>
 
 <style scoped>
@@ -255,6 +398,107 @@ watch(open, (v) => {
 
 .header-close {
   color: #fff;
+}
+
+.header-btn {
+  color: #fff;
+}
+
+.history-panel {
+  position: absolute;
+  top: 60px;
+  left: 12px;
+  right: 12px;
+  max-height: 60%;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  box-shadow: 0 14px 32px rgba(2, 8, 23, 0.25);
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.history-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.history-list {
+  overflow-y: auto;
+  padding: 6px;
+}
+
+.history-empty {
+  font-size: 12px;
+  color: var(--text-muted);
+  text-align: center;
+  padding: 18px;
+}
+
+.history-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.history-item:hover {
+  background: rgba(6, 182, 212, 0.08);
+}
+
+.history-item.active {
+  background: rgba(6, 182, 212, 0.14);
+}
+
+.history-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.history-title {
+  font-size: 13px;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.history-meta {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.history-del {
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.history-del:hover {
+  color: #ef4444;
+}
+
+.msg-bubble.is-degraded {
+  border: 1px dashed rgba(245, 158, 11, 0.6);
+  background: rgba(245, 158, 11, 0.08);
+}
+
+.msg-bubble.is-streaming::after {
+  content: '▍';
+  color: #06b6d4;
+  animation: blink 1s infinite;
 }
 
 .chat-body {

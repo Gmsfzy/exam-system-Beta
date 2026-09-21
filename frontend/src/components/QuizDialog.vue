@@ -82,11 +82,9 @@ const result = ref({})
 const current = computed(() => questions.value[idx.value] || {})
 const scope = computed(() => props.payload.node_id ? 'node' : 'path_final')
 
-const typeLabel = (t) => ({
-  single_choice: '单选题', multiple_choice: '多选题', true_false: '判断题',
-  fill_blank: '填空题', essay: '简答题',
-}[t] || t || '')
-const isChoice = (t) => ['single_choice', 'multiple_choice'].includes(t)
+// v4.6.1 枚举收敛：题型/选项题型单一来源 frontend/src/utils/enums.js
+import { typeLabel, hasOptions } from '../utils/enums'
+const isChoice = hasOptions
 const isPicked = (i) => (draft.value || '').includes(String.fromCharCode(65 + i))
 
 function pick(i) {

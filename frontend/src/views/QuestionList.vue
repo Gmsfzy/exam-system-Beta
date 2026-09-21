@@ -38,9 +38,7 @@
           <el-option v-for="(label, key) in typeLabels" :key="key" :label="label" :value="key" />
         </el-select>
         <el-select v-model="filter.difficulty" placeholder="全部难度" clearable class="filter-select">
-          <el-option label="简单" value="easy" />
-          <el-option label="中等" value="medium" />
-          <el-option label="困难" value="hard" />
+          <el-option v-for="d in DIFFICULTY_OPTIONS" :key="d.value" :label="d.label" :value="d.value" />
         </el-select>
       </div>
       <div class="action-buttons">
@@ -296,9 +294,7 @@
           <el-col :span="8">
             <el-form-item label="难度">
               <el-select v-model="form.difficulty" style="width: 100%">
-                <el-option label="简单" value="easy" />
-                <el-option label="中等" value="medium" />
-                <el-option label="困难" value="hard" />
+                <el-option v-for="d in DIFFICULTY_OPTIONS" :key="d.value" :label="d.label" :value="d.value" />
               </el-select>
             </el-form-item>
           </el-col>
@@ -359,6 +355,37 @@
 
         <el-form-item label="正确答案" v-if="showTextAnswer">
           <el-input v-model="form.answer" :placeholder="answerPlaceholder" />
+        </el-form-item>
+
+        <!-- v4.3 材料题：阅读材料与同组题目共用材料分组 -->
+        <el-form-item label="阅读材料">
+          <el-input
+            v-model="form.material"
+            type="textarea"
+            :rows="3"
+            placeholder="选填。材料题的共享材料文本，同组题目建议填写相同的材料分组名"
+          />
+        </el-form-item>
+        <el-form-item label="材料分组">
+          <el-input
+            v-model="form.material_group"
+            placeholder="选填。同一材料下多道题填写同一分组名，如：材料一"
+          />
+        </el-form-item>
+
+        <!-- v4.7 编程题 OJ：配置 stdin/stdout 用例后交卷自动评测，不送 AI/人工 -->
+        <el-form-item v-if="form.type === 'programming'" label="OJ 用例">
+          <div style="width: 100%">
+            <div v-for="(c, i) in ojCases" :key="i" style="display: flex; gap: 8px; margin-bottom: 8px; align-items: flex-start">
+              <el-input v-model="c.input" type="textarea" :rows="2" placeholder="标准输入（stdin）" style="flex: 1" />
+              <el-input v-model="c.expected" type="textarea" :rows="2" placeholder="预期输出（stdout）" style="flex: 1" />
+              <el-button link type="danger" @click="ojCases.splice(i, 1)">删除</el-button>
+            </div>
+            <el-button size="small" @click="ojCases.push({ input: '', expected: '' })">+ 添加用例</el-button>
+            <el-button v-if="isEdit" size="small" type="primary" :loading="ojRunning" @click="runOjTrial">用当前答案试跑</el-button>
+            <span v-if="ojResult" style="margin-left: 8px; font-size: 12px">{{ ojResult }}</span>
+            <div style="font-size: 12px; color: #909399; margin-top: 4px">Python 代码；每用例限时 5 秒。无用例时回落 AI/人工评分</div>
+          </div>
         </el-form-item>
 
         <el-row :gutter="20">
@@ -519,15 +546,14 @@ const uploadedFiles = ref([])
 const filter = ref({ major_id: '', course_id: '', type: '', difficulty: '' })
 const scope = ref('')
 
-const typeLabels = {
-  single_choice: '单选题', multiple_choice: '多选题', fill_blank: '填空题',
-  true_false: '判断题', short_answer: '问答题', programming: '编程题',
-  application: '应用题', calculation: '计算题'
-}
-const diffLabels = { easy: '简单', medium: '中等', hard: '困难' }
+// v4.6.1 枚举收敛：题型/难度单一来源 frontend/src/utils/enums.js
+import { QUESTION_TYPE_LABELS, DIFFICULTY_LABELS, DIFFICULTY_OPTIONS, OPTION_TYPES } from '../utils/enums'
+
+const typeLabels = QUESTION_TYPE_LABELS
+const diffLabels = DIFFICULTY_LABELS
 const sourceLabels = { manual: '手动输入', ai: 'AI生成', past_exam: '历年真题' }
 
-const optionTypes = ['single_choice', 'multiple_choice']
+const optionTypes = OPTION_TYPES
 const showOptions = computed(() => optionTypes.includes(form.value.type))
 const showTrueFalse = computed(() => form.value.type === 'true_false')
 const showTextAnswer = computed(() => !optionTypes.includes(form.value.type) && form.value.type !== 'true_false')
@@ -545,8 +571,8 @@ const optionList = ref(['', '', '', ''])
 
 const stats = computed(() => [
   { label: '总题目数', value: questions.value.length, icon: 'Document', bg: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)' },
-  { label: '单选题', value: questions.value.filter(q => q.type === 'single_choice').length, icon: 'DocumentChecked', bg: 'linear-gradient(135deg, #11998e 0%, #38ef7d 100%)' },
-  { label: '多选题', value: questions.value.filter(q => q.type === 'multiple_choice').length, icon: 'Warning', bg: 'linear-gradient(135deg, #f093fb 0%, #f5576c 100%)' },
+  { label: QUESTION_TYPE_LABELS.single_choice, value: questions.value.filter(q => q.type === 'single_choice').length, icon: 'DocumentChecked', bg: 'linear-gradient(135deg, #11998e 0%, #38ef7d 100%)' },
+  { label: QUESTION_TYPE_LABELS.multiple_choice, value: questions.value.filter(q => q.type === 'multiple_choice').length, icon: 'Warning', bg: 'linear-gradient(135deg, #f093fb 0%, #f5576c 100%)' },
   { label: '其他题型', value: questions.value.filter(q => !['single_choice','multiple_choice'].includes(q.type)).length, icon: 'DocumentDelete', bg: 'linear-gradient(135deg, #4facfe 0%, #00f2fe 100%)' },
 ])
 
@@ -588,8 +614,32 @@ const handleTypeChange = () => {
 
 const form = ref({
   id: null, content: '', type: 'single_choice', difficulty: 'medium',
-  major_id: '', course_id: '', options: '', answer: '', analysis: '', source: 'manual'
+  major_id: '', course_id: '', options: '', answer: '', analysis: '', source: 'manual',
+  material: '', material_group: ''
 })
+
+// v4.7 编程题 OJ 用例编辑态
+const ojCases = ref([])
+const ojRunning = ref(false)
+const ojResult = ref('')
+const syncOjCases = (q) => {
+  ojCases.value = Array.isArray(q?.test_cases) ? q.test_cases.map(c => ({ input: c.input || '', expected: c.expected || '' })) : []
+  ojResult.value = ''
+}
+const runOjTrial = async () => {
+  if (!form.value.id) return
+  ojRunning.value = true
+  ojResult.value = ''
+  try {
+    const res = await request.post(`/api/questions/${form.value.id}/oj_run`, { code: form.value.answer })
+    const d = res.data
+    ojResult.value = d.supported ? `${d.verdict}：通过 ${d.passed}/${d.total} 用例` : '未返回评测结果'
+  } catch (e) {
+    ojResult.value = e?.response?.data?.message || e?.data?.message || '试跑失败'
+  } finally {
+    ojRunning.value = false
+  }
+}
 
 const parseOptions = (opts) => {
   try { return JSON.parse(opts) } catch { return [] }
@@ -647,9 +697,10 @@ const fetchCourses = async () => {
 
 const openAddDialog = () => {
   isEdit.value = false
-  form.value = { id: null, content: '', type: 'single_choice', difficulty: 'medium', major_id: majors.value[0]?.id || '', course_id: '', options: '', answer: '', analysis: '', source: 'manual', is_public: false }
+  form.value = { id: null, content: '', type: 'single_choice', difficulty: 'medium', major_id: majors.value[0]?.id || '', course_id: '', options: '', answer: '', analysis: '', source: 'manual', is_public: false, material: '', material_group: '' }
   optionList.value = ['', '', '', '']
   uploadedFiles.value = []
+  syncOjCases(null)
   dialogVisible.value = true
 }
 
@@ -733,8 +784,9 @@ const viewDetail = (q) => {
 const editDetailQuestion = () => {
   if (detailQuestion.value) {
     isEdit.value = true
-    form.value = { ...detailQuestion.value }
+    form.value = { material: '', material_group: '', ...detailQuestion.value }
     syncOptions()
+    syncOjCases(detailQuestion.value)
     uploadedFiles.value = []
     detailVisible.value = false
     dialogVisible.value = true
@@ -758,8 +810,9 @@ const updateSource = async () => {
 const handleCardAction = (cmd, q) => {
   if (cmd === 'edit') {
     isEdit.value = true
-    form.value = { ...q, is_public: !!q.is_public }
+    form.value = { material: '', material_group: '', ...q, is_public: !!q.is_public }
     syncOptions()
+    syncOjCases(q)
     uploadedFiles.value = []
     dialogVisible.value = true
   } else if (cmd === 'delete') {
@@ -887,6 +940,8 @@ const saveQuestion = async () => {
     if (showOptions.value) {
       buildOptions()
     }
+    // v4.7 OJ 用例：仅保留非空行；清空即回落 AI/人工评分
+    form.value.test_cases = ojCases.value.filter(c => (c.input || '').trim() || (c.expected || '').trim())
     if (isEdit.value) {
       await request.put(`/api/questions/${form.value.id}`, form.value)
       ElMessage.success('更新成功')

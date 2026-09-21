@@ -59,7 +59,7 @@
               </div>
               <div class="resource-body">
                 <span class="resource-title">{{ r.title }}</span>
-                <span class="resource-type">{{ typeLabel(r.type) }}</span>
+                <span class="resource-type">{{ resTypeLabel(r.type) }}</span>
                 <p v-if="r.content && r.type === 'text'" class="resource-content">{{ r.content }}</p>
               </div>
               <el-button
@@ -100,7 +100,7 @@
             <div v-for="(q, i) in questions" :key="q.id" class="question-item">
               <span class="q-index">{{ i + 1 }}</span>
               <div class="q-body">
-                <span class="q-type">{{ qTypeLabel(q.type) }}</span>
+                <span class="q-type">{{ typeLabel(q.type) }}</span>
                 <span class="q-content">{{ q.content }}</span>
               </div>
             </div>
@@ -141,7 +141,7 @@
         <template v-if="quiz.step === 'quiz' && quiz.questions.length">
           <div class="qz-head">
             <span>第 {{ quiz.idx + 1 }} / {{ quiz.questions.length }} 题</span>
-            <el-tag size="small">{{ qTypeLabel(quizCurrent.type) }}</el-tag>
+            <el-tag size="small">{{ typeLabel(quizCurrent.type) }}</el-tag>
           </div>
           <div class="qz-content">{{ quizCurrent.content }}</div>
           <div v-if="isChoice(quizCurrent.type)" class="qz-options">
@@ -286,7 +286,7 @@ const quiz = reactive({
 const currentQuizQ = computed(() => quiz.questions[quiz.idx])
 const quizCurrent = computed(() => quiz.questions[quiz.idx] || {})
 
-const isChoice = (t) => ['single_choice', 'multiple_choice'].includes(t)
+const isChoice = hasOptions
 const isPicked = (i) => (quiz.draft || '').includes(String.fromCharCode(65 + i))
 const pick = (i) => {
   const label = String.fromCharCode(65 + i)
@@ -479,17 +479,14 @@ const goBack = () => {
   else router.push('/learning/paths')
 }
 
-const diffLabel = (d) => ({ easy: '简单', medium: '中等', hard: '困难' }[d] || d)
+// v4.6.1 枚举收敛：题型/难度单一来源 frontend/src/utils/enums.js（简称统一为全称）
+import { difficultyLabel, typeLabel, hasOptions } from '../utils/enums'
+const diffLabel = difficultyLabel
 const statusLabel = (s) => ({
   not_started: '未开始', in_progress: '学习中', mastered: '已掌握', skipped: '已跳过',
 }[s] || s)
-const typeLabel = (t) => ({
+const resTypeLabel = (t) => ({
   text: '文本讲解', video: '视频', exercise: '练习', external_link: '外部链接',
-}[t] || t)
-const qTypeLabel = (t) => ({
-  single_choice: '单选', multiple_choice: '多选', fill_blank: '填空',
-  true_false: '判断', short_answer: '问答', programming: '编程',
-  application: '应用', calculation: '计算',
 }[t] || t)
 
 onMounted(() => {

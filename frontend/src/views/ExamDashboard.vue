@@ -70,20 +70,30 @@
       >
         <div class="card-header">
           <span :class="['badge-status', exam.status]">{{ statusLabels[exam.status] }}</span>
-          <el-dropdown @command="(action) => handleDropdownAction(action, exam)">
-            <el-button text>
-              <el-icon><MoreFilled /></el-icon>
-            </el-button>
-            <template #dropdown>
-              <el-dropdown-menu>
-              <el-dropdown-item command="smart">智能组卷</el-dropdown-item>
-              <el-dropdown-item command="questions">管理题目</el-dropdown-item>
-              <el-dropdown-item command="students">邀请学生</el-dropdown-item>
-              <el-dropdown-item divided command="edit">编辑</el-dropdown-item>
-              <el-dropdown-item command="delete" divided>删除考试</el-dropdown-item>
-            </el-dropdown-menu>
-            </template>
-          </el-dropdown>
+          <div style="display: flex; align-items: center; gap: 8px">
+            <span v-if="exam.results_published === false" class="unpublished-tag">成绩未发布</span>
+            <el-dropdown @command="(action) => handleDropdownAction(action, exam)">
+              <el-button text>
+                <el-icon><MoreFilled /></el-icon>
+              </el-button>
+              <template #dropdown>
+                <el-dropdown-menu>
+                <el-dropdown-item command="smart">智能组卷</el-dropdown-item>
+                <el-dropdown-item command="questions">管理题目</el-dropdown-item>
+                <el-dropdown-item command="students">邀请学生</el-dropdown-item>
+                <el-dropdown-item command="monitor">实时监考</el-dropdown-item>
+                <el-dropdown-item command="analysis">试题分析</el-dropdown-item>
+                <el-dropdown-item command="inspect">AI 试卷质检</el-dropdown-item>
+                <el-dropdown-item command="export">导出成绩</el-dropdown-item>
+                <el-dropdown-item command="publishResults" divided>
+                  {{ exam.results_published === false ? '发布成绩' : '撤回成绩' }}
+                </el-dropdown-item>
+                <el-dropdown-item divided command="edit">编辑</el-dropdown-item>
+                <el-dropdown-item command="delete" divided>删除考试</el-dropdown-item>
+              </el-dropdown-menu>
+              </template>
+            </el-dropdown>
+          </div>
         </div>
         <h3 class="exam-title">{{ exam.title }}</h3>
         <p class="exam-desc">{{ exam.description }}</p>
@@ -462,6 +472,31 @@
         <el-button @click="showStudentsModal = false">关闭</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog v-model="showInspectModal" title="AI 试卷质检" width="720px">
+      <div v-loading="inspecting" style="min-height: 120px">
+        <template v-if="inspectResult">
+          <div class="inspect-summary">
+            <el-tag :type="inspectResult.overall_score >= 85 ? 'success' : inspectResult.overall_score >= 60 ? 'warning' : 'danger'" size="large">
+              质检得分 {{ inspectResult.overall_score ?? '—' }}
+            </el-tag>
+            <p class="inspect-text">{{ inspectResult.summary }}</p>
+          </div>
+          <el-divider content-position="left">发现的问题（{{ (inspectResult.issues || []).length }}）</el-divider>
+          <div v-for="(iss, i) in (inspectResult.issues || [])" :key="i" class="issue-item">
+            <el-tag :type="severityTagType[iss.severity] || 'info'" size="small">{{ severityLabels[iss.severity] || iss.severity }}</el-tag>
+            <div class="issue-body">
+              <p class="issue-problem">第 {{ iss.question_id }} 题：{{ iss.problem }}</p>
+              <p class="issue-suggest">建议：{{ iss.suggestion }}</p>
+            </div>
+          </div>
+          <el-empty v-if="!(inspectResult.issues || []).length" description="未发现问题，试卷质量良好" :image-size="60" />
+        </template>
+      </div>
+      <template #footer>
+        <el-button @click="showInspectModal = false">关闭</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -526,22 +561,12 @@ const statusLabels = {
   ended: '已结束'
 }
 
-const typeLabels = {
-  single_choice: '单选题',
-  multiple_choice: '多选题',
-  fill_blank: '填空题',
-  true_false: '判断题',
-  short_answer: '问答题',
-  programming: '编程题',
-  application: '应用题',
-  calculation: '计算题'
-}
+// v4.6.1 枚举收敛：题型/难度单一来源 frontend/src/utils/enums.js
+import { QUESTION_TYPE_LABELS, DIFFICULTY_LABELS } from '../utils/enums'
 
-const diffLabels = {
-  easy: '简单',
-  medium: '中等',
-  hard: '困难'
-}
+const typeLabels = QUESTION_TYPE_LABELS
+
+const diffLabels = DIFFICULTY_LABELS
 
 const totalScore = computed(() => {
   return examQuestions.value.reduce((sum, q) => sum + (q.score || 0), 0)
@@ -674,10 +699,81 @@ const viewResults = (id) => {
   router.push(`/results/exam/${id}`)
 }
 
-const handleDropdownAction = (action, exam) => {
+// v4.3 成绩发布/撤回
+const togglePublishResults = async (exam) => {
+  const target = exam.results_published === false
+  try {
+    await ElMessageBox.confirm(
+      target ? `确认发布「${exam.title}」的全部成绩？学生将可见分数并收到通知` :
+               `确认撤回「${exam.title}」的成绩？学生将暂时无法查看分数`,
+      '成绩发布', { type: 'warning' }
+    )
+  } catch (e) { return }
+  try {
+    const res = await request.post(`/api/exams/${exam.id}/publish_results`, { published: target })
+    ElMessage.success(res.data.message || '操作成功')
+    await loadExams()
+  } catch (e) {
+    console.error(e)
+  }
+}
+
+// v4.3 成绩导出 Excel
+const exportResults = async (exam) => {
+  try {
+    const res = await request.get(`/api/exams/${exam.id}/results/export`, { responseType: 'blob' })
+    const url = URL.createObjectURL(new Blob([res.data]))
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `exam_${exam.id}_results.xlsx`
+    a.click()
+    URL.revokeObjectURL(url)
+    ElMessage.success('导出成功')
+  } catch (e) {
+    console.error('导出失败', e)
+  }
+}
+
+// v4.3 AI 试卷质检
+const inspectResult = ref(null)
+const showInspectModal = ref(false)
+const inspecting = ref(false)
+const aiInspectExam = async (exam) => {
+  inspecting.value = true
+  showInspectModal.value = true
+  inspectResult.value = null
+  try {
+    const res = await request.post(`/api/exams/${exam.id}/ai_inspect`)
+    inspectResult.value = res.data.inspection
+  } catch (e) {
+    showInspectModal.value = false
+  } finally {
+    inspecting.value = false
+  }
+}
+
+const severityLabels = { high: '严重', medium: '中等', low: '提示' }
+const severityTagType = { high: 'danger', medium: 'warning', low: 'info' }
+
+const handleDropdownAction = async (action, exam) => {
   switch (action) {
     case 'edit':
       router.push(`/exams/${exam.id}/edit`)
+      break
+    case 'monitor':
+      router.push(`/exams/${exam.id}/monitor`)
+      break
+    case 'analysis':
+      router.push(`/exams/${exam.id}/item-analysis`)
+      break
+    case 'inspect':
+      aiInspectExam(exam)
+      break
+    case 'export':
+      exportResults(exam)
+      break
+    case 'publishResults':
+      togglePublishResults(exam)
       break
     case 'smart':
       currentExamId.value = exam.id
@@ -1102,6 +1198,54 @@ const doSmartComposition = async () => {
   justify-content: space-between;
   align-items: center;
   margin-bottom: 20px;
+}
+
+.unpublished-tag {
+  padding: 3px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  background: rgba(239, 68, 68, 0.1);
+  color: #ef4444;
+}
+
+.inspect-summary {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.inspect-text {
+  flex: 1;
+  color: var(--text-secondary);
+  font-size: 14px;
+  margin: 0;
+}
+
+.issue-item {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  padding: 12px;
+  background: var(--bg-tertiary);
+  border-radius: 10px;
+  margin-bottom: 10px;
+}
+
+.issue-body {
+  flex: 1;
+}
+
+.issue-problem {
+  margin: 0 0 4px;
+  font-size: 14px;
+  color: var(--text-primary);
+}
+
+.issue-suggest {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-muted);
 }
 
 .badge-status {

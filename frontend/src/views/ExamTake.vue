@@ -4,12 +4,24 @@
       <div class="exam-info">
         <h2>{{ examInfo.title }}</h2>
         <p>{{ examInfo.description }}</p>
+        <p v-if="sessionMeta.allowance > 1" class="attempt-hint">
+          第 {{ sessionMeta.attempt_no }} 次作答 / 共允许 {{ sessionMeta.allowance }} 次
+        </p>
       </div>
       <div class="exam-timer" :class="{ warning: remainingTime < 300 }">
         <el-icon :size="20"><Clock /></el-icon>
         <span>{{ formatTime(remainingTime) }}</span>
       </div>
     </div>
+
+    <el-alert
+      v-if="sessionMeta.session_status && sessionMeta.session_status !== 'in_progress'"
+      title="本次答卷已提交，以下为只读回看模式"
+      type="info"
+      :closable="false"
+      show-icon
+      style="margin: 16px 32px 0"
+    />
 
     <transition name="slide-down">
       <div v-if="showSwitchWarning" class="switch-warning">
@@ -45,6 +57,11 @@
             <span class="badge-diff" :class="currentQuestion.difficulty">{{ diffLabels[currentQuestion.difficulty] }}</span>
           </div>
           <span class="question-number">第 {{ currentIndex + 1 }} / {{ questions.length }} 题</span>
+        </div>
+
+        <div v-if="currentMaterial" class="material-block">
+          <div class="material-title">{{ currentMaterial.group ? `【材料：${currentMaterial.group}】` : '【阅读材料】' }}</div>
+          <div class="material-content">{{ currentMaterial.text }}</div>
         </div>
 
         <div class="question-content">
@@ -137,6 +154,7 @@ const route = useRoute()
 const router = useRouter()
 
 const examInfo = ref({ title: '', description: '', duration: 60 })
+const sessionMeta = ref({ attempt_no: 1, allowance: 1, session_status: '' })
 const questions = ref([])
 const currentIndex = ref(0)
 const answers = ref({})
@@ -145,24 +163,29 @@ const remainingTime = ref(0)
 const showSubmitConfirm = ref(false)
 let timer = null
 
-const typeLabels = {
-  single_choice: '单选题',
-  multiple_choice: '多选题',
-  fill_blank: '填空题',
-  true_false: '判断题',
-  short_answer: '问答题',
-  programming: '编程题',
-  application: '应用题',
-  calculation: '计算题'
-}
+// v4.6.1 枚举收敛：题型/难度单一来源 frontend/src/utils/enums.js
+import { QUESTION_TYPE_LABELS, DIFFICULTY_LABELS } from '../utils/enums'
 
-const diffLabels = {
-  easy: '简单',
-  medium: '中等',
-  hard: '困难'
-}
+const typeLabels = QUESTION_TYPE_LABELS
+
+const diffLabels = DIFFICULTY_LABELS
 
 const currentQuestion = computed(() => questions.value[currentIndex.value] || {})
+
+// v4.3 材料题：本题无材料时按 material_group 在同组内向前查找
+const currentMaterial = computed(() => {
+  const q = currentQuestion.value
+  if (!q.id) return null
+  if (q.material) return { text: q.material, group: q.material_group || '' }
+  if (!q.material_group) return null
+  for (let i = 0; i < questions.value.length; i++) {
+    const other = questions.value[i]
+    if (other.material_group === q.material_group && other.material) {
+      return { text: other.material, group: q.material_group }
+    }
+  }
+  return null
+})
 
 const answeredCount = computed(() => {
   return questions.value.filter(q => answers.value[q.id] && String(answers.value[q.id]).trim()).length
@@ -225,6 +248,11 @@ const loadExam = async (examId) => {
     examInfo.value = res.data.exam
     questions.value = res.data.questions
     sessionId.value = res.data.session_id
+    sessionMeta.value = {
+      attempt_no: res.data.attempt_no || 1,
+      allowance: res.data.allowance || 1,
+      session_status: res.data.session_status || '',
+    }
     
     questions.value.forEach(q => {
       if (q.student_answer) {
@@ -293,8 +321,16 @@ const toggleOption = (qId, key) => {
   saveAnswer()
 }
 
+const readonlySession = () => {
+  if (sessionMeta.value.session_status && sessionMeta.value.session_status !== 'in_progress') {
+    ElMessage.info('本次答卷已提交，无法修改')
+    return true
+  }
+  return false
+}
+
 const saveAnswer = async () => {
-  if (!sessionId.value) return
+  if (!sessionId.value || readonlySession()) return
   const qId = currentQuestion.value.id
   try {
     await request.post(`/api/exam/${route.params.examId}/save_answer`, {
@@ -320,6 +356,7 @@ const nextQuestion = () => {
 }
 
 const submitExam = () => {
+  if (readonlySession()) return
   showSubmitConfirm.value = true
 }
 
@@ -366,6 +403,45 @@ const confirmSubmit = async () => {
 .exam-info p {
   color: #64748b;
   margin: 4px 0 0;
+}
+
+.attempt-hint {
+  color: #6366f1;
+  font-weight: 500;
+}
+
+.material-block {
+  background: #f1f5f9;
+  border-left: 4px solid #6366f1;
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin-bottom: 16px;
+}
+
+.material-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #6366f1;
+  margin-bottom: 6px;
+}
+
+.material-content {
+  font-size: 14px;
+  line-height: 1.8;
+  color: #334155;
+  white-space: pre-wrap;
+}
+
+.dark .material-block {
+  background: var(--bg-tertiary);
+}
+
+.dark .material-content {
+  color: var(--text-secondary);
+}
+
+.dark .attempt-hint {
+  color: #a5b4fc;
 }
 
 .exam-timer {

@@ -3,7 +3,7 @@
     <div class="page-header">
       <div class="header-title">
         <h2>竞赛管理</h2>
-        <p>创建限时积分赛，选题发布，查看实时排行</p>
+        <p>创建限时积分赛或作品赛，发布需教师交叉审核，查看实时排行</p>
       </div>
       <el-button type="primary" @click="openCreate">
         <el-icon><Plus /></el-icon>
@@ -13,6 +13,21 @@
         <el-icon><Connection /></el-icon>
         系列赛
       </el-button>
+    </div>
+
+    <!-- v4.5 待审核赛事（教师互审） -->
+    <div v-if="pendingList.length" class="pending-panel">
+      <h3>🔍 待审核赛事（{{ pendingList.length }}）</h3>
+      <div v-for="p in pendingList" :key="p.id" class="pending-row">
+        <div class="p-info">
+          <span class="p-title">{{ p.title }}</span>
+          <span class="p-meta">创建人 {{ p.creator }} · {{ p.question_count }} 题 · {{ fmtTime(p.start_time) }} 开放<template v-if="p.prize_points"> · 奖金 {{ p.prize_points }} 积分</template></span>
+        </div>
+        <span class="p-ops">
+          <el-button size="small" type="success" @click="reviewComp(p, 'approve')">通过</el-button>
+          <el-button size="small" type="danger" plain @click="reviewComp(p, 'reject')">驳回</el-button>
+        </span>
+      </div>
     </div>
 
     <div v-if="loading" class="loading-box">
@@ -29,9 +44,13 @@
             <el-tag :type="statusTag(comp.status)" effect="dark" size="small">
               {{ statusLabel(comp.status) }}
             </el-tag>
+            <el-tag v-if="comp.competition_type === 'project'" size="small" type="warning" effect="plain">作品赛</el-tag>
+            <el-tag v-if="comp.competition_type === 'ds'" size="small" type="primary" effect="plain">数据赛</el-tag>
+            <el-tag v-if="comp.prize_points" size="small" type="danger" effect="plain">冠军 {{ comp.prize_points }} 积分</el-tag>
             <el-tag v-if="comp.access_mode === 'restricted'" size="small" type="warning" effect="plain">受限</el-tag>
           </div>
           <p class="comp-desc">{{ comp.description || '暂无描述' }}</p>
+          <p v-if="comp.status === 'rejected' && comp.review_reason" class="comp-desc" style="color: #f56c6c">驳回原因：{{ comp.review_reason }}</p>
           <div class="comp-meta">
             <span class="meta-tag"><el-icon :size="14"><Calendar /></el-icon>{{ fmtTime(comp.start_time) }} ~ {{ fmtTime(comp.end_time) }}</span>
             <span class="meta-tag"><el-icon :size="14"><Clock /></el-icon>{{ comp.duration }}分钟</span>
@@ -41,12 +60,17 @@
           </div>
         </div>
         <div class="comp-actions">
-          <el-button v-if="comp.status === 'draft'" size="small" @click="openEdit(comp)">编辑</el-button>
-          <el-button v-if="comp.status === 'draft'" size="small" type="primary" @click="openQuestions(comp)">选题</el-button>
-          <el-button v-if="comp.status === 'draft' && comp.question_count > 0" size="small" @click="openManageQuestions(comp)">题目管理</el-button>
-          <el-button v-if="comp.status === 'draft'" size="small" type="success" @click="publish(comp)">发布</el-button>
+          <el-button v-if="['draft', 'rejected'].includes(comp.status)" size="small" @click="openEdit(comp)">编辑</el-button>
+          <el-button v-if="['draft', 'rejected'].includes(comp.status) && comp.competition_type === 'timed'" size="small" type="primary" @click="openQuestions(comp)">选题</el-button>
+          <el-button v-if="['draft', 'rejected'].includes(comp.status) && comp.competition_type === 'timed' && comp.question_count > 0" size="small" @click="openManageQuestions(comp)">题目管理</el-button>
+          <el-button v-if="['draft', 'rejected'].includes(comp.status)" size="small" type="success" @click="publish(comp)">发布</el-button>
           <el-button v-if="comp.status === 'ongoing'" size="small" type="warning" @click="endCompetition(comp)">结束</el-button>
           <el-button size="small" @click="viewLeaderboard(comp)">排行榜</el-button>
+          <el-button v-if="comp.status !== 'draft'" size="small" @click="openExtras(comp)">公告/资料</el-button>
+          <el-button v-if="comp.competition_type === 'project' && ['published', 'ongoing', 'ended'].includes(comp.status)" size="small" @click="openWorks(comp)">作品评审</el-button>
+          <el-button v-if="comp.competition_type === 'ds' && comp.status !== 'draft'" size="small" type="primary" plain @click="openDsManage(comp)">数据赛工作台</el-button>
+          <el-button v-if="comp.status === 'ended' && comp.frozen_points > 0" size="small" type="warning" plain @click="settle(comp)">结算奖金</el-button>
+          <el-button v-if="comp.status === 'ended' && comp.question_count > 0" size="small" plain @click="archive(comp)">归档题库</el-button>
           <el-button v-if="comp.status === 'ended' || comp.status === 'ongoing'" size="small" type="warning" plain @click="openIntegrity(comp)">公平审查</el-button>
           <el-button v-if="comp.status !== 'ongoing'" size="small" type="danger" text @click="remove(comp)">删除</el-button>
         </div>
@@ -66,15 +90,26 @@
           <el-date-picker v-model="editForm.timeRange" type="datetimerange"
             start-placeholder="开始时间" end-placeholder="结束时间" value-format="YYYY-MM-DDTHH:mm:ss" />
         </el-form-item>
-        <el-form-item label="答题时长" required>
+        <el-form-item label="竞赛类型">
+          <el-select v-model="editForm.compType" :disabled="!!editForm.id" style="width: 240px">
+            <el-option value="timed" label="限时积分赛" />
+            <el-option value="project" label="作品提交赛（人工评审）" />
+            <el-option value="ds" label="数据科学赛（在线运行·自动评分）" />
+          </el-select>
+        </el-form-item>
+        <el-form-item v-if="editForm.compType === 'timed'" label="答题时长" required>
           <el-input-number v-model="editForm.duration" :min="1" :max="180" />
           <span class="form-tip">每人限时（分钟）</span>
         </el-form-item>
-        <el-form-item label="抽题数">
+        <el-form-item label="冠军奖金">
+          <el-input-number v-model="editForm.prizePoints" :min="0" :max="100000" :step="50" />
+          <span class="form-tip">积分托管：发布时从你的赏金钱包冻结，结算发给冠军，驳回/流标退回；0 = 纯荣誉赛</span>
+        </el-form-item>
+        <el-form-item v-if="editForm.compType === 'timed'" label="抽题数">
           <el-input-number v-model="editForm.drawCount" :min="0" :max="200" />
           <span class="form-tip">每人随机抽题数，0 = 答全部题目（防作弊）</span>
         </el-form-item>
-        <el-form-item label="PK对战">
+        <el-form-item v-if="editForm.compType === 'timed'" label="PK对战">
           <el-switch v-model="editForm.allowPk" />
           <span class="form-tip">允许学生基于本题库发起1v1对战</span>
         </el-form-item>
@@ -97,7 +132,7 @@
           <el-input-number v-model="editForm.remindBefore" :min="0" :max="1440" :step="5" />
           <span class="form-tip">开赛前 N 分钟向已报名选手推送提醒，0 = 关闭</span>
         </el-form-item>
-        <el-form-item label="计分规则">
+        <el-form-item v-if="editForm.compType === 'timed'" label="计分规则">
           <div class="rule-row">
             <span>基础分</span>
             <el-input-number v-model="editForm.baseRatio" :min="0" :max="1" :step="0.1" />
@@ -117,10 +152,7 @@
     <el-dialog v-model="questionVisible" title="选择竞赛题目（仅客观题）" width="760px">
       <div class="question-filter">
         <el-select v-model="qFilter.type" placeholder="题型" clearable style="width: 160px" @change="loadQuestionPool">
-          <el-option label="单选题" value="single_choice" />
-          <el-option label="多选题" value="multiple_choice" />
-          <el-option label="判断题" value="true_false" />
-          <el-option label="填空题" value="fill_blank" />
+          <el-option v-for="t in QUESTION_TYPE_OPTIONS" :key="t.value" :label="t.label" :value="t.value" />
         </el-select>
         <span class="form-tip">已选 {{ selectedQuestions.length }} 题</span>
       </div>
@@ -199,6 +231,64 @@
         <el-button @click="integrityVisible = false">关闭</el-button>
       </template>
     </el-dialog>
+    <!-- v4.5 公告与资料包 -->
+    <el-dialog v-model="extrasVisible" :title="`公告与资料 - ${extrasComp?.title || ''}`" width="720px" top="6vh">
+      <el-tabs>
+        <el-tab-pane label="赛事公告">
+          <div class="ann-create">
+            <el-input v-model="annForm.title" placeholder="公告标题" style="width: 200px" maxlength="100" />
+            <el-input v-model="annForm.content" placeholder="公告内容（发布后向全体参赛者推送通知）" style="flex: 1" maxlength="5000" />
+            <el-button type="primary" :loading="annSaving" @click="saveAnnouncement">发布</el-button>
+          </div>
+          <el-empty v-if="!announcements.length" description="暂无公告" :image-size="60" />
+          <div v-for="a in announcements" :key="a.id" class="ann-item">
+            <div class="ann-head"><b>{{ a.title }}</b><span class="ann-meta">{{ a.author }} · {{ (a.created_at || '').slice(0, 16) }}</span>
+              <el-button size="small" text type="danger" @click="delAnnouncement(a)">删除</el-button></div>
+            <div class="ann-content">{{ a.content }}</div>
+          </div>
+        </el-tab-pane>
+        <el-tab-pane label="资料包">
+          <div class="ann-create">
+            <input ref="resFileInput" type="file" @change="onResFilePick" style="display:none" />
+            <el-button @click="$refs.resFileInput.click()">📎 选择文件上传（≤50MB）</el-button>
+            <span v-if="resFileName" class="form-tip">{{ resFileName }}</span>
+          </div>
+          <el-table :data="resources" size="small">
+            <el-table-column prop="title" label="标题" min-width="150" show-overflow-tooltip />
+            <el-table-column prop="filename" label="文件" min-width="150" show-overflow-tooltip />
+            <el-table-column label="大小" width="90"><template #default="{ row }">{{ fmtSize(row.size) }}</template></el-table-column>
+            <el-table-column label="操作" width="140" align="center">
+              <template #default="{ row }">
+                <el-button size="small" text type="primary" @click="downloadResource(row)">下载</el-button>
+                <el-button size="small" text type="danger" @click="delResource(row)">删除</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+        </el-tab-pane>
+      </el-tabs>
+    </el-dialog>
+
+    <!-- v4.5 作品评审（project 型） -->
+    <el-dialog v-model="worksVisible" :title="`作品评审 - ${worksComp?.title || ''}`" width="760px" top="6vh">
+      <el-empty v-if="!works.length" description="还没有学生提交作品" :image-size="60" />
+      <el-table v-else :data="works" size="small" max-height="440">
+        <el-table-column prop="username" label="选手" width="110" />
+        <el-table-column label="作品" min-width="200">
+          <template #default="{ row }">
+            <a v-if="row.stored_name || row.filename" class="dl-link" @click="downloadWork(row)">📎 {{ row.filename || '文件' }}（v{{ row.version }}）</a>
+            <div class="work-desc">{{ row.description }}</div>
+          </template>
+        </el-table-column>
+        <el-table-column label="提交时间" width="130"><template #default="{ row }">{{ fmtTime(row.submitted_at) }}<div class="form-tip">更新 {{ fmtTime(row.updated_at) }}</div></template></el-table-column>
+        <el-table-column label="评分" width="150" align="center">
+          <template #default="{ row }">
+            <el-tag v-if="row.score != null" type="success">{{ row.score }} 分</el-tag>
+            <el-button v-else size="small" type="primary" @click="scoreWork(row)">评分</el-button>
+            <el-button v-if="row.score != null" size="small" text @click="scoreWork(row)">重评</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+    </el-dialog>
   </div>
 </template>
 
@@ -231,10 +321,11 @@ const integrityLoading = ref(false)
 const integrityComp = ref(null)
 const integrityRows = ref([])
 
-const statusLabel = (s) => ({ draft: '草稿', published: '已发布', ongoing: '进行中', ended: '已结束' }[s] || s)
-const statusTag = (s) => ({ draft: 'info', published: 'primary', ongoing: 'success', ended: 'danger' }[s] || 'info')
-const typeLabel = (t) => ({ single_choice: '单选', multiple_choice: '多选', true_false: '判断', fill_blank: '填空' }[t] || t)
-const diffLabel = (d) => ({ easy: '简单', medium: '中等', hard: '困难' }[d] || d)
+const statusLabel = (s) => ({ draft: '草稿', reviewing: '待审核', rejected: '被驳回', published: '已发布', ongoing: '进行中', ended: '已结束' }[s] || s)
+const statusTag = (s) => ({ draft: 'info', reviewing: 'warning', rejected: 'danger', published: 'primary', ongoing: 'success', ended: 'danger' }[s] || 'info')
+// v4.6.1 枚举收敛：题型/难度单一来源 frontend/src/utils/enums.js（简称统一为全称）
+import { typeLabel, difficultyLabel, QUESTION_TYPE_OPTIONS } from '../utils/enums'
+const diffLabel = difficultyLabel
 
 const fmtTime = (iso) => {
   if (!iso) return ''
@@ -249,10 +340,37 @@ const loadCompetitions = async () => {
   } finally {
     loading.value = false
   }
+  loadPending()
+}
+
+// ── v4.5 审核门禁：待审核列表 ──
+const pendingList = ref([])
+const loadPending = async () => {
+  try {
+    const res = await request.get('/api/competitions/pending')
+    pendingList.value = res.data.items || []
+  } catch (e) { /* 非教师接口 403，忽略 */ }
+}
+
+const reviewComp = async (p, action) => {
+  if (action === 'approve') {
+    try {
+      await ElMessageBox.confirm(`确认通过「${p.title}」的发布审核？通过后立即对全体学生开放`, '审核通过')
+    } catch (e) { return }
+    const res = await request.post(`/api/competitions/${p.id}/review`, { action })
+    ElMessage.success(res.data.message || '已通过')
+  } else {
+    try {
+      const { value } = await ElMessageBox.prompt(`驳回「${p.title}」，请填写理由（将通知创建者）`, '审核驳回', { inputPattern: /\S+/, inputErrorMessage: '请填写驳回理由' })
+      const res = await request.post(`/api/competitions/${p.id}/review`, { action, reason: value })
+      ElMessage.success(res.data.message || '已驳回')
+    } catch (e) { return }
+  }
+  loadCompetitions()
 }
 
 const openCreate = () => {
-  editForm.value = { id: null, title: '', description: '', timeRange: [], duration: 10, baseRatio: 0.7, speedRatio: 0.3, drawCount: 0, allowPk: true, accessMode: 'public', inviteCode: '', remindBefore: 0 }
+  editForm.value = { id: null, title: '', description: '', timeRange: [], duration: 10, baseRatio: 0.7, speedRatio: 0.3, drawCount: 0, allowPk: true, accessMode: 'public', inviteCode: '', remindBefore: 0, compType: 'timed', prizePoints: 0 }
   editVisible.value = true
 }
 
@@ -275,6 +393,8 @@ const openEdit = async (comp) => {
     accessMode: detail.access_mode || 'public',
     inviteCode: detail.invite_code || '',
     remindBefore: detail.remind_before ?? 0,
+    compType: detail.competition_type || 'timed',
+    prizePoints: detail.prize_points ?? 0,
   }
   editVisible.value = true
 }
@@ -288,7 +408,9 @@ const saveCompetition = async () => {
     description: f.description,
     start_time: f.timeRange[0],
     end_time: f.timeRange[1],
-    duration: f.duration,
+    duration: (f.compType === 'project' || f.compType === 'ds') ? 0 : f.duration,
+    competition_type: f.compType || 'timed',
+    prize_points: f.prizePoints || 0,
     draw_count: f.drawCount,
     allow_pk: f.allowPk,
     access_mode: f.accessMode,
@@ -350,13 +472,19 @@ const removeQuestion = async (q) => {
   } catch (e) { /* 用户取消 */ }
 }
 
+const openDsManage = (comp) => {
+  router.push(`/competitions/${comp.id}/ds-manage`)
+}
+
 const publish = (comp) => {
   ElMessageBox.confirm(
-    `发布后题目将锁定，共 ${comp.question_count} 题。确认发布？`,
+    comp.competition_type !== 'timed'
+      ? '发布后需其他教师审核（本系统仅你一名教师时自动通过），确认提交？'
+      : `发布后题目将锁定，共 ${comp.question_count} 题。确认发布？`,
     '发布竞赛', { type: 'warning' }
   ).then(async () => {
-    await request.post(`/api/competitions/${comp.id}/publish`)
-    ElMessage.success('发布成功')
+    const res = await request.post(`/api/competitions/${comp.id}/publish`)
+    ElMessage.success(res.data.message || '发布成功')
     loadCompetitions()
   }).catch(() => {})
 }
@@ -428,6 +556,122 @@ const undoSanction = async (row) => {
   await request.post(`/api/competitions/${integrityComp.value.id}/participants/${row.user_id}/sanction`, { revoke: true })
   ElMessage.success('已解除受限')
   openIntegrity(integrityComp.value)
+}
+
+// ── v4.5 公告与资料包 ──
+const fmtSize = (n) => !n ? '-' : (n > 1048576 ? (n / 1048576).toFixed(1) + 'MB' : Math.max(1, Math.round(n / 1024)) + 'KB')
+const downloadBlob = async (url, filename) => {
+  const res = await request.get(url, { responseType: 'blob' })
+  const link = document.createElement('a')
+  link.href = URL.createObjectURL(res.data)
+  link.download = filename || 'download'
+  link.click()
+  URL.revokeObjectURL(link.href)
+}
+
+const extrasVisible = ref(false)
+const extrasComp = ref(null)
+const announcements = ref([])
+const annForm = ref({ title: '', content: '' })
+const annSaving = ref(false)
+const resources = ref([])
+const resFileName = ref('')
+let resPickedFile = null
+
+const openExtras = async (comp) => {
+  extrasComp.value = comp
+  annForm.value = { title: '', content: '' }
+  extrasVisible.value = true
+  loadAnnouncements()
+  loadResources()
+}
+const loadAnnouncements = async () => {
+  const res = await request.get(`/api/competitions/${extrasComp.value.id}/announcements`)
+  announcements.value = res.data.items || []
+}
+const loadResources = async () => {
+  const res = await request.get(`/api/competitions/${extrasComp.value.id}/resources`)
+  resources.value = res.data.items || []
+}
+const saveAnnouncement = async () => {
+  if (!annForm.value.title?.trim() || !annForm.value.content?.trim()) return ElMessage.warning('请填写公告标题与内容')
+  annSaving.value = true
+  try {
+    await request.post(`/api/competitions/${extrasComp.value.id}/announcements`, annForm.value)
+    ElMessage.success('已发布并通知全体参赛者')
+    annForm.value = { title: '', content: '' }
+    loadAnnouncements()
+  } finally { annSaving.value = false }
+}
+const delAnnouncement = async (a) => {
+  await request.delete(`/api/competitions/${extrasComp.value.id}/announcements/${a.id}`)
+  ElMessage.success('已删除')
+  loadAnnouncements()
+}
+const onResFilePick = (e) => {
+  const file = e.target.files?.[0]
+  if (!file) return
+  resPickedFile = file
+  resFileName.value = file.name
+  const fd = new FormData()
+  fd.append('file', file)
+  request.post(`/api/competitions/${extrasComp.value.id}/resources`, fd).then(() => {
+    ElMessage.success('上传成功')
+    resFileName.value = ''
+    resPickedFile = null
+    e.target.value = ''
+    loadResources()
+  }).catch(() => { e.target.value = '' })
+}
+const delResource = async (r) => {
+  await request.delete(`/api/competitions/${extrasComp.value.id}/resources/${r.id}`)
+  ElMessage.success('已删除')
+  loadResources()
+}
+const downloadResource = (r) => downloadBlob(`/api/competition-resources/${r.id}/download`, r.filename)
+
+// ── v4.5 作品评审与结算 ──
+const worksVisible = ref(false)
+const worksComp = ref(null)
+const works = ref([])
+const openWorks = async (comp) => {
+  worksComp.value = comp
+  worksVisible.value = true
+  const res = await request.get(`/api/competitions/${comp.id}/works`)
+  works.value = res.data.items || []
+}
+const scoreWork = async (row) => {
+  try {
+    const { value } = await ElMessageBox.prompt(
+      `给 ${row.username} 的作品评分（0-100，同分取最早提交者夺冠）`, '作品评分',
+      { inputPattern: /^(\d{1,2}|100)(\.\d)?$/ , inputErrorMessage: '请输入 0-100 的数字',
+        inputPlaceholder: '分数，如 85' }
+    )
+    const note = await ElMessageBox.prompt('评语（可选，将通知选手）', '作品评语', { inputPattern: /[\s\S]*/, inputValue: '' }).catch(() => ({ value: '' }))
+    await request.post(`/api/competition-works/${row.id}/score`, { score: parseFloat(value), note: note.value || '' })
+    ElMessage.success('已评分并通知选手')
+    openWorks(worksComp.value)
+  } catch (e) { /* 取消 */ }
+}
+const downloadWork = (row) => downloadBlob(`/api/competition-works/${row.id}/download`, row.filename || 'work')
+
+const settle = (comp) => {
+  ElMessageBox.confirm(
+    `将托管的 ${comp.frozen_points} 积分发给冠军（作品赛取最高分，同分取最早提交；无有效作品则流标退回你的钱包）。确认结算？`,
+    '结算奖金', { type: 'warning' }
+  ).then(async () => {
+    const res = await request.post(`/api/competitions/${comp.id}/settle`)
+    ElMessage.success(res.data.message || '结算完成')
+    loadCompetitions()
+  }).catch(() => {})
+}
+
+const archive = (comp) => {
+  ElMessageBox.confirm('把本场赛题正式加入公共题库，供全体学生练习。确认归档？', '归档题库', { type: 'warning' })
+    .then(async () => {
+      const res = await request.post(`/api/competitions/${comp.id}/archive`)
+      ElMessage.success(res.data.message || '已归档')
+    }).catch(() => {})
 }
 
 onMounted(loadCompetitions)
@@ -586,4 +830,32 @@ onMounted(loadCompetitions)
     justify-content: flex-start;
   }
 }
+.pending-panel {
+  background: #fffbeb;
+  border: 1px solid #f3d19e;
+  border-radius: 10px;
+  padding: 12px 16px;
+  margin-bottom: 14px;
+}
+.pending-panel h3 { margin: 0 0 8px; font-size: 15px; }
+.pending-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 0;
+  border-top: 1px dashed #f0dcb2;
+  flex-wrap: wrap;
+}
+.p-info { display: flex; flex-direction: column; gap: 2px; }
+.p-title { font-weight: 600; }
+.p-meta { color: #909399; font-size: 12px; }
+.ann-create { display: flex; gap: 8px; margin-bottom: 12px; align-items: center; }
+.ann-item { border-bottom: 1px solid #ebeef5; padding: 8px 0; }
+.ann-head { display: flex; align-items: center; gap: 10px; }
+.ann-head .el-button { margin-left: auto; }
+.ann-meta { color: #909399; font-size: 12px; }
+.ann-content { color: #606266; font-size: 13px; white-space: pre-wrap; margin-top: 4px; }
+.dl-link { color: #409eff; cursor: pointer; font-size: 13px; }
+.work-desc { color: #909399; font-size: 12px; margin-top: 2px; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 </style>

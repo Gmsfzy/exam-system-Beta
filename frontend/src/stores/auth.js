@@ -4,7 +4,16 @@ import request from '../utils/request'
 
 export const useAuthStore = defineStore('auth', () => {
   const token = ref(localStorage.getItem('token') || '')
-  const user = ref(JSON.parse(localStorage.getItem('user') || 'null'))
+  // localStorage 被改脏时兼容降级，避免 JSON.parse 在 store 初始化阶段报错白屏（v4.6.1）
+  const readStoredUser = () => {
+    try {
+      return JSON.parse(localStorage.getItem('user') || 'null')
+    } catch (e) {
+      localStorage.removeItem('user')
+      return null
+    }
+  }
+  const user = ref(readStoredUser())
 
   const login = async (username, password) => {
     localStorage.removeItem('token')
@@ -17,7 +26,11 @@ export const useAuthStore = defineStore('auth', () => {
     return res.data
   }
 
-  const logout = () => {
+  const logout = async () => {
+    // 先通知后端置吊销水位（v4.6.1：此前置签发的 token 全部失效），失败不阻断本地清理
+    try {
+      await request.post('/api/logout')
+    } catch (e) { /* 忽略：本地登出不依赖后端结果 */ }
     token.value = ''
     user.value = null
     localStorage.removeItem('token')

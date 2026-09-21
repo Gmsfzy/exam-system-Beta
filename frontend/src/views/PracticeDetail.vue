@@ -137,10 +137,9 @@ const loading = ref(true)
 const currentQ = computed(() => questions.value[currentIdx.value])
 const answeredCount = computed(() => Object.keys(answers.value).length)
 
-function isChoiceType(t) { return ['single_choice', 'multiple_choice'].includes(t) }
-function typeLabel(t) {
-  return { single_choice: '单选题', multiple_choice: '多选题', true_false: '判断题', fill_blank: '填空题', essay: '简答题' }[t] || t
-}
+// v4.6.1 枚举收敛：题型/选项题型单一来源 frontend/src/utils/enums.js
+import { typeLabel, hasOptions } from '../utils/enums'
+function isChoiceType(t) { return hasOptions(t) }
 function optionLabel(i) { return String.fromCharCode(65 + i) }
 function isOptionSelected(i) {
   const a = answers.value[currentIdx.value]?.student_answer || ''
@@ -174,8 +173,11 @@ async function submitCurrent() {
       time_spent_sec: 0,
     })
     answers.value[idx] = { student_answer, is_correct: res.data.is_correct, detail: res.data }
-    const ok = res.data.is_correct
-    ElMessage(ok ? { message: '✓ 答对了！', type: 'success' } : { message: '✗ 答错了', type: 'error' })
+    // v4.10 编程题 OJ 自动评测：展示用例通过情况，其余题型保持原反馈
+    const oj = res.data.oj
+    const ok = oj ? oj.verdict === 'AC' : res.data.is_correct
+    const msg = oj ? `OJ：${oj.verdict}（通过 ${oj.passed}/${oj.total} 用例）` : (ok ? '✓ 答对了！' : '✗ 答错了')
+    ElMessage(ok ? { message: msg, type: 'success' } : { message: msg, type: 'error' })
     // 自动跳到下一题
     if (idx < questions.value.length - 1) goTo(idx + 1)
   } catch (e) { /* ignore */ }

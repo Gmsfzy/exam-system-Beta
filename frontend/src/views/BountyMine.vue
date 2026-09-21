@@ -4,6 +4,7 @@
       <div class="header-title">
         <h2><el-icon :size="24" class="title-icon"><Tickets /></el-icon> 我的悬赏</h2>
       </div>
+      <el-button :icon="Wallet" @click="$router.push('/bounties/wallet')">赏金钱包</el-button>
     </div>
 
     <el-tabs v-model="tab" @tab-change="load">
@@ -17,6 +18,7 @@
                       effect="plain" style="margin-left: 8px">
                 {{ row.bounty_type === 'question' ? '题目' : '答案' }}
               </el-tag>
+              <div v-if="row.status === 'rejected' && row.review_reason" class="reject-reason">驳回原因：{{ row.review_reason }}</div>
             </template>
           </el-table-column>
           <el-table-column prop="reward_points" label="赏金" width="90" align="center">
@@ -70,7 +72,7 @@
 <script setup>
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { Tickets } from '@element-plus/icons-vue'
+import { Tickets, Wallet } from '@element-plus/icons-vue'
 import request from '../utils/request'
 
 const router = useRouter()
@@ -78,10 +80,10 @@ const tab = ref('published')
 const published = ref([])
 const submitted = ref([])
 
-const statusText = (s) => ({ open: '征集中', closed: '已采纳', expired: '已过期' }[s] || s)
-const statusTag = (s) => ({ open: 'warning', closed: 'success', expired: 'info' }[s] || 'info')
-const subStatusText = (s) => ({ pending: '待审核', accepted: '已采纳', rejected: '已拒绝' }[s] || s)
-const subStatusTag = (s) => ({ pending: 'warning', accepted: 'success', rejected: 'danger' }[s] || 'info')
+const statusText = (s) => ({ open: '征集中', closed: '已采纳', expired: '已过期', cancelled: '已关闭', reviewing: '待审核', rejected: '被驳回' }[s] || s)
+const statusTag = (s) => ({ open: 'warning', closed: 'success', expired: 'info', cancelled: 'info', reviewing: 'warning', rejected: 'danger' }[s] || 'info')
+const subStatusText = (s) => ({ pending: '待审核', accepted: '已采纳', rejected: '已拒绝', withdrawn: '已撤回' }[s] || s)
+const subStatusTag = (s) => ({ pending: 'warning', accepted: 'success', rejected: 'danger', withdrawn: 'info' }[s] || 'info')
 
 const goDetail = (id) => router.push(`/bounties/${id}`)
 
@@ -101,6 +103,7 @@ onMounted(load)
 <style scoped>
 .link { color: var(--el-color-primary, #409eff); cursor: pointer; }
 .link:hover { text-decoration: underline; }
+.reject-reason { margin-top: 4px; font-size: 12px; color: #f56c6c; }
 .badge-cell { padding: 0 12px; }
 :deep(.el-table__row) { cursor: pointer; }
 </style>

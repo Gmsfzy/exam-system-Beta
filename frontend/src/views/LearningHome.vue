@@ -101,6 +101,14 @@
         <p>自动收录答错的题目，重做练习直到掌握</p>
         <span class="module-action">进入 →</span>
       </div>
+      <div class="module-card" @click="$router.push('/learning/notes')">
+        <div class="module-icon" style="background: linear-gradient(135deg, #06b6d4 0%, #0891b2 100%)">
+          <el-icon :size="28" color="white"><Notebook /></el-icon>
+        </div>
+        <h3>学习笔记</h3>
+        <p>自由记录与标签整理，支持 AI 即问即讲转存</p>
+        <span class="module-action">进入 →</span>
+      </div>
       <div class="module-card" @click="$router.push('/learning/practice')">
         <div class="module-icon" style="background: linear-gradient(135deg, #10b981 0%, #059669 100%)">
           <el-icon :size="28" color="white"><EditPen /></el-icon>

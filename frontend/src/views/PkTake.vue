@@ -189,7 +189,8 @@ const currentAnswerKey = computed(() => {
   return (currentQuestion.value.answer_key || '').toString()
 })
 
-const typeLabel = (t) => ({ single_choice: '单选题', multiple_choice: '多选题', true_false: '判断题', fill_blank: '填空题' }[t] || t)
+// v4.6.1 枚举收敛：题型中文名单一来源 frontend/src/utils/enums.js
+import { typeLabel } from '../utils/enums'
 
 const getOptions = (optionsStr) => {
   try {

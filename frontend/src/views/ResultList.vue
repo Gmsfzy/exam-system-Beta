@@ -82,16 +82,22 @@
                   <el-icon :size="14"><Calendar /></el-icon>
                   提交时间：{{ formatDate(r.submitted_at) }}
                 </span>
+                <el-tag v-if="r.published === false" size="small" type="info">未发布</el-tag>
+                <el-tag v-else-if="r.review_status === 'requested'" size="small" type="warning">申诉复核中</el-tag>
+                <el-tag v-else-if="r.review_status === 'resolved'" size="small" type="success">申诉成立</el-tag>
+                <el-tag v-else-if="r.review_status === 'rejected'" size="small" type="info">申诉驳回</el-tag>
               </div>
             </div>
           </div>
           <div class="exam-score">
             <div class="stat-item">
-              <div class="stat-value">{{ r.score ?? '待评' }}</div>
-              <div class="stat-label">我的得分</div>
+              <div class="stat-value" :class="{ 'score-muted': r.published === false }">
+                {{ r.published === false ? '—' : (r.score ?? '待评') }}
+              </div>
+              <div class="stat-label">{{ r.published === false ? '等待发布' : '我的得分' }}</div>
             </div>
             <div class="stat-item">
-              <div class="stat-value">{{ r.total_score || 0 }}</div>
+              <div class="stat-value">{{ r.published === false ? '—' : (r.total_score || 0) }}</div>
               <div class="stat-label">总分</div>
             </div>
           </div>
@@ -286,6 +292,10 @@ const formatDate = (dateStr) => {
   font-size: 12px;
   color: #94a3b8;
   margin-top: 4px;
+}
+
+.score-muted {
+  color: #cbd5e1 !important;
 }
 
 .empty-state {
