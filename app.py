@@ -8,6 +8,7 @@ from utils.timeutil import utcnow, aware_min
 import html
 import os
 import sys
+import threading
 
 from utils.logger import logger, access_logger
 from utils.redis_cache import init_redis
@@ -68,6 +69,7 @@ from competition.pk_routes import pk_bp
 from competition.gamification_routes import gamification_bp
 from competition.team_routes import team_bp
 from bounty.routes import bounty_bp
+from dsci.routes import dsci_bp
 # 注意：api/routes.py 已废弃，路由已拆分到以上独立模块
 
 api_bps = [api_auth_bp,
@@ -88,7 +90,8 @@ api_bps = [api_auth_bp,
            pk_bp,
            gamification_bp,
            team_bp,
-           bounty_bp]
+           bounty_bp,
+           dsci_bp]
 for bp in api_bps:
     # CSRF 由 security._smart_csrf_check 统一处理：Bearer token 请求自动豁免，其余强制校验
     app.register_blueprint(bp, url_prefix='/api')
@@ -241,7 +244,7 @@ def auto_end_expired_exams():
     now = utcnow()
     from database.models import Exam, ExamSession, ExamStatusEnum, Answer, ExamQuestion, Result, Question, QuestionTypeEnum
     from sqlalchemy import exc as sa_exc
-    OBJECTIVE_TYPES = {'single_choice', 'multiple_choice', 'true_false', 'fill_blank'}
+    from api.exam_engine import check_objective, session_question_ids, apply_exam_result
     try:
         expired_exams = Exam.query.filter(
             Exam.status == ExamStatusEnum.PUBLISHED,
@@ -269,56 +272,52 @@ def auto_end_expired_exams():
                     q.id: q
                     for q in Question.query.filter(Question.id.in_(q_ids)).all()
                 } if q_ids else {}
+                rule = exam.multi_score_rule or 'all_or_nothing'
 
                 for sess in in_progress_sessions:
                     sess.end_time = now
                     sess.status = 'submitted'
-                    existing_result = Result.query.filter_by(
-                        exam_id=exam.id, student_id=sess.student_id
-                    ).first()
-                    if existing_result:
-                        continue
-                    answers = Answer.query.filter_by(session_id=sess.id).all()
-                    earned = 0
-                    total = 0
-                    for a in answers:
-                        eq_score = score_map.get(a.question_id)
+                    # v4.3：按会话题单收卷（含逐人随机卷），未答题补记 0 分空行
+                    paper_ids = [qid for qid in session_question_ids(sess, exam) if qid in score_map]
+                    answers = {a.question_id: a for a in Answer.query.filter_by(session_id=sess.id).all()}
+                    earned = 0.0
+                    total = 0.0
+                    for qid in paper_ids:
+                        eq_score = score_map.get(qid)
                         if eq_score is None:
                             continue
                         total += eq_score
-                        question = questions.get(a.question_id)
+                        question = questions.get(qid)
+                        a = answers.get(qid)
+                        if a is None:
+                            a = Answer(session_id=sess.id, question_id=qid, student_answer='')
+                            db.session.add(a)
                         if not question:
                             continue
-                        if a.is_correct is None:
+                        if a.is_correct is None and a.manual_score is None:
                             student_ans = (a.student_answer or '').strip()
-                            correct_ans = (question.answer or '').strip()
-                            if question.type in OBJECTIVE_TYPES:
-                                if question.type == 'multiple_choice':
-                                    is_correct = ''.join(sorted(student_ans.upper())) == ''.join(sorted(correct_ans.upper()))
-                                elif question.type == 'fill_blank':
-                                    is_correct = student_ans.lower() == correct_ans.lower()
-                                else:
-                                    is_correct = student_ans.upper() == correct_ans.upper()
+                            if QuestionTypeEnum.is_subjective(question.type):
+                                if student_ans:
+                                    a.needs_manual_grade = True
+                                a.is_correct = False
+                                a.score = 0
                             else:
-                                is_correct = False
-                                a.needs_manual_grade = True
-                            a.is_correct = is_correct
-                            a.score = eq_score if is_correct else 0
-                        earned += (a.score or 0)
-                    result = Result(
-                        exam_id=exam.id,
-                        student_id=sess.student_id,
-                        score=earned,
-                        total_score=total,
-                        submitted_at=now
-                    )
-                    db.session.add(result)
+                                ok, ratio = check_objective(question.type, student_ans,
+                                                            (question.answer or '').strip(), rule)
+                                a.is_correct = ok
+                                a.score = round(eq_score * ratio, 2)
+                        earned += (a.manual_score if a.manual_score is not None else (a.score or 0))
+                    sess.score = earned
+                    # best/last 成绩策略幂等 upsert（v4.3 多次作答；旧版已有成绩即跳过）
+                    result, created, changed = apply_exam_result(sess, earned, total)
                     # flush 提前暴露唯一约束冲突（并发交卷竞态），冲突则整场回滚下轮重试
                     db.session.flush()
-                    from api.notification_routes import create_exam_result_notification
-                    # 循环内不逐行 commit：通知随本场考试在循环结束后统一提交，
-                    # 避免反复争抢 SQLite 写锁，也保证整场考试收卷的事务原子性
-                    create_exam_result_notification(result, commit=False)
+                    # 成绩未发布时不发含分通知，留待教师统一发布（v4.3）
+                    if (created or changed) and exam.results_published:
+                        from api.notification_routes import create_exam_result_notification
+                        # 循环内不逐行 commit：通知随本场考试在循环结束后统一提交，
+                        # 避免反复争抢 SQLite 写锁，也保证整场考试收卷的事务原子性
+                        create_exam_result_notification(result, commit=False)
 
                 db.session.commit()
                 logger.info(f"Auto ended exam: {exam.id}")
@@ -485,11 +484,38 @@ def init_database():
             db.session.rollback()
             print(f'[DB] 设置课程学分时出错: {e}')
 
+# ── 启动装配（幂等）：建库/迁移 + 后台调度线程 ─────────────────────────────
+# 原仅随 `python app.py`（__main__）执行；若改用 `flask run`、gunicorn/waitress 以
+# app:app 方式导入启动，调度器会静默不启动（过期收卷/竞赛结算/悬赏过期全部失效）。
+# 现收敛为幂等的 bootstrap_app()，并由 before_request 钩子对任意入口兜底：
+# 第一个请求到达时若尚未装配则补装配（多进程部署时每进程各装配一次，
+# init_database 与调度任务均已幂等，重复执行安全）。
+_boot_lock = threading.Lock()
+_boot_done = threading.Event()
+
+
+def bootstrap_app():
+    """幂等启动装配：init_database + 调度线程；失败不置位，下个请求重试。"""
+    if _boot_done.is_set():
+        return
+    with _boot_lock:
+        if _boot_done.is_set():
+            return
+        init_database()
+        from utils.scheduler import start_scheduler
+        start_scheduler(app, interval=60)
+        _boot_done.set()
+
+
+@app.before_request
+def _bootstrap_once():
+    if not _boot_done.is_set():
+        bootstrap_app()
+
+
 if __name__ == '__main__':
-    init_database()
-    # 启动后台定时调度线程（过期考试结束、竞赛结算、赛季归档）
-    from utils.scheduler import start_scheduler
-    start_scheduler(app, interval=60)
+    # 启动即装配（提前暴露建库/迁移错误，不等首请求）；before_request 钩子后续为无操作
+    bootstrap_app()
     host = app.config['HOST']
     port = app.config['PORT']
 

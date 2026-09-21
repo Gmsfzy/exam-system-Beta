@@ -1,7 +1,23 @@
 import os
+from urllib.parse import quote_plus
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# 项目根目录与 instance 目录（数据库真实存放位置）
+_BASE_DIR = os.path.abspath(os.path.dirname(__file__))
+_INSTANCE_DIR = os.path.join(_BASE_DIR, 'instance')
+os.makedirs(_INSTANCE_DIR, exist_ok=True)
+
+
+def _build_sqlite_uri(db_path):
+    """把绝对路径拼成 SQLAlchemy 可用的 sqlite URI。
+
+    统一转正斜杠：Windows 得到 sqlite:///D:/... ，POSIX 得到 sqlite:////abs/... ，
+    两者均为 SQLAlchemy 认可的绝对路径写法。
+    """
+    return 'sqlite:///' + os.path.abspath(db_path).replace('\\', '/')
+
 
 class Config:
     # 调试模式：生产必须为 false（Werkzeug 调试器可致远程代码执行）
@@ -46,7 +62,11 @@ class Config:
             '生产环境（FLASK_DEBUG 未设为 true）必须在环境变量/.env 中设置强随机 SECRET_KEY，'
             '禁止使用开发默认值。可用 python -c "import secrets;print(secrets.token_hex(32))" 生成。'
         )
-    SQLALCHEMY_DATABASE_URI = 'sqlite:///exam_system.db'
+    # 数据库使用绝对路径显式指向 instance/exam_system.db。
+    # 旧写法 'sqlite:///exam_system.db' 依赖 Flask-SQLAlchemy 把相对路径隐式解析到 instance/，
+    # 一旦有工具/脚本按该相对 URI 在项目根目录直接建连，就会在根目录误建 0 字节空库。
+    # 改为绝对路径后，任何读取本配置建连的方式都只会命中 instance 下的真实库。
+    SQLALCHEMY_DATABASE_URI = _build_sqlite_uri(os.path.join(_INSTANCE_DIR, 'exam_system.db'))
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     # SQLite 锁超时时间（秒），避免 AI 调用期间数据库锁报错
     SQLALCHEMY_ENGINE_OPTIONS = {"connect_args": {"timeout": 30}}
@@ -70,6 +90,15 @@ class Config:
     WTF_CSRF_TIME_LIMIT = 3600
 
     # Rate Limiting 配置
-    RATE_LIMIT_STORAGE_URI = os.getenv('RATE_LIMIT_STORAGE_URI', 'memory://')
+    # 存储选择：显式环境变量优先；否则配了 Redis（REDIS_HOST/PORT）则跟随之
+    # （多进程共享计数）；都没配回落 memory://（仅单进程部署下计数准确，
+    # 多 worker 横向扩容时限流按进程各自计数会被稀释）。
+    _redis_explicit = bool(os.getenv('REDIS_HOST') or os.getenv('REDIS_PORT'))
+    _rl_redis_default = 'redis://{}{}:{}/{}'.format(
+        (':' + quote_plus(os.getenv('REDIS_PASSWORD')) + '@') if os.getenv('REDIS_PASSWORD') else '',
+        os.getenv('REDIS_HOST', 'localhost'), os.getenv('REDIS_PORT', '6379'),
+        os.getenv('REDIS_DB', '0'))
+    RATE_LIMIT_STORAGE_URI = os.getenv('RATE_LIMIT_STORAGE_URI') or (
+        _rl_redis_default if _redis_explicit else 'memory://')
     RATE_LIMIT_DEFAULT = os.getenv('RATE_LIMIT_DEFAULT', '60 per minute')
     RATE_LIMIT_HEADERS_ENABLED = True

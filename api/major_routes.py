@@ -8,12 +8,9 @@ from utils.security import verify_token
 api_major_bp = Blueprint('api_major', __name__)
 
 def _require_teacher():
-    user = verify_token()
-    if not user:
-        return None, (jsonify({'message': '请先登录'}), 401)
-    if not user.is_teacher():
-        return None, (jsonify({'message': '无权操作，仅教师可管理专业'}), 403)
-    return user, None
+    """委托 utils.permissions 统一实现（RBAC 收敛）。"""
+    from utils.permissions import require_teacher
+    return require_teacher(deny_msg='无权操作，仅教师可管理专业')
 
 @api_major_bp.route('/majors', methods=['GET'])
 def api_list_majors():

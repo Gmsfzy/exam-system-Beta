@@ -4,15 +4,16 @@ from database import db
 from ai_service.services import ai_generate_questions
 from utils.security import limiter, RateLimitConfig, verify_token
 from utils.logger import logger
+from utils.permissions import require_teacher
 
 api_ai_bp = Blueprint('api_ai', __name__)
 
 @api_ai_bp.route('/ai/generate', methods=['POST'])
 @limiter.limit(RateLimitConfig.AI_GENERATE)
 def api_ai_generate():
-    user = verify_token()
-    if not user or not user.is_teacher():
-        return jsonify({'message': '无权访问'}), 403
+    user, err = require_teacher(deny_msg='无权访问', unauth_msg='无权访问', unauth_status=403)
+    if err:
+        return err
     
     data = request.get_json()
     major_name = data.get('major_name', '').strip()
@@ -58,6 +59,9 @@ def api_ai_generate():
 
 @api_ai_bp.route('/question-types', methods=['GET'])
 def api_question_types():
+    # v4.3 鉴权小修：枚举接口不再对未登录者开放
+    if not verify_token():
+        return jsonify({'message': '未登录'}), 401
     types = []
     for t in dir(QuestionTypeEnum):
         if not t.startswith('_') and isinstance(getattr(QuestionTypeEnum, t), str):
@@ -69,11 +73,13 @@ def api_question_types():
 
 @api_ai_bp.route('/difficulties', methods=['GET'])
 def api_difficulties():
+    if not verify_token():
+        return jsonify({'message': '未登录'}), 401
     diffs = []
     for d in dir(DifficultyEnum):
         if not d.startswith('_') and isinstance(getattr(DifficultyEnum, d), str):
             diffs.append({
                 'value': getattr(DifficultyEnum, d),
-                'label': getattr(DifficultyEnum, d).replace('easy', '简单').replace('medium', '中等').replace('hard', '困难')
+                'label': DifficultyEnum.label(getattr(DifficultyEnum, d))
             })
     return jsonify(diffs)

@@ -45,12 +45,26 @@ _QUESTION_TYPE_LABELS = {
     'programming':     '编程题',
     'application':     '应用题',
     'calculation':     '计算题',
+    'essay':           '论述题',   # 历史题型兜底（与前端 utils/enums.js 对齐）
 }
+# 公开别名：供导入解析等需要反查（中文→枚举键）的场景复用同一事实源
+QUESTION_TYPE_LABELS = _QUESTION_TYPE_LABELS
 
 class DifficultyEnum:
     EASY = "easy"
     MEDIUM = "medium"
     HARD = "hard"
+
+    LABELS = {
+        'easy': '简单',
+        'medium': '中等',
+        'hard': '困难',
+    }
+
+    @classmethod
+    def label(cls, difficulty: str) -> str:
+        """返回难度的中文名称（v4.6.1 枚举收敛：全后端唯一 label 来源）"""
+        return cls.LABELS.get(difficulty, difficulty)
 
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -60,6 +74,7 @@ class User(db.Model):
     role = db.Column(db.String(20), nullable=False)
     sanctioned_at = db.Column(UTCDateTime)          # 竞技处罚时间（NULL=正常）
     sanction_reason = db.Column(db.String(200))     # 受限原因公示
+    token_valid_at = db.Column(UTCDateTime)         # 令牌吊销水位（v4.6.1）：早于此时刻签发的 JWT 一律失效，NULL=从未吊销
     created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
 
     @property
@@ -143,6 +158,11 @@ class Question(db.Model):
     source = db.Column(db.String(20), nullable=False, default='manual')  # manual/ai/past_exam
     creator_id = db.Column(db.Integer, db.ForeignKey('user.id'))  # 创建者（历史题目为 NULL）
     is_public = db.Column(db.Boolean, nullable=False, default=False)  # 是否公开到公共题库
+    # 材料题（v4.3）：同 material_group 的题目共享一段阅读材料，material 存于组内每题（取首条非空）
+    material = db.Column(db.Text)
+    material_group = db.Column(db.String(50))
+    # OJ 评测用例（v4.7 编程题）：[{input, expected}] stdin/stdout 判分；空=无自动评测，回落 AI/人工评分
+    test_cases = db.Column(JSONType)
     created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
 
     creator = db.relationship('User', backref='questions', lazy=True)
@@ -159,6 +179,16 @@ class Exam(db.Model):
     created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
     invitation_code = db.Column(db.String(20), unique=True)
     invitation_url = db.Column(db.String(500))
+
+    # ── v4.3 考务增强（迁移 0012）──────────────────────────────
+    results_published = db.Column(db.Boolean, nullable=False, default=True)   # 成绩发布控制：False 时学生不可见分数
+    max_attempts = db.Column(db.Integer, nullable=False, default=1)           # 最多作答次数（1=不允许补考/重考）
+    score_strategy = db.Column(db.String(10), nullable=False, default='last') # 多次成绩策略 last/best
+    paper_mode = db.Column(db.String(10), nullable=False, default='unified')  # unified 统一卷 / random 逐人抽题
+    random_count = db.Column(db.Integer, nullable=False, default=0)           # random 模式每人抽题数（0=全卷）
+    shuffle_options = db.Column(db.Boolean, nullable=False, default=False)    # 选择题选项逐人乱序
+    multi_score_rule = db.Column(db.String(20), nullable=False, default='all_or_nothing')  # 多选题：all_or_nothing/partial(漏选按比例)
+    anonymous_grading = db.Column(db.Boolean, nullable=False, default=False)  # 批改盲评（隐学生名）
 
     creator = db.relationship('User', backref='exams', lazy=True)
     # 删除考试时 ORM 级联清理题目配置/受邀学生/会话/成绩（依赖记录无独立存在意义）
@@ -201,6 +231,7 @@ class ExamStudent(db.Model):
     exam_id = db.Column(db.Integer, db.ForeignKey('exam.id'), primary_key=True)
     student_id = db.Column(db.Integer, db.ForeignKey('user.id'), primary_key=True)
     invited_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
+    extra_attempts = db.Column(db.Integer, nullable=False, default=0)  # 额外授权次数（补考）v4.3
 
     student = db.relationship('User')
 
@@ -212,6 +243,11 @@ class ExamSession(db.Model):
     end_time = db.Column(UTCDateTime)
     status = db.Column(db.String(20), nullable=False, default='in_progress')
     switch_count = db.Column(db.Integer, default=0)  # 切屏次数
+    # ── v4.3 多次作答与逐人随机卷（迁移 0012）──
+    attempt_no = db.Column(db.Integer, nullable=False, default=1)  # 第几次作答
+    score = db.Column(db.Float)                                    # 本次得分（成绩单次记录）
+    assigned_question_ids = db.Column(JSONType)                    # paper_mode=random 时本次抽到的题 id 列表
+    option_map = db.Column(JSONType)                               # 选项乱序映射 {qid: [原索引...]}（仅含被打乱的题）
 
     student = db.relationship('User', backref='exam_sessions', lazy=True)
     answers = db.relationship('Answer', backref='session', lazy=True,
@@ -227,6 +263,7 @@ class Answer(db.Model):
     manual_score = db.Column(db.Float)           # 教师人工评分（None 表示未人工评分）
     manual_comment = db.Column(db.Text)          # 教师评语
     needs_manual_grade = db.Column(db.Boolean, default=False)  # 是否需要人工评分
+    oj_verdict = db.Column(db.String(10))          # OJ 自动评测结果 AC/WA/TLE/RE（仅编程题有用例时写入）
 
     @property
     def effective_score(self):
@@ -246,6 +283,12 @@ class Result(db.Model):
     total_score = db.Column(db.Float, nullable=False)
     submitted_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
     ai_analysis = db.Column(db.Text)
+    # ── v4.3 多次作答与成绩复核（迁移 0012）──
+    session_id = db.Column(db.Integer)  # 成绩来源会话（普通 Integer 防循环外键；best/last 策略随之更新）
+    review_status = db.Column(db.String(20), nullable=False, default='none')  # none/requested/resolved/rejected 成绩申诉
+    review_reason = db.Column(db.Text)     # 学生申诉理由
+    review_reply = db.Column(db.Text)      # 教师复核回复
+    reviewed_at = db.Column(UTCDateTime)   # 复核时间
 
     # 同一学生同一考试只允许一条成绩记录，防止并发重复提交
     __table_args__ = (
@@ -291,6 +334,9 @@ class WrongAnswerRecord(db.Model):
     last_wrong_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
     mastered_at = db.Column(UTCDateTime)
     created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
+    # v4.4 逐题 AI 归因分析：错因诊断文本（重新生成会覆盖）
+    ai_analysis = db.Column(db.Text)
+    ai_analyzed_at = db.Column(UTCDateTime)
 
     __table_args__ = (
         # 同一用户同一题目保持单条，新增时累加 wrong_count
@@ -665,6 +711,9 @@ class StudyCheckin(db.Model):
     minutes = db.Column(db.Integer, nullable=False, default=0)   # 当日累计学习分钟数
     tasks_done = db.Column(db.Integer, nullable=False, default=0)
     created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
+    # v4.4 打卡心情日志：心情（happy/calm/tired/frustrated）与当日总结
+    mood = db.Column(db.String(16))
+    content = db.Column(db.Text)
 
     __table_args__ = (
         db.UniqueConstraint('user_id', 'day', name='_user_day_checkin_uc'),
@@ -710,3 +759,235 @@ class DailyTask(db.Model):
     )
 
     user = db.relationship('User', backref='daily_tasks')
+
+
+# ── v4.4 学习体验升级：AI 会话持久化 / 专注计时 / 自由笔记 / 讲解卡 ────
+
+class AiChatConversation(db.Model):
+    """AI 学习助手会话：持久化多轮对话，支持历史回看与续聊"""
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    title = db.Column(db.String(100), nullable=False, default='新的对话')
+    context = db.Column(db.String(60))   # 创建时所在页面模块（learning/today/wrong...）
+    created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
+    updated_at = db.Column(UTCDateTime, nullable=False, default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (
+        db.Index('ix_ai_conv_user_updated', 'user_id', 'updated_at'),
+    )
+
+    user = db.relationship('User', backref='ai_conversations')
+    messages = db.relationship('AiChatMessage', backref='conversation',
+                               cascade='all, delete-orphan', lazy=True)
+
+
+class AiChatMessage(db.Model):
+    """AI 学习助手消息：归属某条会话，按创建先后排列"""
+    id = db.Column(db.Integer, primary_key=True)
+    conversation_id = db.Column(db.Integer, db.ForeignKey('ai_chat_conversation.id'), nullable=False)
+    role = db.Column(db.String(10), nullable=False)   # user / assistant
+    content = db.Column(db.Text, nullable=False)
+    degraded = db.Column(db.Boolean, nullable=False, default=False)  # AI 不可用时的降级回复标记
+    created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
+
+    __table_args__ = (
+        db.Index('ix_ai_msg_conv', 'conversation_id', 'id'),
+    )
+
+
+class FocusSession(db.Model):
+    """专注计时会话：番茄钟/正计时登记线下与线上学习时长，结束后并入当日打卡"""
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    topic = db.Column(db.String(200))              # 专注主题（如「复习线性代数」）
+    mode = db.Column(db.String(10), nullable=False, default='pomodoro')  # pomodoro 倒计时 / stopwatch 正计时
+    planned_min = db.Column(db.Integer, nullable=False, default=25)      # 计划分钟数
+    actual_sec = db.Column(db.Integer, nullable=False, default=0)       # 实际专注秒数（结束时写入）
+    status = db.Column(db.String(10), nullable=False, default='running')  # running/dropped/finished
+    started_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
+    ended_at = db.Column(UTCDateTime)
+
+    __table_args__ = (
+        db.CheckConstraint("mode IN ('pomodoro', 'stopwatch')", name='_focus_mode_ck'),
+        db.CheckConstraint("status IN ('running', 'dropped', 'finished')", name='_focus_status_ck'),
+        db.Index('ix_focus_user_started', 'user_id', 'started_at'),
+    )
+
+    user = db.relationship('User', backref='focus_sessions')
+
+
+class StudyNote(db.Model):
+    """自由学习笔记：不绑定知识点的个人知识资产，支持分类/标签/置顶，可插入上传图片"""
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    title = db.Column(db.String(200), nullable=False)
+    content = db.Column(db.Text, nullable=False, default='')
+    category = db.Column(db.String(50))            # 分类（如 课堂/错题整理/灵感）
+    tags = db.Column(JSONType)                     # 标签字符串数组
+    pinned = db.Column(db.Boolean, nullable=False, default=False)
+    source = db.Column(db.String(10), nullable=False, default='manual')  # manual 手写 / explain 讲解卡转存
+    attachment_json = db.Column(JSONType)          # 附件（v4.6，迁移 0015）：[{filename, stored_name, size, uploaded_at}]
+    created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
+    updated_at = db.Column(UTCDateTime, nullable=False, default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (
+        db.CheckConstraint("source IN ('manual', 'explain')", name='_note_source_ck'),
+        db.Index('ix_study_note_user_updated', 'user_id', 'updated_at'),
+    )
+
+    user = db.relationship('User', backref='study_notes')
+
+
+class ExplainCard(db.Model):
+    """知识点讲解卡：输入任意主题一键 AI 讲解，持久化可回看，可转存为笔记"""
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    topic = db.Column(db.String(200), nullable=False)
+    content = db.Column(db.Text, nullable=False, default='')
+    knowledge_point_id = db.Column(db.Integer, db.ForeignKey('knowledge_point.id'))  # 命中库内知识点时回填
+    created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
+
+    __table_args__ = (
+        db.Index('ix_explain_card_user_created', 'user_id', 'created_at'),
+    )
+
+    user = db.relationship('User', backref='explain_cards')
+    knowledge_point = db.relationship('KnowledgePoint')
+
+
+# ── v4.5 学习社区升级：个人资料库 / 公开广场 / 关注体系 / AI 治理 ────
+
+class StudyFolder(db.Model):
+    """个人资料库文件夹：树形组织自己的学习资料，parent_id 为空即根目录"""
+    __tablename__ = 'study_folder'
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    name = db.Column(db.String(50), nullable=False)
+    parent_id = db.Column(db.Integer, db.ForeignKey('study_folder.id'))
+    created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
+
+    __table_args__ = (
+        db.Index('ix_folder_user', 'user_id'),
+    )
+
+    user = db.relationship('User', backref='study_folders')
+
+
+class StudyMaterial(db.Model):
+    """个人学习资料：AI 生成的多形态资料或手写沉淀，可公开到广场供他人收藏学习"""
+    __tablename__ = 'study_material'
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    folder_id = db.Column(db.Integer, db.ForeignKey('study_folder.id'))
+    kind = db.Column(db.String(20), nullable=False, default='manual')
+    # video_script 视频脚本包 / mindmap 讲义+思维导图 / lecture 结构化讲义 / summary 高浓度摘要 / quiz 练习题集 / manual 手写
+    title = db.Column(db.String(200), nullable=False)
+    content = db.Column(db.Text, nullable=False, default='')   # Markdown（mindmap 含 mermaid 代码块）
+    subject = db.Column(db.String(50))
+    difficulty = db.Column(db.String(20))                       # entry/normal/exam 与题库难度语义对齐
+    knowledge_point_id = db.Column(db.Integer, db.ForeignKey('knowledge_point.id'))  # 命中库内知识点时回填
+    source = db.Column(db.String(10), nullable=False, default='manual')  # manual 手写 / ai 生成
+    is_public = db.Column(db.Boolean, nullable=False, default=False)
+    views = db.Column(db.Integer, nullable=False, default=0)
+    status = db.Column(db.String(10), nullable=False, default='active')  # active/removed（举报下架）
+    created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
+    updated_at = db.Column(UTCDateTime, nullable=False, default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (
+        db.CheckConstraint("kind IN ('video_script', 'mindmap', 'lecture', 'summary', 'quiz', 'manual')",
+                           name='_material_kind_ck'),
+        db.CheckConstraint("source IN ('manual', 'ai')", name='_material_source_ck'),
+        db.CheckConstraint("status IN ('active', 'removed')", name='_material_status_ck'),
+        db.Index('ix_material_user_updated', 'user_id', 'updated_at'),
+        db.Index('ix_material_public', 'is_public', 'status'),
+    )
+
+    user = db.relationship('User', backref='study_materials')
+    folder = db.relationship('StudyFolder', backref='materials')
+    knowledge_point = db.relationship('KnowledgePoint')
+
+
+class MaterialFavorite(db.Model):
+    """资料收藏：一人一份，收藏出现在我的收藏列表"""
+    __tablename__ = 'material_favorite'
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    material_id = db.Column(db.Integer, db.ForeignKey('study_material.id'), nullable=False)
+    created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
+
+    __table_args__ = (
+        db.UniqueConstraint('user_id', 'material_id', name='_user_material_fav_uc'),
+    )
+
+    user = db.relationship('User', backref='material_favorites')
+    material = db.relationship('StudyMaterial', backref='favorites')
+
+
+class MaterialReport(db.Model):
+    """资料举报：任何用户可举报公开资料，教师核实后下架或驳回"""
+    __tablename__ = 'material_report'
+    id = db.Column(db.Integer, primary_key=True)
+    material_id = db.Column(db.Integer, db.ForeignKey('study_material.id'), nullable=False)
+    reporter_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    reason = db.Column(db.String(200), nullable=False, default='')
+    status = db.Column(db.String(10), nullable=False, default='pending')  # pending/removed/rejected
+    handler_id = db.Column(db.Integer, db.ForeignKey('user.id'))
+    note = db.Column(db.String(200))
+    created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
+    handled_at = db.Column(UTCDateTime)
+
+    __table_args__ = (
+        db.CheckConstraint("status IN ('pending', 'removed', 'rejected')", name='_report_status_ck'),
+        db.Index('ix_report_status', 'status', 'created_at'),
+    )
+
+    material = db.relationship('StudyMaterial', backref='reports')
+    reporter = db.relationship('User', foreign_keys=[reporter_id], backref='material_reports')
+    handler = db.relationship('User', foreign_keys=[handler_id])
+
+
+class UserFollow(db.Model):
+    """关注关系：A 关注 B 一行记录，双向互关即好友"""
+    __tablename__ = 'user_follow'
+    id = db.Column(db.Integer, primary_key=True)
+    follower_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    followee_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
+
+    __table_args__ = (
+        db.UniqueConstraint('follower_id', 'followee_id', name='_user_follow_uc'),
+        db.CheckConstraint('follower_id != followee_id', name='_follow_not_self_ck'),
+        db.Index('ix_follow_followee', 'followee_id'),
+    )
+
+    follower = db.relationship('User', foreign_keys=[follower_id], backref='followings')
+    followee = db.relationship('User', foreign_keys=[followee_id], backref='followers')
+
+
+class AiUsageLog(db.Model):
+    """AI 调用日志：每次生成类调用记一笔，耗时/结果状态供治理页统计成本"""
+    __tablename__ = 'ai_usage_log'
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    action = db.Column(db.String(40), nullable=False)   # chat/question/explain/material/analyze/grade...
+    status = db.Column(db.String(10), nullable=False, default='success')  # success/degraded/fail
+    cost_ms = db.Column(db.Integer, nullable=False, default=0)
+    created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
+
+    __table_args__ = (
+        db.CheckConstraint("status IN ('success', 'degraded', 'fail')", name='_ai_log_status_ck'),
+        db.Index('ix_ai_log_user_created', 'user_id', 'created_at'),
+    )
+
+    user = db.relationship('User', backref='ai_usage_logs')
+
+
+class AiQuota(db.Model):
+    """AI 每日生成配额：默认 30 次/天，教师可按用户调整；跨天惰性重置"""
+    __tablename__ = 'ai_quota'
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), primary_key=True)
+    daily_limit = db.Column(db.Integer, nullable=False, default=30)
+    used_today = db.Column(db.Integer, nullable=False, default=0)
+    reset_date = db.Column(db.Date, nullable=False)
+
+    user = db.relationship('User', backref='ai_quota')

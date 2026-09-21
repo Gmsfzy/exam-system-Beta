@@ -70,42 +70,81 @@ def ai_grade_exam(session, session_id: int):
     session: SQLAlchemy Session（调用方传 db.session）。
     统一以 session_id 为唯一入参（v4.0 修复）：调用方均持有会话 ID，
     exam_id/student_id 从会话内部获取，避免传参错配。
+    v4.3 升级：按本次会话题单判分（含逐人随机卷）；未答题目补记 0 分作答行，
+    total_score 覆盖全卷（修复旧版"未作答不计入总分"）；多选题遵循 exam.multi_score_rule。
     返回 (earned_score, total_score)，仅负责判分与写 Answer，不创建 Result。
     """
-    from database.models import ExamSession, Answer, ExamQuestion, Question
+    from database.models import ExamSession, Exam, Answer, ExamQuestion, Question
+    from api.exam_engine import check_objective, session_question_ids
 
     exam_session = session.get(ExamSession, session_id)
     if not exam_session:
         raise ValueError("考试会话不存在")
     exam_id = exam_session.exam_id
+    exam = session.get(Exam, exam_id)
+    rule = (getattr(exam, 'multi_score_rule', None) or 'all_or_nothing')
 
-    answers = Answer.query.filter_by(session_id=exam_session.id).all()
+    # 批量预载题单配置与题目实体，消除逐答案 N+1
+    eqs = ExamQuestion.query.filter_by(exam_id=exam_id).all()
+    eq_map = {eq.question_id: eq for eq in eqs}
+    q_ids = [qid for qid in session_question_ids(exam_session, exam) if qid in eq_map]
+    questions = {q.id: q for q in Question.query.filter(Question.id.in_(q_ids)).all()} if q_ids else {}
+    answers = {a.question_id: a for a in Answer.query.filter_by(session_id=exam_session.id).all()}
 
     total_score = 0
     earned_score = 0
-    OBJECTIVE_TYPES = {'single_choice', 'multiple_choice', 'true_false', 'fill_blank'}
 
-    for answer in answers:
-        exam_question = ExamQuestion.query.filter_by(exam_id=exam_id, question_id=answer.question_id).first()
-        question = session.get(Question, answer.question_id)
-
+    for qid in q_ids:
+        exam_question = eq_map.get(qid)
+        question = questions.get(qid)
         if not (exam_question and question):
             continue
 
         total_score += exam_question.score
+        answer = answers.get(qid)
+        if answer is None:
+            # 未答题补记空作答行（判 0 分，主观题空答不再送人工）
+            answer = Answer(session_id=exam_session.id, question_id=qid, student_answer='')
+            session.add(answer)
+            answers[qid] = answer
         student_ans = (answer.student_answer or '').strip()
         correct_ans = (question.answer or '').strip()
 
+        # ── v4.7 编程题 OJ 自动评测：有用例时按 AC 通过率判分，不再送 AI/人工；
+        #    无用例或非 Python 语言回落既有主观题链路 ──
+        if question.type == QuestionTypeEnum.PROGRAMMING and getattr(question, 'test_cases', None):
+            from oj.services import grade as oj_grade
+            if not student_ans:
+                answer.needs_manual_grade = False
+                answer.is_correct = False
+                answer.score = 0
+                answer.oj_verdict = 'CE'
+                continue
+            oj_result = oj_grade(student_ans, 'python', question.test_cases)
+            if oj_result['supported']:
+                ratio = (oj_result['passed'] / oj_result['total']) if oj_result['total'] else 0.0
+                answer.needs_manual_grade = False
+                answer.is_correct = oj_result['verdict'] == 'AC'
+                answer.score = round(exam_question.score * ratio, 2)
+                answer.oj_verdict = oj_result['verdict']
+                earned_score += answer.score
+                continue
+
         # 主观题标记需要人工评分，并调用AI语义批改
         if QuestionTypeEnum.is_subjective(question.type):
+            if not student_ans:
+                answer.needs_manual_grade = False
+                answer.is_correct = False
+                answer.score = 0
+                continue
             answer.needs_manual_grade = True
             try:
                 result = ai_client.grade_answer(question.content, question.answer, student_ans)
                 data = json.loads(result)
                 answer.is_correct = data.get('is_correct', False)
                 # AI 返回 0-100 百分比，clamp 到 [0, 100] 防止异常值，再换算题目满分
-                ratio = max(0.0, min(float(data.get('score', 0) or 0), 100.0))
-                answer.score = (ratio / 100) * exam_question.score
+                ratio = max(0.0, min(float(data.get('score', 0) or 0), 100.0)) / 100.0
+                answer.score = round(ratio * exam_question.score, 2)
                 earned_score += answer.score
             except Exception:
                 # AI 调用失败，主观题先给 0 分，等人工评分
@@ -113,21 +152,10 @@ def ai_grade_exam(session, session_id: int):
                 answer.score = 0
             continue
 
-        # ── 客观题：本地比对 ──────────────────────────────
-        if question.type == 'multiple_choice':
-            # 多选题：按字符排序后比较（允许答案顺序不同）
-            s_sorted = ''.join(sorted(student_ans.upper()))
-            c_sorted = ''.join(sorted(correct_ans.upper()))
-            is_correct = s_sorted == c_sorted
-        elif question.type == 'fill_blank':
-            # 填空题：忽略大小写和多余空格
-            is_correct = student_ans.lower() == correct_ans.lower()
-        else:
-            # 单选题 / 判断题：完全匹配（忽略大小写）
-            is_correct = student_ans.upper() == correct_ans.upper()
-
+        # ── 客观题：本地比对（多选 partial 规则由 exam_engine.check_objective 统一实现）──
+        is_correct, score_ratio = check_objective(question.type, student_ans, correct_ans, rule)
         answer.is_correct = is_correct
-        answer.score = exam_question.score if is_correct else 0
+        answer.score = round(exam_question.score * score_ratio, 2)
         earned_score += answer.score
 
     session.commit()
@@ -314,6 +342,100 @@ def ai_chat_reply(session, messages: list, context: str = None):
     return ai_client.chat([{'role': 'system', 'content': system}] + cleaned)
 
 
+_CHAT_SYSTEM = (
+    "你是「智汇学场」学习平台的 AI 学习助手，擅长讲解知识点、分析错题错因、"
+    "规划学习路径和给出复习建议。要求：用简体中文回答；友好耐心、结构清晰（可分点）；"
+    "控制在300字以内；只讨论与学习相关的话题，拒绝提供任何考试作弊帮助。"
+)
+
+
+def build_chat_system(context: str = None) -> str:
+    """拼装学习助手 system 提示（流式/非流式共用）"""
+    return _CHAT_SYSTEM + (f"\n学生当前所在的页面背景：{context}" if context else "")
+
+
+def chat_stream_iter(messages: list, system: str):
+    """流式对话生成器：逐块 yield 增量文本；AI 失败时 yield 降级提示后正常结束。
+
+    messages: [{'role': 'user'|'assistant', 'content': str}] 历史（不含 system）。
+    调用方负责持久化聚合后的完整回复（是否降级看首块前缀标记）。
+    """
+    try:
+        yielded = False
+        for delta in ai_client.chat_stream([{'role': 'system', 'content': system}] + messages):
+            yielded = True
+            yield delta
+        if not yielded:
+            yield from _degraded_chat_iter(system, messages)
+    except Exception:
+        logger.exception('AI 流式对话失败，降级规则回复')
+        yield from _degraded_chat_iter(system, messages)
+
+
+def _degraded_chat_iter(system: str, messages: list):
+    """AI 不可用时的规则化降级回复：明确告知降级，不误导学生"""
+    last_q = next((m['content'] for m in reversed(messages) if m.get('role') == 'user'), '')
+    text = (
+        "【AI 服务暂不可用，以下为系统自动建议】\n"
+        f"关于「{last_q[:40]}」的建议：\n"
+        "1. 先到错题本回顾相关错题，用解析理解正确思路；\n"
+        "2. 在自由刷题中针对同名知识点练习 5~10 题验证掌握；\n"
+        "3. 若仍困惑，可预约向老师请教并整理到学习笔记。\n"
+        "稍后 AI 恢复后可重新提问获得针对性讲解。"
+    )
+    yield text
+
+
+def ai_analyze_wrong_answer(session, question, wrong_answer: str, wrong_count: int) -> str:
+    """错题逐题 AI 归因分析：诊断错因并给改进建议，返回纯文本。
+
+    session: SQLAlchemy Session（调用方传 db.session，本函数不读写库）。
+    异常抛 Exception，由调用方降级规则建议。
+    """
+    options = ''
+    try:
+        if question.options:
+            opts = json.loads(question.options) if isinstance(question.options, str) else question.options
+            options = '\n'.join(f"{chr(65 + i)}. {o}" for i, o in enumerate(opts[:8]))
+    except Exception:
+        options = str(question.options or '')[:500]
+    system = (
+        "你是错题诊断专家。用简体中文分析学生错因并给出改进建议。要求："
+        "1) 先判断学生答案反映的具体错因（概念混淆/审题疏漏/计算失误/方法不会等），"
+        "结合干扰项特征推测思路偏差；2) 用一两句话点破本题考点与正确思路；"
+        "3) 给出 1~2 条可执行的后续行动建议。总字数 150 字以内，"
+        "直接输出正文，不要标题、不要前缀、不要 markdown。"
+    )
+    prompt = (
+        f"题目：{question.content}\n"
+        f"{('选项：\n' + options) if options else ''}\n"
+        f"正确答案：{question.answer}\n"
+        f"学生答案：{wrong_answer or '（未作答）'}\n"
+        f"该题累计答错：{wrong_count} 次"
+    )
+    return ai_client.chat([{'role': 'system', 'content': system},
+                           {'role': 'user', 'content': prompt}], temp=0.4, max_tok=600)
+
+
+def ai_explain_topic(session, topic: str, kp_hint: str = None) -> str:
+    """知识点即问即讲：生成结构化讲解卡内容，返回纯文本 markdown。
+
+    session: SQLAlchemy Session（本函数不读写库）。
+    kp_hint: 可选的库内知识点描述，帮 AI 对齐术语体系。
+    """
+    system = (
+        "你是精讲老师。为学生制作一张知识点讲解卡，用简体中文 markdown，结构："
+        "## 一句话说清楚（本质定义）；## 为什么重要（在专业体系中的位置）；"
+        "## 核心要点（3~5 条，关键公式/术语用 **加粗**）；## 典型例子（1 个，贴近学生专业）；"
+        "## 易错提醒（1~2 条）。总字数 400 字以内，只输出卡片正文。"
+    )
+    prompt = f"讲解主题：{topic}"
+    if kp_hint:
+        prompt += f"\n（课程体系中该知识点的定位：{kp_hint}）"
+    return ai_client.chat([{'role': 'system', 'content': system},
+                           {'role': 'user', 'content': prompt}], temp=0.5, max_tok=1200)
+
+
 def ai_polish_note(session, kp_name: str, note_text: str):
     """AI 润色/提炼个人知识点笔记：保留木意、结构化、纠正表述，返回纯文本。
 
@@ -426,3 +548,94 @@ def ai_suggest_plan_tasks(session, goal_text: str, kp_lines: str, days: int, all
     if not out:
         raise ValueError("AI 未返回有效任务")
     return out
+
+
+# ── v4.5 多形态 AI 学习资料生成 ────────────────────────────────────
+
+MATERIAL_TEMPLATES = {
+    'video_script': (
+        "你是学习视频文案策划。基于以下知识点制作一段 3-6 分钟短教学视频的完整素材包，用 markdown 输出：\n"
+        "1) 口播文案（口语化、[画面]/[口播]分段）；2) 字幕文本（按句拆行）；\n"
+        "3) 分镜脚本表（镜号/画面描述/口播词/时长）；4) 知识点总结（≤5 条要点）；\n"
+        "5) 随堂小题（3 道选择题附答案解析）。\n学科：{subject}；难度：{difficulty}。\n知识点：{prompt}"
+    ),
+    'mindmap': (
+        "你是知识体系梳理专家。基于以下知识点输出：\n"
+        "第一部分：结构化学习文档（概念定义/原理剖析/案例讲解/易错点/总结/课后习题 5 道带答案）；\n"
+        "第二部分：一个 ```mermaid 代码块的 mindmap 思维导图，层级不少于 3 层。\n"
+        "学科：{subject}；难度：{difficulty}。\n知识点：{prompt}"
+    ),
+    'lecture': (
+        "你是学习讲义撰写专家。基于以下知识点撰写结构化学习讲义，包含：\n"
+        "概念定义、原理剖析、案例讲解、易错点、小结、课后习题 5 道带答案。\n"
+        "学科：{subject}；难度：{difficulty}。\n知识点：{prompt}"
+    ),
+    'summary': (
+        "把以下知识点提炼为不超过 300 字的高浓度总结，结构化分点，关键术语加粗。\n"
+        "学科：{subject}；难度：{difficulty}。\n知识点：{prompt}"
+    ),
+    'quiz': (
+        "基于以下知识点出 5 道练习题（4 选择 + 1 简答），每题附标准答案与解析，"
+        "选择题用 markdown 列表给出选项。\n学科：{subject}；难度：{difficulty}。\n知识点：{prompt}"
+    ),
+}
+
+MATERIAL_KIND_NAMES = {
+    'video_script': '视频脚本包', 'mindmap': '讲义+思维导图', 'lecture': '结构化讲义',
+    'summary': '高浓度摘要', 'quiz': '练习题集',
+}
+
+
+def _degraded_material(kind, prompt, subject, difficulty):
+    """AI 不可用时的降级框架大纲（对齐项目降级哲学，首行标注来源）"""
+    name = MATERIAL_KIND_NAMES.get(kind, '学习资料')
+    return (
+        "【AI 服务暂不可用】以下为系统生成的资料框架大纲，可稍后重新生成完整内容。\n\n"
+        f"# {prompt} · {name}\n\n"
+        "## 概念定义\n（是什么：用一句话给出本质定义，再展开术语解释）\n\n"
+        "## 原理剖析\n（为什么成立：推导/机制/适用条件）\n\n"
+        "## 典型案例\n（怎么用：结合{subject}场景的 1-2 个例子）\n\n"
+        "## 易错提醒\n（常见误区与辨析）\n\n"
+        "## 本讲小结\n（3-5 条要点回顾）\n\n"
+        "## 自测题\n（3-5 道，附答案）\n"
+    ).replace('{subject}', subject or '本专业')
+
+
+def ai_generate_material(session, prompt: str, kind: str = 'lecture',
+                         subject: str = None, difficulty: str = None):
+    """生成一份学习资料 markdown。返回 (content, degraded)；AI 失败降级为框架大纲。
+
+    session: SQLAlchemy Session（本函数不读写库，与同类函数签名保持一致）。
+    """
+    tpl = MATERIAL_TEMPLATES.get(kind)
+    if not tpl:
+        raise ValueError("未知资料类型：" + str(kind))
+    text = tpl.format(prompt=prompt.strip()[:500], subject=subject or '通用',
+                      difficulty=difficulty or '常规')
+    try:
+        content = ai_client.chat(
+            [{'role': 'system', 'content': '你是面向高校师生的自学习平台内容生成助手，用简体中文 markdown 输出，结构清晰。'},
+             {'role': 'user', 'content': text}],
+            temp=0.6, max_tok=4000)
+        if content and content.strip():
+            return content.strip(), False
+    except Exception as e:
+        logger.warning(f"ai_generate_material degraded: {e}")
+    return _degraded_material(kind, prompt, subject, difficulty), True
+
+
+def ai_decide_material_kind(session, prompt: str) -> str:
+    """AI 判断知识点体量：零散单一概念→video_script，体系性专题→mindmap。失败默认 mindmap。"""
+    rule = (
+        "判断以下知识点描述属于哪种体量，只输出一个 JSON："
+        '{"kind":"small"或"system"}。规则：零散、简短、单一概念、3-6 分钟能讲完→small；'
+        "章节、模块、多关联知识点的体系性主题→system。只输出 JSON。\n"
+        f"知识点：{(prompt or '')[:300]}"
+    )
+    try:
+        content = ai_client.chat([{'role': 'user', 'content': rule}], temp=0.1, max_tok=64)
+        obj = json.loads(clean_json_text(content))
+        return 'video_script' if obj.get('kind') == 'small' else 'mindmap'
+    except Exception as e:
+        logger.warning(f"ai_decide_material_kind fallback to mindmap: {e}")
+        return 'mindmap'

@@ -4,12 +4,16 @@
 功能：错题本、自由刷题、学习计划、学习报告聚合、AI 答疑、
      专业学习路径 + 知识图谱（知识点/边/路径/选课/进度/资源）
 """
+import json
 import math
+import os
 import re
+import time
+import uuid
 from collections import defaultdict
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, Response, stream_with_context, send_from_directory
 from sqlalchemy import func, or_
 from sqlalchemy.exc import IntegrityError
 
@@ -24,12 +28,19 @@ from database.models import (
     UserPathEnrollment, UserNodeProgress, LearningResource,
     KnowledgeMastery, UserKpNote, QuizAttempt, QuizAttemptAnswer,
     ReviewItem, StudyCheckin, PathCertificate, DailyTask,
+    AiChatConversation, AiChatMessage, FocusSession, StudyNote, ExplainCard,
+    StudyFolder, StudyMaterial, MaterialFavorite, MaterialReport, UserFollow,
+    AiUsageLog, AiQuota,
     question_knowledge_point,
 )
 from utils.security import limiter, RateLimitConfig, verify_token
+from utils.uploads import save_upload, ALLOWED_EXTENSIONS as _UPLOAD_EXTS
 from utils.timeutil import utcnow, iso_local, parse_dt
 from utils.logger import logger
 from api import learning_engine as eng
+from utils.permissions import require_teacher
+from ai_service.gate import (check_ai_quota, charge_ai_quota, log_ai_usage,
+                             get_quota_info)
 
 api_learning_bp = Blueprint('api_learning', __name__)
 
@@ -45,6 +56,7 @@ def api_wrong_list():
 
     is_mastered = request.args.get('is_mastered')
     source_type = request.args.get('source_type')
+    q_kw = (request.args.get('q') or '').strip()
     page = int(request.args.get('page', 1))
     per_page = int(request.args.get('per_page', 20))
 
@@ -53,6 +65,11 @@ def api_wrong_list():
         q = q.filter_by(is_mastered=(is_mastered.lower() == 'true'))
     if source_type:
         q = q.filter_by(source_type=source_type)
+    if q_kw:
+        # v4.4 关键词检索：题干/知识点模糊匹配
+        like = f'%{q_kw}%'
+        q = q.join(Question, WrongAnswerRecord.question_id == Question.id).filter(
+            or_(Question.content.like(like), Question.knowledge.like(like)))
 
     total = q.count()
     records = q.order_by(WrongAnswerRecord.last_wrong_at.desc()) \
@@ -245,7 +262,24 @@ def api_practice_answer(session_id):
     if not question:
         return jsonify({'message': '题目不存在'}), 404
 
-    is_correct = _check_answer(question.type, student_answer, question.answer)
+    # v4.10 编程题 OJ 自动评测（与考试判分链路一致）：有用例且非空代码直接判 AC/WA，
+    # 未作答判 CE；无用例/非 Python 语言回落原链路（主观题 is_correct=None 待人工）
+    oj_info = None
+    is_correct = None
+    if question.type == 'programming' and getattr(question, 'test_cases', None):
+        from oj.services import grade as oj_grade
+        if not student_answer:
+            oj_info = {'verdict': 'CE', 'passed': 0,
+                       'total': len(question.test_cases), 'score_ratio': 0}
+            is_correct = False
+        else:
+            r = oj_grade(student_answer, 'python', question.test_cases)
+            if r['supported']:
+                is_correct = r['verdict'] == 'AC'
+                oj_info = {'verdict': r['verdict'], 'passed': r['passed'], 'total': r['total'],
+                           'score_ratio': round(r['passed'] / r['total'], 4) if r['total'] else 0}
+    if is_correct is None:
+        is_correct = _check_answer(question.type, student_answer, question.answer)
 
     pa = PracticeAnswer.query.filter_by(session_id=sess.id, question_id=question_id).first()
     if pa:
@@ -278,13 +312,16 @@ def api_practice_answer(session_id):
                                  [(question_id, student_answer, question.answer)])
     db.session.commit()
 
-    return jsonify({
+    resp = {
         'is_correct': is_correct,
         'correct_answer': question.answer,
         'analysis': question.analysis,
         'knowledge': question.knowledge,
         'type': question.type,
-    })
+    }
+    if oj_info:
+        resp['oj'] = oj_info
+    return jsonify(resp)
 
 
 @api_learning_bp.route('/learning/practice/<int:session_id>/submit', methods=['POST'])
@@ -1099,27 +1136,44 @@ def api_learning_ai_chat():
     if not cleaned or cleaned[-1]['role'] != 'user':
         return jsonify({'message': '请输入您的问题'}), 400
 
+    allowed, _quota = check_ai_quota(user)
+    if not allowed:
+        return jsonify({'message': '今日 AI 额度已用完，请明天再来或咨询教师调整配额'}), 429
+
+    t0 = time.perf_counter()
     try:
         from ai_service.services import ai_chat_reply
         reply = ai_chat_reply(db.session, cleaned, context)
     except Exception:
         logger.exception('AI 学习助手对话失败')
+        log_ai_usage(user.id, 'chat', 'fail', (time.perf_counter() - t0) * 1000)
+        db.session.commit()
         return jsonify({'message': 'AI 服务暂不可用，请稍后重试'}), 500
+    charge_ai_quota(user)
+    log_ai_usage(user.id, 'chat', 'success', (time.perf_counter() - t0) * 1000)
+    db.session.commit()
     return jsonify({'reply': reply})
 
 
 # ── 内部同步：考试结束后收录错题 ────────────────────────────────────
 # 被 execution_routes.py 的 submit 流程调用
-def sync_wrong_from_exam(user_id, exam_id):
+def sync_wrong_from_exam(user_id, exam_id, session_id=None):
     exam = db.session.get(Exam, exam_id)
     if not exam:
         return 0
-    session = ExamSession.query.filter_by(exam_id=exam_id, student_id=user_id, status='submitted').first()
+    # v4.3 多次作答：优先同步本次交卷会话，否则取最近一次已交卷会话
+    if session_id:
+        session = db.session.get(ExamSession, session_id)
+    else:
+        session = ExamSession.query.filter_by(
+            exam_id=exam_id, student_id=user_id, status='submitted').order_by(ExamSession.id.desc()).first()
     if not session:
         return 0
-    wrong = [(a.question_id, a.student_answer, a.question.answer)
+    qids = {a.question_id for a in Answer.query.filter_by(session_id=session.id).all()}
+    answer_map = {q.id: q.answer for q in Question.query.filter(Question.id.in_(qids)).all()} if qids else {}
+    wrong = [(a.question_id, a.student_answer, answer_map.get(a.question_id))
              for a in Answer.query.filter_by(session_id=session.id).all()
-             if a.is_correct is False and a.question]
+             if a.is_correct is False and a.question_id in answer_map]
     return sync_wrong_from_answers(user_id, 'exam', exam_id, wrong)
 
 
@@ -1138,6 +1192,8 @@ def _wrong_record_to_dict(r):
         'is_mastered': r.is_mastered,
         'wrong_count': r.wrong_count,
         'source_type': r.source_type, 'source_id': r.source_id,
+        'ai_analysis': r.ai_analysis,
+        'ai_analyzed_at': iso_local(r.ai_analyzed_at) if r.ai_analyzed_at else None,
         'last_wrong_at': iso_local(r.last_wrong_at),
         'mastered_at': iso_local(r.mastered_at) if r.mastered_at else None,
     }
@@ -2223,6 +2279,15 @@ def api_today():
     week = eng.week_checkin_days(user.id, today)
     today_ci = StudyCheckin.query.filter_by(user_id=user.id, day=today).first()
 
+    # 1.1) v4.4 今日专注计时概览（进行中会话 + 今日完成总时长，UTC 日口径与打卡一致）
+    running_focus = FocusSession.query.filter_by(user_id=user.id, status='running') \
+        .order_by(FocusSession.id.desc()).first()
+    day_start = datetime(today.year, today.month, today.day, tzinfo=timezone.utc)
+    today_focus = FocusSession.query.filter_by(user_id=user.id, status='finished') \
+        .filter(FocusSession.started_at >= day_start,
+                FocusSession.started_at < day_start + timedelta(days=1)).all()
+    focus_today_sec = sum(f.actual_sec or 0 for f in today_focus)
+
     # 2) 今日待办任务：active 计划未完成任务，按 order 取前 8
     plans = StudyPlan.query.filter_by(user_id=user.id, status='active').all()
     todo = []
@@ -2282,6 +2347,10 @@ def api_today():
         'streak_days': streak,
         'checked_in_today': bool(today_ci),
         'today_minutes': (today_ci.minutes if today_ci else 0),
+        'today_mood': today_ci.mood if today_ci else None,
+        'today_note': today_ci.content if today_ci else None,
+        'focus_today_sec': focus_today_sec,
+        'running_focus': _focus_to_dict(running_focus) if running_focus else None,
         'week_days': week,
         'todo_tasks': todo,
         'daily_tasks': [_daily_task_to_dict(t) for t in daily_tasks],
@@ -2937,3 +3006,1267 @@ def _certificate_to_dict(c, brief=False):
         d['summary'] = c.summary or {}
         d['username'] = c.user.username if c.user else None
     return d
+
+
+# ══ v4.4 学习体验升级：AI 会话持久化/流式 · 错题归因 · 专注计时 · 打卡心情 · 自由笔记 · 讲解卡 · 图片上传 ══
+
+# ── AI 学习助手会话 ──────────────────────────────────────────────
+
+def _conversation_to_dict(c, with_unread=False):
+    return {'id': c.id, 'title': c.title, 'context': c.context,
+            'message_count': len(c.messages),
+            'created_at': iso_local(c.created_at), 'updated_at': iso_local(c.updated_at)}
+
+
+@api_learning_bp.route('/learning/ai-conversations', methods=['GET'])
+def api_ai_conversation_list():
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    convs = AiChatConversation.query.filter_by(user_id=user.id) \
+        .order_by(AiChatConversation.updated_at.desc()).limit(50).all()
+    return jsonify({'items': [_conversation_to_dict(c) for c in convs]})
+
+
+@api_learning_bp.route('/learning/ai-conversations', methods=['POST'])
+@limiter.limit(RateLimitConfig.DATA_WRITE)
+def api_ai_conversation_create():
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    data = request.get_json(silent=True) or {}
+    conv = AiChatConversation(
+        user_id=user.id,
+        title=(str(data.get('title') or '').strip() or '新的对话')[:100],
+        context=str(data.get('context') or '').strip()[:60] or None,
+    )
+    db.session.add(conv)
+    db.session.commit()
+    return jsonify({'message': '已创建', 'conversation': _conversation_to_dict(conv)})
+
+
+@api_learning_bp.route('/learning/ai-conversations/<int:cid>/messages', methods=['GET'])
+def api_ai_conversation_messages(cid):
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    conv = db.session.get(AiChatConversation, cid)
+    if not conv or conv.user_id != user.id:
+        return jsonify({'message': '会话不存在'}), 404
+    items = sorted(conv.messages, key=lambda m: m.id)
+    return jsonify({
+        'conversation': _conversation_to_dict(conv),
+        'items': [{'id': m.id, 'role': m.role, 'content': m.content,
+                   'degraded': m.degraded, 'created_at': iso_local(m.created_at)} for m in items],
+    })
+
+
+@api_learning_bp.route('/learning/ai-conversations/<int:cid>', methods=['DELETE'])
+@limiter.limit(RateLimitConfig.DATA_WRITE)
+def api_ai_conversation_delete(cid):
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    conv = db.session.get(AiChatConversation, cid)
+    if not conv or conv.user_id != user.id:
+        return jsonify({'message': '会话不存在'}), 404
+    db.session.delete(conv)
+    db.session.commit()
+    return jsonify({'message': '已删除'})
+
+
+@api_learning_bp.route('/learning/ai-chat/stream', methods=['POST'])
+@limiter.limit(RateLimitConfig.AI_GENERATE)
+def api_learning_ai_chat_stream():
+    """SSE 流式学习助手对话：逐 token 推送 delta，完成后双端消息落库；
+    AI 不可用时推送规则化降级回复并标记 degraded"""
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    data = request.get_json(silent=True) or {}
+    message = str(data.get('message') or '').strip()[:4000]
+    context = str(data.get('context') or '').strip()[:600]
+    if not message:
+        return jsonify({'message': '请输入您的问题'}), 400
+
+    allowed, _quota = check_ai_quota(user)
+    if not allowed:
+        return jsonify({'message': '今日 AI 额度已用完，请明天再来或咨询教师调整配额'}), 429
+    t0 = time.perf_counter()
+
+    cid = data.get('conversation_id')
+    conv = db.session.get(AiChatConversation, cid) if cid else None
+    if conv and conv.user_id != user.id:
+        return jsonify({'message': '会话不存在'}), 404
+    if not conv:
+        conv = AiChatConversation(user_id=user.id, title=message[:30],
+                                  context=context[:60] or None)
+        db.session.add(conv)
+        db.session.flush()
+
+    history = [{'role': m.role, 'content': m.content}
+               for m in sorted(conv.messages, key=lambda m: m.id)]
+    window = (history + [{'role': 'user', 'content': message}])[-12:]
+    db.session.add(AiChatMessage(conversation_id=conv.id, role='user', content=message))
+    db.session.commit()   # 用户消息先落库，流式期间不持有事务
+
+    from ai_service.services import build_chat_system, chat_stream_iter
+    system = build_chat_system(context)
+
+    def event_gen():
+        pieces = []
+        yield f"data: {json.dumps({'conversation_id': conv.id}, ensure_ascii=False)}\n\n"
+        try:
+            for delta in chat_stream_iter(window, system):
+                pieces.append(delta)
+                yield f"data: {json.dumps({'delta': delta}, ensure_ascii=False)}\n\n"
+        finally:
+            full = ''.join(pieces)
+            degraded = full.startswith('【AI 服务暂不可用')
+            if full:
+                db.session.add(AiChatMessage(conversation_id=conv.id, role='assistant',
+                                             content=full[:8000], degraded=degraded))
+                charge_ai_quota(user)
+            log_ai_usage(user.id, 'chat_stream',
+                         'degraded' if degraded else ('success' if full else 'fail'),
+                         (time.perf_counter() - t0) * 1000)
+            conv.updated_at = utcnow()
+            db.session.commit()
+            yield f"data: {json.dumps({'done': True, 'degraded': degraded}, ensure_ascii=False)}\n\n"
+
+    return Response(stream_with_context(event_gen()), mimetype='text/event-stream',
+                    headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+
+# ── 错题逐题 AI 归因 ────────────────────────────────────────
+
+def _rule_wrong_analysis(question, wrong_answer, wrong_count):
+    """AI 不可用时的规则化归因兑底：基于错答形态给出通用建议"""
+    objective = question.type in ('single_choice', 'multiple_choice', 'true_false', 'fill_blank')
+    lines = [f"本题考察：{question.knowledge or question.type}。"]
+    if not (wrong_answer or '').strip():
+        lines.append('本次未作答，建议优先补学时并重新挑战本题。')
+    elif objective:
+        lines.append('答案与正确答案不一致，常见原因是概念辨析不清或审题疏漏，' '请逐条对照解析排查干扰项。')
+    else:
+        lines.append('主观题作答与参考答案存在差距，建议对照解析拆解得分点，组齐答题提纲。')
+    if (wrong_count or 1) >= 2:
+        lines.append('该题已多次答错，建议加入今日复习队列重点攻克。')
+    return '\n'.join(lines)
+
+
+@api_learning_bp.route('/learning/wrong-records/<int:wr_id>/analyze', methods=['POST'])
+@limiter.limit(RateLimitConfig.AI_GENERATE)
+def api_wrong_analyze(wr_id):
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    rec = db.session.get(WrongAnswerRecord, wr_id)
+    if not rec or rec.user_id != user.id:
+        return jsonify({'message': '错题记录不存在'}), 404
+    question = rec.question
+    if not question:
+        return jsonify({'message': '关联题目已不存在，无法分析'}), 400
+
+    source = 'ai'
+    t0 = time.perf_counter()
+    try:
+        from ai_service.services import ai_analyze_wrong_answer
+        analysis = ai_analyze_wrong_answer(db.session, question,
+                                           rec.wrong_answer, rec.wrong_count or 1)
+    except Exception:
+        logger.exception('错题 AI 归因失败，降级规则建议')
+        analysis = _rule_wrong_analysis(question, rec.wrong_answer, rec.wrong_count or 1)
+        source = 'rule'
+    log_ai_usage(user.id, 'wrong_analyze',
+                 'degraded' if source == 'rule' else 'success',
+                 (time.perf_counter() - t0) * 1000)
+    rec.ai_analysis = (analysis or '').strip()[:4000]
+    rec.ai_analyzed_at = utcnow()
+    db.session.commit()
+    return jsonify({'analysis': rec.ai_analysis, 'source': source,
+                    'ai_analyzed_at': iso_local(rec.ai_analyzed_at)})
+
+
+# ── 专注计时（番茄钟/正计时） ──────────────────────────────────
+
+_FOCUS_MAX_MIN = 180   # 单次计划上限 3 小时
+
+
+def _focus_to_dict(f):
+    elapsed = None
+    if f.status == 'running' and f.started_at:
+        elapsed = max(0, int((utcnow() - f.started_at).total_seconds()))
+    return {'id': f.id, 'topic': f.topic, 'mode': f.mode,
+            'planned_min': f.planned_min, 'actual_sec': f.actual_sec,
+            'status': f.status, 'elapsed_sec': elapsed,
+            'started_at': iso_local(f.started_at),
+            'ended_at': iso_local(f.ended_at) if f.ended_at else None}
+
+
+@api_learning_bp.route('/learning/focus/sessions', methods=['POST'])
+@limiter.limit(RateLimitConfig.DATA_WRITE)
+def api_focus_start():
+    """开始专注会话：已有进行中会话则自动作废（dropped）后新建"""
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    data = request.get_json(silent=True) or {}
+    mode = data.get('mode') if data.get('mode') in ('pomodoro', 'stopwatch') else 'pomodoro'
+    try:
+        planned = int(data.get('planned_min') or 25)
+    except (TypeError, ValueError):
+        planned = 25
+    planned = max(1, min(planned, _FOCUS_MAX_MIN))
+
+    stale = FocusSession.query.filter_by(user_id=user.id, status='running').all()
+    now = utcnow()
+    for s in stale:
+        s.status = 'dropped'
+        s.actual_sec = max(0, int((now - s.started_at).total_seconds()))
+        s.ended_at = now
+    f = FocusSession(user_id=user.id, topic=str(data.get('topic') or '').strip()[:200] or None,
+                     mode=mode, planned_min=planned)
+    db.session.add(f)
+    db.session.commit()
+    return jsonify({'message': '已开始', 'session': _focus_to_dict(f)})
+
+
+@api_learning_bp.route('/learning/focus/sessions/<int:fid>/finish', methods=['POST'])
+@limiter.limit(RateLimitConfig.DATA_WRITE)
+def api_focus_finish(fid):
+    """结束专注会话：服务端按起止时间结算时长；有效专注（≥1分钟）计入当日打卡分钟数"""
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    f = db.session.get(FocusSession, fid)
+    if not f or f.user_id != user.id:
+        return jsonify({'message': '专注会话不存在'}), 404
+    if f.status != 'running':
+        return jsonify({'message': '该会话已结束', 'session': _focus_to_dict(f)})
+    data = request.get_json(silent=True) or {}
+    abort_early = bool(data.get('abandoned'))
+    now = utcnow()
+    f.actual_sec = max(0, int((now - f.started_at).total_seconds()))
+    f.ended_at = now
+    f.status = 'dropped' if abort_early else 'finished'
+    minutes = f.actual_sec // 60
+    if f.status == 'finished' and minutes >= 1:
+        eng.touch_checkin(user.id, minutes=minutes)
+    db.session.commit()
+    return jsonify({'message': '已结束', 'session': _focus_to_dict(f),
+                    'checkin_minutes': minutes if f.status == 'finished' else 0})
+
+
+@api_learning_bp.route('/learning/focus/stats', methods=['GET'])
+def api_focus_stats():
+    """近 N 日专注时长统计（默认 14 天）：每日分钟数 + 计划达成率"""
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    try:
+        days = max(1, min(int(request.args.get('days') or 14), 90))
+    except (TypeError, ValueError):
+        days = 14
+    since = utcnow() - timedelta(days=days)
+    items = FocusSession.query.filter_by(user_id=user.id, status='finished') \
+        .filter(FocusSession.started_at >= since).all()
+    per_day = defaultdict(lambda: {'sec': 0, 'planned_sec': 0, 'sessions': 0})
+    for f in items:
+        # 与打卡一致：UTC 日口径
+        key = f.started_at.astimezone(timezone.utc).date().isoformat() if f.started_at else None
+        if not key:
+            continue
+        per_day[key]['sec'] += f.actual_sec or 0
+        per_day[key]['planned_sec'] += (f.planned_min or 0) * 60
+        per_day[key]['sessions'] += 1
+    total_sec = sum(v['sec'] for v in per_day.values())
+    return jsonify({'days': days, 'total_min': total_sec // 60,
+                    'per_day': [{'day': k, 'minutes': v['sec'] // 60,
+                                 'planned_minutes': v['planned_sec'] // 60,
+                                 'sessions': v['sessions']} for k, v in sorted(per_day.items())]})
+
+
+# ── 打卡心情与日志 ──────────────────────────────────────
+
+_MOODS = ('happy', 'calm', 'tired', 'frustrated')
+
+
+@api_learning_bp.route('/learning/checkin-feel', methods=['POST'])
+@limiter.limit(RateLimitConfig.DATA_WRITE)
+def api_checkin_feel():
+    """提交/更新今日打卡心情与总结（行为打卡之外的主动记录，可反复修改）"""
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    data = request.get_json(silent=True) or {}
+    mood = str(data.get('mood') or '').strip()
+    content = str(data.get('content') or '').strip()
+    if mood and mood not in _MOODS:
+        return jsonify({'message': '心情取值不合法'}), 400
+    if len(content) > 1000:
+        return jsonify({'message': '今日总结不能超过 1000 字'}), 400
+    if not mood and not content:
+        return jsonify({'message': '请至少选择心情或填写总结'}), 400
+    c = eng.touch_checkin(user.id)
+    if mood:
+        c.mood = mood
+    if content:
+        c.content = content[:1000]
+    db.session.commit()
+    return jsonify({'message': '已记录', 'day': c.day.isoformat(),
+                    'mood': c.mood, 'content': c.content})
+
+
+@api_learning_bp.route('/learning/checkin-calendar', methods=['GET'])
+def api_checkin_calendar():
+    """月度打卡日历：每日分钟数/心情/是否打卡，驱动热力图与心情趋势"""
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    raw = request.args.get('month') or utcnow().strftime('%Y-%m')
+    try:
+        y, m = (int(x) for x in raw.split('-')[:2])
+        first = date(y, m, 1)
+    except (ValueError, TypeError):
+        return jsonify({'message': 'month 格式应为 YYYY-MM'}), 400
+    nxt = date(y + (m == 12), (m % 12) + 1, 1)
+    rows = StudyCheckin.query.filter_by(user_id=user.id) \
+        .filter(StudyCheckin.day >= first, StudyCheckin.day < nxt).all()
+    return jsonify({'month': raw, 'days': [{
+        'day': c.day.isoformat(), 'minutes': c.minutes or 0,
+        'tasks_done': c.tasks_done or 0, 'mood': c.mood,
+        'content': (c.content or '')[:120] or None,
+    } for c in sorted(rows, key=lambda x: x.day)]})
+
+
+# ── 自由学习笔记 ──────────────────────────────────────
+
+_NOTE_CONTENT_MAX = 20000
+
+
+def _note_to_dict(n, brief=False):
+    d = {'id': n.id, 'title': n.title, 'category': n.category,
+         'tags': n.tags or [], 'pinned': bool(n.pinned), 'source': n.source,
+         'attachments': [{'filename': a.get('filename'), 'size': a.get('size', 0)}
+                         for a in (n.attachment_json or [])],
+         'created_at': iso_local(n.created_at), 'updated_at': iso_local(n.updated_at)}
+    if brief:
+        d['excerpt'] = re.sub(r'[#*`>\-]', '', n.content or '')[:100]
+    else:
+        d['content'] = n.content
+    return d
+
+
+def _clean_note_tags(raw):
+    """标签列表清洗：去重、去空、每项≤20字、最多 8 个"""
+    if not isinstance(raw, list):
+        return []
+    out, seen = [], set()
+    for t in raw:
+        t = str(t or '').strip()[:20]
+        if t and t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out[:8]
+
+
+@api_learning_bp.route('/learning/notes', methods=['GET'])
+def api_note_list():
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    kw = (request.args.get('q') or '').strip()
+    tag = (request.args.get('tag') or '').strip()
+    category = (request.args.get('category') or '').strip()
+    query = StudyNote.query.filter_by(user_id=user.id)
+    if kw:
+        like = f'%{kw}%'
+        query = query.filter(or_(StudyNote.title.like(like), StudyNote.content.like(like)))
+    if tag:
+        # tags 为 JSON 字符串数组，用序列化后的带引号片段精确匹配元素
+        query = query.filter(StudyNote.tags.like(f'%"{tag}"%'))
+    if category:
+        query = query.filter_by(category=category)
+    items = query.order_by(StudyNote.pinned.desc(), StudyNote.updated_at.desc()).limit(200).all()
+    all_tags = sorted({t for n in StudyNote.query.filter_by(user_id=user.id).all()
+                       for t in (n.tags or [])})
+    categories = sorted({n.category for n in StudyNote.query.filter_by(user_id=user.id).all()
+                         if n.category})
+    return jsonify({'total': len(items),
+                    'items': [_note_to_dict(n, brief=True) for n in items],
+                    'tags': all_tags, 'categories': categories})
+
+
+@api_learning_bp.route('/learning/notes', methods=['POST'])
+@limiter.limit(RateLimitConfig.DATA_WRITE)
+def api_note_create():
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    data = request.get_json(silent=True) or {}
+    title = str(data.get('title') or '').strip()
+    content = str(data.get('content') or '').strip()
+    if not title:
+        return jsonify({'message': '笔记标题不能为空'}), 400
+    if len(content) > _NOTE_CONTENT_MAX:
+        return jsonify({'message': f'笔记内容不能超过 {_NOTE_CONTENT_MAX} 字'}), 400
+    n = StudyNote(user_id=user.id, title=title[:200], content=content,
+                  category=str(data.get('category') or '').strip()[:50] or None,
+                  tags=_clean_note_tags(data.get('tags')))
+    db.session.add(n)
+    db.session.commit()
+    return jsonify({'message': '已创建', 'note': _note_to_dict(n)})
+
+
+@api_learning_bp.route('/learning/notes/<int:nid>', methods=['GET'])
+def api_note_detail(nid):
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    n = db.session.get(StudyNote, nid)
+    if not n or n.user_id != user.id:
+        return jsonify({'message': '笔记不存在'}), 404
+    return jsonify(_note_to_dict(n))
+
+
+@api_learning_bp.route('/learning/notes/<int:nid>', methods=['PUT'])
+@limiter.limit(RateLimitConfig.DATA_WRITE)
+def api_note_update(nid):
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    n = db.session.get(StudyNote, nid)
+    if not n or n.user_id != user.id:
+        return jsonify({'message': '笔记不存在'}), 404
+    data = request.get_json(silent=True) or {}
+    if 'title' in data:
+        title = str(data.get('title') or '').strip()
+        if not title:
+            return jsonify({'message': '笔记标题不能为空'}), 400
+        n.title = title[:200]
+    if 'content' in data:
+        content = str(data.get('content') or '')
+        if len(content) > _NOTE_CONTENT_MAX:
+            return jsonify({'message': f'笔记内容不能超过 {_NOTE_CONTENT_MAX} 字'}), 400
+        n.content = content
+    if 'category' in data:
+        n.category = str(data.get('category') or '').strip()[:50] or None
+    if 'tags' in data:
+        n.tags = _clean_note_tags(data.get('tags'))
+    if 'pinned' in data:
+        n.pinned = bool(data.get('pinned'))
+    db.session.commit()
+    return jsonify({'message': '已保存', 'note': _note_to_dict(n)})
+
+
+@api_learning_bp.route('/learning/notes/<int:nid>', methods=['DELETE'])
+@limiter.limit(RateLimitConfig.DATA_WRITE)
+def api_note_delete(nid):
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    n = db.session.get(StudyNote, nid)
+    if not n or n.user_id != user.id:
+        return jsonify({'message': '笔记不存在'}), 404
+    db.session.delete(n)
+    db.session.commit()
+    return jsonify({'message': '已删除'})
+
+
+# ── 知识点讲解卡 ──────────────────────────────────────
+
+def _explain_to_dict(e):
+    kp = e.knowledge_point
+    return {'id': e.id, 'topic': e.topic, 'content': e.content,
+            'knowledge_point_id': e.knowledge_point_id,
+            'knowledge_point_name': kp.name if kp else None,
+            'created_at': iso_local(e.created_at)}
+
+
+@api_learning_bp.route('/learning/explain', methods=['POST'])
+@limiter.limit(RateLimitConfig.AI_GENERATE)
+def api_explain_generate():
+    """即问即讲：输入任意主题生成讲解卡并持久化；AI 不可用时降级为框架性提示"""
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    data = request.get_json(silent=True) or {}
+    topic = str(data.get('topic') or '').strip()
+    if not topic:
+        return jsonify({'message': '请输入讲解主题'}), 400
+    topic = topic[:200]
+
+    allowed, _quota = check_ai_quota(user)
+    if not allowed:
+        return jsonify({'message': '今日 AI 额度已用完，请明天再来或咨询教师调整配额'}), 429
+
+    # 命中库内知识点时把描述作为术语对齐提示传给 AI
+    kp = KnowledgePoint.query.filter(func.lower(KnowledgePoint.name) == topic.lower()).first() \
+        or KnowledgePoint.query.filter(KnowledgePoint.name.like(f'%{topic}%')).first()
+    source = 'ai'
+    t0 = time.perf_counter()
+    try:
+        from ai_service.services import ai_explain_topic
+        content = ai_explain_topic(db.session, topic, kp.description if kp else None)
+    except Exception:
+        logger.exception('AI 讲解卡生成失败，降级框架提示')
+        content = (
+            f"## 一句话说清楚\n「{topic}」的准确定义建议查阅课程资料或问 AI 学习助手获取。\n\n"
+            "## 建议行动\n- 在错题本搜索相关题目，从解析中反向理解概念\n"
+            "- 到学习路径中找到对应节点完成系统学习\n- AI 恢复后重新生成完整讲解卡\n\n"
+            "（AI 服务暂不可用，本卡片为系统自动生成的框架提示）"
+        )
+        source = 'rule'
+    charge_ai_quota(user)
+    log_ai_usage(user.id, 'explain',
+                 'degraded' if source == 'rule' else 'success',
+                 (time.perf_counter() - t0) * 1000)
+    card = ExplainCard(user_id=user.id, topic=topic, content=content[:8000],
+                       knowledge_point_id=kp.id if kp else None)
+    db.session.add(card)
+    db.session.commit()
+    return jsonify({'card': _explain_to_dict(card), 'source': source})
+
+
+@api_learning_bp.route('/learning/explain/list', methods=['GET'])
+def api_explain_list():
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    items = ExplainCard.query.filter_by(user_id=user.id) \
+        .order_by(ExplainCard.created_at.desc()).limit(50).all()
+    return jsonify({'items': [_explain_to_dict(e) for e in items]})
+
+
+@api_learning_bp.route('/learning/explain/<int:eid>', methods=['DELETE'])
+@limiter.limit(RateLimitConfig.DATA_WRITE)
+def api_explain_delete(eid):
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    card = db.session.get(ExplainCard, eid)
+    if not card or card.user_id != user.id:
+        return jsonify({'message': '讲解卡不存在'}), 404
+    db.session.delete(card)
+    db.session.commit()
+    return jsonify({'message': '已删除'})
+
+
+@api_learning_bp.route('/learning/explain/<int:eid>/to-note', methods=['POST'])
+@limiter.limit(RateLimitConfig.DATA_WRITE)
+def api_explain_to_note(eid):
+    """讲解卡一键转存为学习笔记"""
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    card = db.session.get(ExplainCard, eid)
+    if not card or card.user_id != user.id:
+        return jsonify({'message': '讲解卡不存在'}), 404
+    n = StudyNote(user_id=user.id, title=f"讲解卡·{card.topic}",
+                  content=card.content, category='讲解卡',
+                  tags=[card.knowledge_point.name] if card.knowledge_point else [],
+                  source='explain')
+    db.session.add(n)
+    db.session.commit()
+    return jsonify({'message': '已转存为笔记', 'note': _note_to_dict(n, brief=True)})
+
+
+# ── 学习附件上传（v4.6 统一白名单：文档/表格/压缩包/图片/视频/代码）────
+
+_UPLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'uploads')
+
+# 笔记配图内嵌仍限图片、≤5MB（统一白名单的子集）
+_NOTE_IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.gif', '.webp'}
+_NOTE_IMAGE_MAX_BYTES = 5 * 1024 * 1024
+
+
+@api_learning_bp.route('/learning/upload', methods=['POST'])
+@limiter.limit(RateLimitConfig.DATA_WRITE)
+def api_learning_upload():
+    """笔记配图内嵌上传：仅限图片、单文件≤5MB，UUID 命名存入 uploads/，复用 /uploads 静态通道"""
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    file = request.files.get('file')
+    if not file or not file.filename:
+        return jsonify({'message': '请选择文件'}), 400
+    ext = os.path.splitext(file.filename)[1].lower()
+    if ext not in _NOTE_IMAGE_EXTS:
+        return jsonify({'message': '仅支持 png/jpg/jpeg/gif/webp 图片'}), 400
+    file.stream.seek(0, os.SEEK_END)
+    size = file.stream.tell()
+    file.stream.seek(0)
+    if size > _NOTE_IMAGE_MAX_BYTES:
+        return jsonify({'message': '图片大小不能超过 5MB'}), 400
+    os.makedirs(_UPLOAD_DIR, exist_ok=True)
+    name = f"note_{uuid.uuid4().hex}{ext}"
+    file.save(os.path.join(_UPLOAD_DIR, name))
+    return jsonify({'message': '已上传', 'url': f'/uploads/{name}', 'name': file.filename})
+
+
+@api_learning_bp.route('/learning/attachments', methods=['POST'])
+@limiter.limit(RateLimitConfig.DATA_WRITE)
+def api_learning_attachment():
+    """学习附件上传（v4.6）：文档/表格(csv/xls/xlsx)/压缩包/图片/视频/代码，≤50MB；
+    传 note_id 时挂到本人笔记附件；否则仅落盘返回下载 url（供资料等场景引用）"""
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    file = request.files.get('file')
+    try:
+        stored, size = save_upload(file, 'learn_att', _UPLOAD_DIR)
+    except ValueError as e:
+        return jsonify({'message': str(e)}), 400
+    note_id = (request.form.get('note_id') or '').strip()
+    if note_id:
+        note = db.session.get(StudyNote, int(note_id or 0))
+        if not note or note.user_id != user.id:
+            return jsonify({'message': '笔记不存在'}), 404
+        if len(note.attachment_json or []) >= 9:
+            return jsonify({'message': '单条笔记最多 9 个附件'}), 400
+        atts = list(note.attachment_json or [])
+        atts.append({'filename': file.filename, 'stored_name': stored, 'size': size,
+                     'uploaded_at': utcnow().isoformat()})
+        note.attachment_json = atts
+        db.session.commit()
+        return jsonify({'message': '附件已上传', 'attachments': len(atts),
+                        'url': f'/learning/attachments/{note.id}/0/download'}), 201
+    return jsonify({'message': '已上传', 'url': f'/uploads/{stored}',
+                    'name': file.filename, 'size': size}), 201
+
+
+@api_learning_bp.route('/learning/attachments/<int:nid>/<int:idx>/download', methods=['GET'])
+def api_learning_attachment_download(nid, idx):
+    """笔记附件下载：仅本人（note 为个人资产）"""
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    note = db.session.get(StudyNote, nid)
+    if not note or note.user_id != user.id:
+        return jsonify({'message': '无权下载该附件'}), 403
+    atts = note.attachment_json or []
+    if idx < 0 or idx >= len(atts):
+        return jsonify({'message': '附件不存在'}), 404
+    att = atts[idx]
+    return send_from_directory(_UPLOAD_DIR, att['stored_name'],
+                               as_attachment=True, download_name=att.get('filename'))
+
+
+@api_learning_bp.route('/learning/attachments/<int:nid>/<int:idx>', methods=['DELETE'])
+def api_learning_attachment_delete(nid, idx):
+    """删除本人笔记附件"""
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    note = db.session.get(StudyNote, nid)
+    if not note or note.user_id != user.id:
+        return jsonify({'message': '笔记不存在'}), 404
+    atts = list(note.attachment_json or [])
+    if idx < 0 or idx >= len(atts):
+        return jsonify({'message': '附件不存在'}), 404
+    atts.pop(idx)
+    note.attachment_json = atts
+    db.session.commit()
+    return jsonify({'message': '已删除附件', 'attachments': len(atts)})
+
+
+# ═══════════ v4.5 学习社区：个人资料库 / 广场 / 社交 / AI 治理 ═══════════
+
+_MATERIAL_KINDS = ('video_script', 'mindmap', 'lecture', 'summary', 'quiz', 'manual')
+
+
+def _material_to_dict(m, with_content=False, current_user_id=None):
+    d = {'id': m.id, 'title': m.title, 'kind': m.kind, 'subject': m.subject,
+         'difficulty': m.difficulty, 'folder_id': m.folder_id, 'source': m.source,
+         'is_public': bool(m.is_public), 'views': m.views,
+         'status': m.status, 'knowledge_point_id': m.knowledge_point_id,
+         'author': m.user.username if m.user else None, 'owner_id': m.user_id,
+         'fav_count': len(m.favorites),
+         'excerpt': re.sub(r'[#*`>\-\n]', '', m.content or '')[:80],
+         'created_at': iso_local(m.created_at), 'updated_at': iso_local(m.updated_at)}
+    if current_user_id is not None:
+        d['is_favorited'] = any(f.user_id == current_user_id for f in m.favorites)
+    if with_content:
+        d['content'] = m.content
+    return d
+
+
+def _get_own_material(user, mid):
+    m = db.session.get(StudyMaterial, mid)
+    if not m or m.user_id != user.id:
+        return None, (jsonify({'message': '资料不存在'}), 404)
+    return m, None
+
+
+@api_learning_bp.route('/learning/materials/generate', methods=['POST'])
+@limiter.limit(RateLimitConfig.AI_GENERATE)
+def api_material_generate():
+    """AI 多形态资料生成：kind=auto 时先判体量再选形态；生成后自动入库（私有）"""
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    data = request.get_json(silent=True) or {}
+    prompt = str(data.get('prompt') or '').strip()
+    if not prompt:
+        return jsonify({'message': '请输入知识点主题'}), 400
+    prompt = prompt[:500]
+    kind = str(data.get('kind') or 'auto')
+    subject = str(data.get('subject') or '').strip()[:50] or None
+    difficulty = str(data.get('difficulty') or '').strip()[:20] or None
+
+    allowed, _quota = check_ai_quota(user)
+    if not allowed:
+        return jsonify({'message': '今日 AI 额度已用完，请明天再来或咨询教师调整配额'}), 429
+
+    from ai_service.services import ai_generate_material, ai_decide_material_kind
+    t0 = time.perf_counter()
+    decided_by = kind
+    if kind == 'auto':
+        kind = ai_decide_material_kind(db.session, prompt)
+    content, degraded = ai_generate_material(db.session, prompt, kind, subject, difficulty)
+
+    kp = KnowledgePoint.query.filter(func.lower(KnowledgePoint.name) == prompt.lower()).first()
+    m = StudyMaterial(user_id=user.id,
+                      folder_id=data.get('folder_id') or None,
+                      kind=kind, title=prompt[:200], content=content[:30000],
+                      subject=subject, difficulty=difficulty,
+                      knowledge_point_id=kp.id if kp else None, source='ai')
+    if m.folder_id:
+        folder = db.session.get(StudyFolder, m.folder_id)
+        if not folder or folder.user_id != user.id:
+            m.folder_id = None
+    db.session.add(m)
+    charge_ai_quota(user)
+    log_ai_usage(user.id, 'material:' + kind,
+                 'degraded' if degraded else 'success',
+                 (time.perf_counter() - t0) * 1000)
+    db.session.commit()
+    return jsonify({'material': _material_to_dict(m, with_content=True),
+                    'kind': kind, 'decided_by': decided_by,
+                    'source': 'rule' if degraded else 'ai'})
+
+
+@api_learning_bp.route('/learning/materials', methods=['GET'])
+def api_material_list():
+    """我的资料库：支持关键词/类型/文件夹/收藏（favorite=1 看收藏）筛选"""
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    q = (request.args.get('q') or '').strip()
+    kind = request.args.get('kind')
+    folder_id = request.args.get('folder_id', type=int)
+    fav_only = request.args.get('favorite') == '1'
+
+    if fav_only:
+        items = (MaterialFavorite.query.filter_by(user_id=user.id)
+                 .order_by(MaterialFavorite.id.desc()).all())
+        mats = [f.material for f in items
+                if f.material and (f.material.status == 'active' or f.material.user_id == user.id)]
+    else:
+        query = StudyMaterial.query.filter(StudyMaterial.user_id == user.id,\
+                                           StudyMaterial.status == 'active')
+        if q:
+            query = query.filter(or_(StudyMaterial.title.like(f'%{q}%'),
+                                     StudyMaterial.content.like(f'%{q}%')))
+        if kind in _MATERIAL_KINDS:
+            query = query.filter(StudyMaterial.kind == kind)
+        if folder_id is not None:
+            query = query.filter(StudyMaterial.folder_id == folder_id)
+        mats = query.order_by(StudyMaterial.updated_at.desc()).limit(200).all()
+    return jsonify({'items': [_material_to_dict(m, current_user_id=user.id) for m in mats],
+                    'total': len(mats)})
+
+
+@api_learning_bp.route('/learning/materials', methods=['POST'])
+@limiter.limit(RateLimitConfig.DATA_WRITE)
+def api_material_create():
+    """手写资料入库"""
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    data = request.get_json(silent=True) or {}
+    title = str(data.get('title') or '').strip()
+    if not title:
+        return jsonify({'message': '资料标题不能为空'}), 400
+    kind = data.get('kind') if data.get('kind') in _MATERIAL_KINDS else 'manual'
+    folder_id = data.get('folder_id') or None
+    if folder_id:
+        folder = db.session.get(StudyFolder, folder_id)
+        if not folder or folder.user_id != user.id:
+            folder_id = None
+    m = StudyMaterial(user_id=user.id, folder_id=folder_id, kind=kind,
+                      title=title[:200], content=str(data.get('content') or '')[:30000],
+                      subject=str(data.get('subject') or '').strip()[:50] or None,
+                      difficulty=str(data.get('difficulty') or '').strip()[:20] or None,
+                      source='manual')
+    db.session.add(m)
+    db.session.commit()
+    return jsonify({'message': '已保存', 'material': _material_to_dict(m)})
+
+
+@api_learning_bp.route('/learning/materials/<int:mid>', methods=['GET'])
+def api_material_detail(mid):
+    """资料详情：本人可看私有；他人仅可看公开且浏览数 +1；教师可监管看 active"""
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    m = db.session.get(StudyMaterial, mid)
+    if not m or m.status != 'active':
+        return jsonify({'message': '资料不存在'}), 404
+    is_owner = m.user_id == user.id
+    if not is_owner and not m.is_public and not user.is_teacher():
+        return jsonify({'message': '资料不存在'}), 404
+    if not is_owner:
+        m.views = (m.views or 0) + 1
+        db.session.commit()
+    return jsonify({'material': _material_to_dict(m, with_content=True,
+                                                  current_user_id=user.id)})
+
+
+@api_learning_bp.route('/learning/materials/<int:mid>', methods=['PUT'])
+@limiter.limit(RateLimitConfig.DATA_WRITE)
+def api_material_update(mid):
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    m, err = _get_own_material(user, mid)
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    if 'title' in data:
+        t = str(data.get('title') or '').strip()
+        if not t:
+            return jsonify({'message': '资料标题不能为空'}), 400
+        m.title = t[:200]
+    if 'content' in data:
+        m.content = str(data.get('content') or '')[:30000]
+    if 'folder_id' in data:
+        fid = data.get('folder_id') or None
+        if fid:
+            folder = db.session.get(StudyFolder, fid)
+            if not folder or folder.user_id != user.id:
+                return jsonify({'message': '文件夹不存在'}), 400
+        m.folder_id = fid
+    if 'subject' in data:
+        m.subject = str(data.get('subject') or '').strip()[:50] or None
+    if 'difficulty' in data:
+        m.difficulty = str(data.get('difficulty') or '').strip()[:20] or None
+    if 'is_public' in data:
+        m.is_public = bool(data.get('is_public'))
+    db.session.commit()
+    return jsonify({'message': '已保存', 'material': _material_to_dict(m)})
+
+
+@api_learning_bp.route('/learning/materials/<int:mid>', methods=['DELETE'])
+@limiter.limit(RateLimitConfig.DATA_WRITE)
+def api_material_delete(mid):
+    """删资料：收藏与举报记录一并清理（无级联，手动删）"""
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    m, err = _get_own_material(user, mid)
+    if err:
+        return err
+    MaterialFavorite.query.filter_by(material_id=m.id).delete(synchronize_session=False)
+    MaterialReport.query.filter_by(material_id=m.id).delete(synchronize_session=False)
+    db.session.delete(m)
+    db.session.commit()
+    return jsonify({'message': '已删除'})
+
+
+@api_learning_bp.route('/learning/materials/<int:mid>/favorite', methods=['POST'])
+@limiter.limit(RateLimitConfig.DATA_WRITE)
+def api_material_favorite_toggle(mid):
+    """收藏/取消收藏：仅对公开且未下架的资料生效，自己的资料不可收藏"""
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    m = db.session.get(StudyMaterial, mid)
+    if not m or m.status != 'active' or not m.is_public:
+        return jsonify({'message': '资料不存在或未公开'}), 404
+    if m.user_id == user.id:
+        return jsonify({'message': '不能收藏自己的资料'}), 400
+    exist = MaterialFavorite.query.filter_by(user_id=user.id, material_id=mid).first()
+    if exist:
+        db.session.delete(exist)
+        db.session.commit()
+        return jsonify({'message': '已取消收藏', 'favorited': False,
+                        'fav_count': len(m.favorites)})
+    db.session.add(MaterialFavorite(user_id=user.id, material_id=mid))
+    db.session.commit()
+    return jsonify({'message': '已收藏', 'favorited': True, 'fav_count': len(m.favorites)})
+
+
+# ── 资料库文件夹 ────────────────────────────────
+
+def _folder_to_dict(f, count_map=None):
+    d = {'id': f.id, 'name': f.name, 'parent_id': f.parent_id,
+         'created_at': iso_local(f.created_at)}
+    if count_map is not None:
+        d['material_count'] = count_map.get(f.id, 0)
+    return d
+
+
+@api_learning_bp.route('/learning/folders', methods=['GET'])
+def api_folder_list():
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    folders = StudyFolder.query.filter_by(user_id=user.id).order_by(StudyFolder.id).all()
+    rows = db.session.query(StudyMaterial.folder_id, func.count(StudyMaterial.id)) \
+        .filter(StudyMaterial.user_id == user.id,
+                StudyMaterial.status == 'active',
+                StudyMaterial.folder_id.isnot(None)) \
+        .group_by(StudyMaterial.folder_id).all()
+    count_map = {r[0]: r[1] for r in rows}
+    return jsonify({'items': [_folder_to_dict(f, count_map) for f in folders]})
+
+
+@api_learning_bp.route('/learning/folders', methods=['POST'])
+@limiter.limit(RateLimitConfig.DATA_WRITE)
+def api_folder_create():
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    data = request.get_json(silent=True) or {}
+    name = str(data.get('name') or '').strip()
+    if not name:
+        return jsonify({'message': '文件夹名称不能为空'}), 400
+    parent_id = data.get('parent_id') or None
+    if parent_id:
+        parent = db.session.get(StudyFolder, parent_id)
+        if not parent or parent.user_id != user.id:
+            return jsonify({'message': '父文件夹不存在'}), 400
+    f = StudyFolder(user_id=user.id, name=name[:50], parent_id=parent_id)
+    db.session.add(f)
+    db.session.commit()
+    return jsonify({'message': '已创建', 'folder': _folder_to_dict(f)})
+
+
+@api_learning_bp.route('/learning/folders/<int:fid>', methods=['PUT'])
+@limiter.limit(RateLimitConfig.DATA_WRITE)
+def api_folder_update(fid):
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    f = db.session.get(StudyFolder, fid)
+    if not f or f.user_id != user.id:
+        return jsonify({'message': '文件夹不存在'}), 404
+    data = request.get_json(silent=True) or {}
+    name = str(data.get('name') or '').strip()
+    if name:
+        f.name = name[:50]
+    db.session.commit()
+    return jsonify({'message': '已保存', 'folder': _folder_to_dict(f)})
+
+
+@api_learning_bp.route('/learning/folders/<int:fid>', methods=['DELETE'])
+@limiter.limit(RateLimitConfig.DATA_WRITE)
+def api_folder_delete(fid):
+    """删文件夹：子文件夹提根，夹内资料归根不连带删"""
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    f = db.session.get(StudyFolder, fid)
+    if not f or f.user_id != user.id:
+        return jsonify({'message': '文件夹不存在'}), 404
+    StudyFolder.query.filter_by(parent_id=fid, user_id=user.id) \
+        .update({'parent_id': f.parent_id}, synchronize_session=False)
+    StudyMaterial.query.filter_by(folder_id=fid, user_id=user.id) \
+        .update({'folder_id': None}, synchronize_session=False)
+    db.session.delete(f)
+    db.session.commit()
+    return jsonify({'message': '已删除'})
+
+
+# ── 公开资料广场与举报 ────────────────────────────
+
+@api_learning_bp.route('/learning/explore', methods=['GET'])
+def api_material_explore():
+    """资料广场：全员浏览公开且未下架的资料，支持搜索/筛选/最热最新排序"""
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    q = (request.args.get('q') or '').strip()
+    kind = request.args.get('kind')
+    subject = (request.args.get('subject') or '').strip()
+    sort = request.args.get('sort') or 'latest'
+
+    query = StudyMaterial.query.filter(StudyMaterial.is_public.is_(True),
+                                       StudyMaterial.status == 'active')
+    if q:
+        query = query.filter(or_(StudyMaterial.title.like(f'%{q}%'),
+                                 StudyMaterial.content.like(f'%{q}%')))
+    if kind in _MATERIAL_KINDS:
+        query = query.filter(StudyMaterial.kind == kind)
+    if subject:
+        query = query.filter(StudyMaterial.subject == subject)
+    if sort == 'hot':
+        # 热度 = 浏览量 + 收藏数×5，在应用层算（量级小，避免复杂 SQL）
+        mats = query.limit(500).all()
+        mats.sort(key=lambda m: (m.views or 0) + len(m.favorites) * 5,
+                  reverse=True)
+        mats = mats[:60]
+    else:
+        mats = query.order_by(StudyMaterial.updated_at.desc()).limit(60).all()
+    subjects = [r[0] for r in db.session.query(StudyMaterial.subject)
+                .filter(StudyMaterial.is_public.is_(True),
+                        StudyMaterial.status == 'active',
+                        StudyMaterial.subject.isnot(None)).distinct().limit(50).all()]
+    return jsonify({'items': [_material_to_dict(m, current_user_id=user.id) for m in mats],
+                    'subjects': subjects})
+
+
+@api_learning_bp.route('/learning/materials/<int:mid>/report', methods=['POST'])
+@limiter.limit(RateLimitConfig.DATA_WRITE)
+def api_material_report(mid):
+    """举报公开资料：同一人对同一资料待处理举报幂等"""
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    m = db.session.get(StudyMaterial, mid)
+    if not m or m.status != 'active' or not m.is_public:
+        return jsonify({'message': '资料不存在或未公开'}), 404
+    if m.user_id == user.id:
+        return jsonify({'message': '不能举报自己的资料'}), 400
+    exist = MaterialReport.query.filter_by(material_id=mid, reporter_id=user.id,
+                                           status='pending').first()
+    if exist:
+        return jsonify({'message': '您已举报过该资料，正在处理中'}), 409
+    data = request.get_json(silent=True) or {}
+    r = MaterialReport(material_id=mid, reporter_id=user.id,
+                       reason=str(data.get('reason') or '').strip()[:200])
+    db.session.add(r)
+    db.session.commit()
+    return jsonify({'message': '举报已提交，教师会尽快处理', 'report_id': r.id})
+
+
+@api_learning_bp.route('/learning/material-reports', methods=['GET'])
+def api_material_report_list():
+    """教师端：举报列表（默认待处理）"""
+    user, err = require_teacher(deny_msg='无权访问', unauth_msg='未登录')
+    if err:
+        return err
+    status = request.args.get('status') or 'pending'
+    rows = (MaterialReport.query.filter_by(status=status)
+            .order_by(MaterialReport.created_at.desc()).limit(100).all())
+    items = [{'id': r.id, 'material_id': r.material_id,
+              'material_title': r.material.title if r.material else None,
+              'author': r.material.user.username if r.material and r.material.user else None,
+              'reporter': r.reporter.username if r.reporter else None,
+              'reason': r.reason, 'status': r.status,
+              'note': r.note, 'created_at': iso_local(r.created_at)}
+             for r in rows]
+    return jsonify({'items': items})
+
+
+@api_learning_bp.route('/learning/material-reports/<int:rid>/handle', methods=['POST'])
+@limiter.limit(RateLimitConfig.DATA_WRITE)
+def api_material_report_handle(rid):
+    """教师处理举报：remove 下架资料并通知作者；reject 驳回"""
+    from api.notification_routes import create_notification
+    user, err = require_teacher(deny_msg='无权访问', unauth_msg='未登录')
+    if err:
+        return err
+    r = db.session.get(MaterialReport, rid)
+    if not r or r.status != 'pending':
+        return jsonify({'message': '举报不存在或已处理'}), 404
+    data = request.get_json(silent=True) or {}
+    action = data.get('action')
+    if action not in ('remove', 'reject'):
+        return jsonify({'message': '参数错误：action 须为 remove/reject'}), 400
+    note = str(data.get('note') or '').strip()[:200]
+    r.status = 'removed' if action == 'remove' else 'rejected'
+    r.handler_id = user.id
+    r.note = note
+    r.handled_at = utcnow()
+    if action == 'remove' and r.material:
+        r.material.status = 'removed'
+        r.material.is_public = False
+        create_notification(r.material.user_id, '您的公开资料已被下架',
+                            '《' + (r.material.title or '') + '》因举报经核实被下架，原因：'
+                            + (note or '违规内容') + '。修改后可重新公开。',
+                            type='warning',
+                            related_type='material', related_id=r.material.id, commit=False)
+    db.session.commit()
+    return jsonify({'message': '已下架' if action == 'remove' else '已驳回举报'})
+
+
+# ── 关注体系与公开主页 ──────────────────────────
+
+def _user_public_dict(target, viewer):
+    following = UserFollow.query.filter_by(follower_id=viewer.id,
+                                           followee_id=target.id).first() is not None
+    mutual = following and UserFollow.query.filter_by(follower_id=target.id,
+                                                      followee_id=viewer.id).first() is not None
+    return {'user_id': target.id, 'username': target.username,
+            'role': target.role, 'is_following': following, 'is_mutual': mutual,
+            'following_count': UserFollow.query.filter_by(follower_id=target.id).count(),
+            'fans_count': UserFollow.query.filter_by(followee_id=target.id).count()}
+
+
+@api_learning_bp.route('/learning/users/search', methods=['GET'])
+def api_user_search():
+    """按用户名搜索用户（排除机器人），附关注状态"""
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    q = (request.args.get('q') or '').strip()
+    if not q:
+        return jsonify({'items': []})
+    from database.models import RoleEnum
+    users = User.query.filter(User.role != RoleEnum.BOT,
+                              User.username.like(f'%{q}%')).limit(20).all()
+    items = []
+    for tu in users:
+        if tu.id == user.id:
+            continue
+        d = {'user_id': tu.id, 'username': tu.username, 'role': tu.role,
+             'public_count': StudyMaterial.query.filter_by(
+                 user_id=tu.id, is_public=True, status='active').count()}
+        d['is_following'] = UserFollow.query.filter_by(
+            follower_id=user.id, followee_id=tu.id).first() is not None
+        items.append(d)
+    return jsonify({'items': items})
+
+
+@api_learning_bp.route('/learning/users/<int:uid>/follow', methods=['POST'])
+@limiter.limit(RateLimitConfig.DATA_WRITE)
+def api_follow_toggle(uid):
+    """关注/取关：同一接口 toggle，互相关注即好友"""
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    if uid == user.id:
+        return jsonify({'message': '不能关注自己'}), 400
+    target = db.session.get(User, uid)
+    if not target or target.role == 'bot':
+        return jsonify({'message': '用户不存在'}), 404
+    exist = UserFollow.query.filter_by(follower_id=user.id, followee_id=uid).first()
+    if exist:
+        db.session.delete(exist)
+        db.session.commit()
+        return jsonify({'message': '已取消关注', 'following': False})
+    db.session.add(UserFollow(follower_id=user.id, followee_id=uid))
+    db.session.commit()
+    return jsonify({'message': '已关注', 'following': True})
+
+
+@api_learning_bp.route('/learning/users/<int:uid>/profile', methods=['GET'])
+def api_user_public_profile(uid):
+    """用户公开主页：关注信息 + 公开资料列表"""
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    target = db.session.get(User, uid)
+    if not target or target.role == 'bot':
+        return jsonify({'message': '用户不存在'}), 404
+    data = _user_public_dict(target, user)
+    if target.id != user.id:
+        mats = StudyMaterial.query.filter_by(user_id=uid, is_public=True, status='active') \
+            .order_by(StudyMaterial.updated_at.desc()).limit(50).all()
+    else:
+        mats = StudyMaterial.query.filter_by(user_id=uid) \
+            .order_by(StudyMaterial.updated_at.desc()).limit(50).all()
+    data['materials'] = [_material_to_dict(m, current_user_id=user.id) for m in mats]
+    return jsonify(data)
+
+
+# ── AI 额度与治理（教师） ──────────────────────
+
+@api_learning_bp.route('/learning/ai-quota', methods=['GET'])
+def api_ai_quota_mine():
+    """任意登录用户查自己当日 AI 额度"""
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    return jsonify(get_quota_info(user))
+
+
+@api_learning_bp.route('/learning/ai-governance/summary', methods=['GET'])
+def api_ai_governance_summary():
+    """教师端：近 N 天 AI 用量按天聚合 + 额度占用 TOP 用户"""
+    user, err = require_teacher(deny_msg='无权访问', unauth_msg='未登录')
+    if err:
+        return err
+    days = min(max(request.args.get('days', type=int) or 14, 1), 90)
+    since = utcnow() - timedelta(days=days)
+    logs = AiUsageLog.query.filter(AiUsageLog.created_at >= since).all()
+    per_day = defaultdict(lambda: {'total': 0, 'success': 0, 'degraded': 0, 'fail': 0,
+                                   'avg_cost_ms': 0, '_sum': 0})
+    by_user = defaultdict(int)
+    for lg in logs:
+        d = per_day[lg.created_at.strftime('%Y-%m-%d')]
+        d['total'] += 1
+        d[lg.status if lg.status in ('success', 'degraded', 'fail') else 'fail'] += 1
+        d['_sum'] += lg.cost_ms or 0
+        by_user[lg.user_id] += 1
+    day_list = []
+    for day in sorted(per_day):
+        v = per_day[day]
+        day_list.append({'day': day, 'total': v['total'], 'success': v['success'],
+                         'degraded': v['degraded'], 'fail': v['fail'],
+                         'avg_cost_ms': round(v['_sum'] / v['total']) if v['total'] else 0})
+    top_users = []
+    for uid, cnt in sorted(by_user.items(), key=lambda kv: -kv[1])[:10]:
+        tu = db.session.get(User, uid)
+        quota = db.session.get(AiQuota, uid)
+        top_users.append({'user_id': uid,
+                          'username': tu.username if tu else str(uid),
+                          'calls': cnt,
+                          'daily_limit': quota.daily_limit if quota else 30})
+    return jsonify({'per_day': day_list, 'top_users': top_users,
+                    'total_calls': len(logs), 'days': days})
+
+
+@api_learning_bp.route('/learning/ai-governance/logs', methods=['GET'])
+def api_ai_governance_logs():
+    """教师端：AI 调用日志分页明细，可按用户/动作筛"""
+    user, err = require_teacher(deny_msg='无权访问', unauth_msg='未登录')
+    if err:
+        return err
+    page = max(request.args.get('page', type=int) or 1, 1)
+    size = min(max(request.args.get('size', type=int) or 20, 1), 100)
+    query = AiUsageLog.query
+    uid = request.args.get('user_id', type=int)
+    action = request.args.get('action')
+    if uid:
+        query = query.filter(AiUsageLog.user_id == uid)
+    if action:
+        query = query.filter(AiUsageLog.action.like(f'{action}%'))
+    total = query.count()
+    rows = query.order_by(AiUsageLog.id.desc()).offset((page - 1) * size).limit(size).all()
+    items = [{'id': lg.id, 'user': lg.user.username if lg.user else None,
+              'user_id': lg.user_id, 'action': lg.action, 'status': lg.status,
+              'cost_ms': lg.cost_ms, 'created_at': iso_local(lg.created_at)}
+             for lg in rows]
+    return jsonify({'items': items, 'total': total, 'page': page, 'size': size})
+
+
+@api_learning_bp.route('/learning/ai-governance/quota/<int:uid>', methods=['PUT'])
+@limiter.limit(RateLimitConfig.DATA_WRITE)
+def api_ai_governance_quota(uid):
+    """教师端：调整指定用户的每日 AI 生成上限"""
+    user, err = require_teacher(deny_msg='无权访问', unauth_msg='未登录')
+    if err:
+        return err
+    target = db.session.get(User, uid)
+    if not target:
+        return jsonify({'message': '用户不存在'}), 404
+    data = request.get_json(silent=True) or {}
+    try:
+        limit = int(data.get('daily_limit'))
+    except (TypeError, ValueError):
+        return jsonify({'message': 'daily_limit 必须为整数'}), 400
+    limit = min(max(limit, 0), 1000)
+    quota = db.session.get(AiQuota, uid)
+    if quota is None:
+        quota = AiQuota(user_id=uid, daily_limit=limit, used_today=0,
+                        reset_date=utcnow().date())
+        db.session.add(quota)
+    else:
+        quota.daily_limit = limit
+    db.session.commit()
+    return jsonify({'message': '已更新', 'user': target.username,
+                    'daily_limit': quota.daily_limit})

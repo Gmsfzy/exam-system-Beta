@@ -35,6 +35,10 @@ python-docx==1.2.0
 qrcode==8.2
 pillow==12.3.0
 
+# ── 数据科学竞赛（v4.11 DS 赛道指标计算与 CSV 解析，dsci/ 包硬依赖）──
+numpy==2.5.3
+pandas==3.0.5
+
 # ── 实时通信（竞赛/PK 榜单推送，可选，未安装自动降级为前端轮询）──
 Flask-SocketIO==5.6.1
 python-socketio==5.16.4

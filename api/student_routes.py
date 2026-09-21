@@ -3,14 +3,15 @@ from database.models import User, Exam, ExamStudent, Result
 from database import db
 from utils.timeutil import iso_local
 from utils.security import verify_token
+from utils.permissions import require_teacher
 
 api_student_bp = Blueprint('api_student', __name__)
 
 @api_student_bp.route('/exams/<int:id>/students', methods=['GET'])
 def api_exam_students(id):
-    user = verify_token()
-    if not user or not user.is_teacher():
-        return jsonify({'message': '无权访问'}), 403
+    user, err = require_teacher(deny_msg='无权访问', unauth_msg='无权访问', unauth_status=403)
+    if err:
+        return err
     
     exam = Exam.query.get_or_404(id)
     if exam.creator_id != user.id:
@@ -32,9 +33,9 @@ def api_exam_students(id):
 
 @api_student_bp.route('/exams/<int:id>/invite', methods=['POST'])
 def api_invite_students(id):
-    user = verify_token()
-    if not user or not user.is_teacher():
-        return jsonify({'message': '无权访问'}), 403
+    user, err = require_teacher(deny_msg='无权访问', unauth_msg='无权访问', unauth_status=403)
+    if err:
+        return err
     
     exam = Exam.query.get_or_404(id)
     if exam.creator_id != user.id:
@@ -53,9 +54,9 @@ def api_invite_students(id):
 
 @api_student_bp.route('/exams/<int:id>/remove_student/<int:student_id>', methods=['POST'])
 def api_remove_student(id, student_id):
-    user = verify_token()
-    if not user or not user.is_teacher():
-        return jsonify({'message': '无权访问'}), 403
+    user, err = require_teacher(deny_msg='无权访问', unauth_msg='无权访问', unauth_status=403)
+    if err:
+        return err
 
     exam = Exam.query.get_or_404(id)
     if exam.creator_id != user.id:
@@ -70,9 +71,9 @@ def api_remove_student(id, student_id):
 
 @api_student_bp.route('/students', methods=['GET'])
 def api_list_students():
-    user = verify_token()
-    if not user or not user.is_teacher():
-        return jsonify({'message': '无权访问'}), 403
+    user, err = require_teacher(deny_msg='无权访问', unauth_msg='无权访问', unauth_status=403)
+    if err:
+        return err
     
     students = User.query.filter_by(role='student').all()
     return jsonify([{'id': s.id, 'username': s.username, 'email': s.email} for s in students])

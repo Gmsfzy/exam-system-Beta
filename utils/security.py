@@ -13,10 +13,24 @@ csrf = None
 def init_security(app):
     global limiter, csrf
 
+    storage_uri = Config.RATE_LIMIT_STORAGE_URI
+    # 限流存储探活：配置指向 Redis 但连不通时回落内存（避免请求期 hits 才爆连接错误全线 500）
+    if storage_uri.startswith('redis://'):
+        try:
+            import redis as _redis
+            _probe = _redis.from_url(storage_uri, socket_timeout=3, socket_connect_timeout=3)
+            _probe.ping()
+        except Exception as e:
+            logger.warning(f'限流 Redis 存储不可达（{e}），回落 memory://；多进程部署请确保 Redis 可用')
+            storage_uri = 'memory://'
+    if storage_uri.startswith('memory') and not Config.DEBUG:
+        logger.warning('限流使用进程内 memory:// 存储：仅单进程部署计数准确，'
+                       '横向扩容（多 worker）请配置 RATE_LIMIT_STORAGE_URI 指向 Redis')
+
     limiter = Limiter(
         get_remote_address,
         app=app,
-        storage_uri=Config.RATE_LIMIT_STORAGE_URI,
+        storage_uri=storage_uri,
         default_limits=[Config.RATE_LIMIT_DEFAULT],
         headers_enabled=Config.RATE_LIMIT_HEADERS_ENABLED
     )
@@ -33,8 +47,10 @@ def init_security(app):
 
     @app.before_request
     def _smart_csrf_check():
-        # Bearer token 认证的 API 请求不受 CSRF 影响，自动豁免
-        if request.headers.get('Authorization'):
+        # 携带非空 Bearer token 的 API 请求豁免 CSRF（攻击者跨源无法自动附加 Authorization 头）；
+        # 伪造/格式不符的 Authorization 头不再享有豁免，回落 CSRF 校验（v4.6.1 收紧）
+        auth = request.headers.get('Authorization', '')
+        if auth.startswith('Bearer ') and auth[7:].strip():
             return
         # 公开认证接口（登录/注册/拿 token）豁免
         if request.path in _CSRF_EXEMPT_PATHS:
@@ -56,6 +72,7 @@ def init_security(app):
 
 def verify_token():
     """从 Authorization: Bearer <JWT> 解析并返回当前用户，失败返回 None。"""
+    import datetime as dt
     import jwt
     from database import db
     from database.models import User
@@ -65,9 +82,22 @@ def verify_token():
         token = auth_header.split(' ')[1]
         try:
             payload = jwt.decode(token, Config.SECRET_KEY, algorithms=['HS256'])
-            return db.session.get(User, payload['user_id'])
         except Exception:
             return None
+        user = db.session.get(User, payload['user_id'])
+        if user is None:
+            return None
+        # 吊销水位（v4.6.1）：登出前签发（iat 早于 token_valid_at）的令牌一律失效；
+        # 无 iat 的历史令牌在用户登出后同样视为失效（下次登录起携带 iat）
+        valid_at = getattr(user, 'token_valid_at', None)
+        if valid_at is not None:
+            iat = payload.get('iat')
+            if iat is None:
+                return None
+            issued = dt.datetime.fromtimestamp(int(iat), tz=dt.timezone.utc)
+            if issued < valid_at:
+                return None
+        return user
     return None
 
 def get_limiter():

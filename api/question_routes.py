@@ -1,5 +1,5 @@
 from flask import Blueprint, request, jsonify, send_from_directory, Response
-from database.models import Question, Major, Course, Department
+from database.models import Question, Major, Course, Department, QuestionTypeEnum, QUESTION_TYPE_LABELS, DifficultyEnum
 from database import db
 import os
 import uuid
@@ -33,13 +33,24 @@ from utils.security import limiter, RateLimitConfig, verify_token
 from utils.logger import logger
 
 def _require_teacher():
-    """写操作鉴权：未登录 401，非教师 403；通过则返回 user。"""
-    user = verify_token()
-    if not user:
-        return None, (jsonify({'message': '请先登录'}), 401)
-    if not user.is_teacher():
-        return None, (jsonify({'message': '无权操作，仅教师可管理题库'}), 403)
-    return user, None
+    """写操作鉴权：委托 utils.permissions 统一实现（RBAC 收敛）。"""
+    from utils.permissions import require_teacher
+    return require_teacher(deny_msg='无权操作，仅教师可管理题库')
+
+def _normalize_cases(value):
+    """OJ 用例列表（v4.7）：仅保留含 input/expected 的 dict 元素，归一为字符串；空 → None。
+
+    兼容前端传 JSON 字符串或数组；非法输入一律降级为无用例（回落 AI/人工评分）。"""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (ValueError, TypeError):
+            return None
+    if not isinstance(value, list):
+        return None
+    out = [{'input': str(c.get('input') or ''), 'expected': str(c.get('expected') or '')}
+           for c in value if isinstance(c, dict)]
+    return out or None
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
@@ -118,6 +129,10 @@ def api_list_questions():
         'answer': q.answer if is_teacher else '',
         'analysis': q.analysis if is_teacher else '',
         'knowledge': q.knowledge,
+        'material': q.material,                  # v4.3 材料题共享材料
+        'material_group': q.material_group,      # v4.3 同组题共享同一材料
+        # v4.7 OJ 用例含预期输出，仅教师可见
+        'test_cases': (q.test_cases if is_teacher else None),
         'creator_id': q.creator_id,
         'creator_name': q.creator.username if q.creator else '',
         'is_public': q.is_public,
@@ -148,6 +163,9 @@ def api_add_question():
         source=data.get('source', 'manual'),
         creator_id=user.id,
         is_public=bool(data.get('is_public', False)),
+        material=(data.get('material') or None),           # v4.3 材料题
+        material_group=(data.get('material_group') or None),
+        test_cases=_normalize_cases(data.get('test_cases')),  # v4.7 OJ 用例
     )
     db.session.add(q)
     db.session.commit()
@@ -177,6 +195,11 @@ def api_update_question(id):
     q.type = data['type']
     q.difficulty = data['difficulty']
     q.source = data.get('source', q.source)
+    if 'material' in data:                       # v4.3 材料题
+        q.material = data.get('material') or None
+        q.material_group = (data.get('material_group') or None) if q.material else None
+    if 'test_cases' in data:                     # v4.7 OJ 用例
+        q.test_cases = _normalize_cases(data.get('test_cases'))
     if 'is_public' in data:
         q.is_public = bool(data['is_public'])
     db.session.commit()
@@ -186,6 +209,23 @@ def api_update_question(id):
     if old_course_id != data.get('course_id'):
         invalidate_question_cache(course_id=old_course_id)
     return jsonify({'message': '更新成功'})
+
+@api_question_bp.route('/questions/<int:id>/oj_run', methods=['POST'])
+@limiter.limit('10 per minute')
+def api_question_oj_run(id):
+    """v4.7 编程题 OJ 试跑：教师提交代码按本题用例评测（验用例/自测答案）。"""
+    user, err = _require_teacher()
+    if err:
+        return err
+    q = Question.query.get_or_404(id)
+    if q.type != QuestionTypeEnum.PROGRAMMING:
+        return jsonify({'message': '仅编程题支持 OJ 试跑'}), 400
+    if not q.test_cases:
+        return jsonify({'message': '本题未配置评测用例，请先在题库编辑中添加'}), 400
+    from oj.services import grade as oj_grade
+    data = request.get_json(silent=True) or {}
+    result = oj_grade(str(data.get('code') or ''), 'python', q.test_cases)
+    return jsonify(result)
 
 @api_question_bp.route('/questions/<int:id>', methods=['DELETE'])
 def api_delete_question(id):
@@ -296,13 +336,14 @@ def _parse_word_questions(file_storage):
             type_match = re.search(r'【(.+?)】', text)
             if type_match:
                 type_text = type_match.group(1)
-                type_map = {'单选题': 'single_choice', '多选题': 'multiple_choice', '填空题': 'fill_blank', '判断题': 'true_false', '问答题': 'short_answer', '编程题': 'programming', '应用题': 'application', '计算题': 'calculation'}
+                # 中文→枚举键：由事实源 LABELS 反转生成（v4.7 收敛，不再独立维护字典）
+                type_map = {label: key for key, label in QUESTION_TYPE_LABELS.items()}
                 current_question['type'] = type_map.get(type_text, 'single_choice')
             
             diff_match = re.search(r'难度[:：](.+)', text)
             if diff_match:
                 diff_text = diff_match.group(1)
-                diff_map = {'简单': 'easy', '中等': 'medium', '困难': 'hard'}
+                diff_map = {label: key for key, label in DifficultyEnum.LABELS.items()}
                 current_question['difficulty'] = diff_map.get(diff_text, 'medium')
             continue
         

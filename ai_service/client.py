@@ -106,24 +106,42 @@ class AIClient:
         }
         return self._post_ark(payload).strip()
 
+    def chat_stream(self, messages: list, temp: float = 0.6, max_tok: int = 1500):
+        """流式多轮对话：逐块 yield 增量文本（方舟 OpenAI 兼容 SSE）；失败抛异常由调用方降级。"""
+        payload = {
+            "model": self.model_ep_id,
+            "messages": messages,
+            "temperature": temp,
+            "max_tokens": max_tok,
+            "stream": True
+        }
+        with requests.post(url=self.api_url, headers=self.headers, json=payload,
+                           timeout=self.timeout, proxies=_NO_PROXY, stream=True) as resp:
+            resp.raise_for_status()
+            for line in resp.iter_lines(decode_unicode=True):
+                if not line or not line.startswith("data:"):
+                    continue
+                data = line[len("data:"):].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                choices = chunk.get("choices") or []
+                if not choices:
+                    continue
+                delta = (choices[0].get("delta") or {}).get("content")
+                if delta:
+                    yield delta
+
     def generate_question(self, major: str, question_type: str, difficulty: str, count: int = 5, description: str = None, source: str = 'ai'):
         """AI批量生成考试题目，返回可直接loads的纯JSON数组字符串"""
-        # 题型中文映射
-        type_labels = {
-            'single_choice': '单选题', 'multiple_choice': '多选题',
-            'fill_blank': '填空题', 'true_false': '判断题',
-            'short_answer': '问答题', 'programming': '编程题',
-            'application': '应用题', 'calculation': '计算题',
-        }
-        type_cn = type_labels.get(question_type, question_type)
+        # 题型/中文名单一事实源：QuestionTypeEnum/DifficultyEnum（v4.7 收敛，不再自带映射）
+        from database.models import QuestionTypeEnum, DifficultyEnum
+        type_cn = QuestionTypeEnum.label(question_type)
 
-        # 难度中文映射
-        difficulty_labels = {
-            'easy': '简单',
-            'medium': '中等',
-            'hard': '困难'
-        }
-        difficulty_cn = difficulty_labels.get(difficulty, difficulty)
+        difficulty_cn = DifficultyEnum.label(difficulty)
 
         # 针对题型生成不同的字段提示
         if question_type in ('single_choice', 'multiple_choice'):

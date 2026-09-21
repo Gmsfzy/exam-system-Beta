@@ -16,6 +16,8 @@ def generate_token(user):
         'user_id': user.id,
         'username': user.username,
         'role': user.role,
+        # iat 供吊销水位比对（v4.6.1）：早于 user.token_valid_at 签发的令牌登出后失效
+        'iat': int(utcnow().timestamp()),
         'exp': utcnow() + dt.timedelta(days=7)
     }
     return jwt.encode(payload, Config.SECRET_KEY, algorithm='HS256')
@@ -78,3 +80,18 @@ def api_current_user():
     if user:
         return jsonify({'id': user.id, 'username': user.username, 'role': user.role})
     return jsonify({'message': '未登录'}), 401
+
+
+@api_auth_bp.route('/logout', methods=['POST'])
+@log_errors
+def api_logout():
+    """登出吊销（v4.6.1）：置吊销水位，此前签发的全部 JWT 即时失效（多端同踢）。"""
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    # 水位对齐到下一整秒：iat 同为秒精度，若截断到当前秒则“签发与登出同秒”的旧 token 会同秒相等而漏吊销；
+    # 进位到下一秒同时保证登出后下一秒内重新登录的新令牌不被误杀
+    user.token_valid_at = utcnow().replace(microsecond=0) + dt.timedelta(seconds=1)
+    db.session.commit()
+    logger.info(f"User {user.id} ({user.username}) logged out (tokens revoked)")
+    return jsonify({'message': '已登出'})

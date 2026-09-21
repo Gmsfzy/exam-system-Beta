@@ -4,6 +4,7 @@ from database.models import Course, Chapter, User
 
 from utils.redis_cache import get_cache, set_cache, invalidate_chapter_cache, CacheKey
 from utils.security import verify_token
+from utils.permissions import require_teacher
 
 api_chapter_bp = Blueprint('api_chapter', __name__)
 
@@ -39,9 +40,9 @@ def get_chapters():
 
 @api_chapter_bp.route('/chapters', methods=['POST'])
 def create_chapter():
-    user = verify_token()
-    if not user or not user.is_teacher():
-        return jsonify({'error': '无权访问'}), 403
+    user, err = require_teacher(deny_msg='无权访问', unauth_msg='无权访问', unauth_status=403, key='error')
+    if err:
+        return err
     
     data = request.get_json()
     name = data.get('name')
@@ -98,9 +99,9 @@ def get_chapter(chapter_id):
 
 @api_chapter_bp.route('/chapters/<int:chapter_id>', methods=['PUT'])
 def update_chapter(chapter_id):
-    user = verify_token()
-    if not user or not user.is_teacher():
-        return jsonify({'error': '无权访问'}), 403
+    user, err = require_teacher(deny_msg='无权访问', unauth_msg='无权访问', unauth_status=403, key='error')
+    if err:
+        return err
     
     chapter = db.session.get(Chapter, chapter_id)
     if not chapter:
@@ -139,9 +140,9 @@ def update_chapter(chapter_id):
 
 @api_chapter_bp.route('/chapters/<int:chapter_id>', methods=['DELETE'])
 def delete_chapter(chapter_id):
-    user = verify_token()
-    if not user or not user.is_teacher():
-        return jsonify({'error': '无权访问'}), 403
+    user, err = require_teacher(deny_msg='无权访问', unauth_msg='无权访问', unauth_status=403, key='error')
+    if err:
+        return err
     
     chapter = db.session.get(Chapter, chapter_id)
     if not chapter:
