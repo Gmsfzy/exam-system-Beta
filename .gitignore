@@ -64,6 +64,12 @@ logs/
 node_modules/
 frontend/dist/
 
+# 用户上传附件（隐私内容，禁止入库）
+uploads/
+
+# 风险台账（隐患清单仅本地留存，不入公开仓库）
+存在隐患.md
+
 # Trae/Agent 临时文件
 *.tmp
 _tmp_*
