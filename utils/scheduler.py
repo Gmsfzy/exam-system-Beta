@@ -23,6 +23,8 @@ def _run(app):
         from competition.reminder import send_competition_reminders
         from api.learning_engine import learning_daily_tick
         from bounty.engine import bounty_expiry_tick
+        from homework.services import homework_expiry_tick
+        from utils.backup import database_backup_tick
 
         while not _stop_event.is_set():
             # 各任务独立 try/except，单点失败不阻塞其余任务
@@ -33,6 +35,8 @@ def _run(app):
                 ('send_competition_reminders', send_competition_reminders),
                 ('learning_daily_tick', learning_daily_tick),
                 ('bounty_expiry_tick', bounty_expiry_tick),
+                ('homework_expiry_tick', homework_expiry_tick),
+                ('database_backup_tick', database_backup_tick),
             ):
                 try:
                     task()

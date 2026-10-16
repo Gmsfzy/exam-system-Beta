@@ -93,6 +93,86 @@ def kp_ids_of_question(question_id):
     return [r[0] for r in rows]
 
 
+# ── 薄弱点自适应推荐（复用掌握度地基，只推已有题、不动态生成）──────────────
+
+def weak_knowledge_points(user_id, limit=15, now=None):
+    """该生「已接触且展示掌握度最低」的知识点 [(kp_id, 展示掌握度)]，升序（越靠前越薄弱）。
+
+    仅纳入已有掌握度记录的知识点：新学生冷启动无数据时返回空，不强行推荐。
+    """
+    now = now or utcnow()
+    scored = [
+        (m.knowledge_point_id, decayed_level(m.level, m.last_verified_at, now))
+        for m in KnowledgeMastery.query.filter_by(user_id=user_id).all()
+    ]
+    weak = [(kp, lv) for kp, lv in scored if lv < MASTERED_LEVEL]
+    weak.sort(key=lambda x: x[1])
+    return weak[:limit]
+
+
+def recommend_practice_questions(user_id, limit=5, now=None):
+    """按最薄弱知识点推荐「尚未作答过」的已有题目，供今日学习页主动练习。
+
+    选型：命中薄弱知识点的题目中，剔除该生考试/自由练习已作答过的（保证是「新题」），
+    再按所属知识点的薄弱程度排序取前 limit 道。返回题目摘要 dict 列表。
+    """
+    from database.models import (
+        Question, KnowledgePoint, Answer, ExamSession,
+        PracticeAnswer, PracticeSession,
+    )
+    weak = weak_knowledge_points(user_id, limit=15, now=now)
+    if not weak:
+        return []
+    rank = {kp: i for i, (kp, _) in enumerate(weak)}   # 值越小越薄弱
+    shown = {kp: lv for kp, lv in weak}
+
+    answered = set()
+    for (qid,) in db.session.query(Answer.question_id).join(
+            ExamSession, Answer.session_id == ExamSession.id) \
+            .filter(ExamSession.student_id == user_id).all():
+        answered.add(qid)
+    for (qid,) in db.session.query(PracticeAnswer.question_id).join(
+            PracticeSession, PracticeAnswer.session_id == PracticeSession.id) \
+            .filter(PracticeSession.user_id == user_id).all():
+        answered.add(qid)
+
+    # 题目命中薄弱知识点：记录其最薄弱的那个 KP（rank 最小）
+    q_best = {}
+    rows = db.session.query(
+        question_knowledge_point.c.question_id,
+        question_knowledge_point.c.knowledge_point_id,
+    ).filter(question_knowledge_point.c.knowledge_point_id.in_(list(rank))).all()
+    for qid, kp in rows:
+        cur = q_best.get(qid)
+        if cur is None or rank[kp] < cur[0]:
+            q_best[qid] = (rank[kp], kp)
+
+    cand_ids = [qid for qid in q_best if qid not in answered]
+    if not cand_ids:
+        return []
+    qs = {q.id: q for q in Question.query.filter(Question.id.in_(cand_ids)).all()}
+    ordered = sorted(cand_ids, key=lambda qid: (q_best[qid][0], qid))
+
+    out = []
+    for qid in ordered:
+        q = qs.get(qid)
+        if not q:
+            continue
+        _, kp = q_best[qid]
+        kpo = db.session.get(KnowledgePoint, kp)
+        out.append({
+            'question_id': q.id,
+            'content': (q.content or '')[:80],
+            'type': q.type,
+            'difficulty': q.difficulty,
+            'knowledge_point': kpo.name if kpo else None,
+            'mastery': round(shown.get(kp, 0.0), 1),
+        })
+        if len(out) >= limit:
+            break
+    return out
+
+
 # ── 间隔复习（简化 SM-2） ─────────────────────────────────────────
 
 def ensure_review_item(user_id, question_id, source_type='wrong', due_at=None):

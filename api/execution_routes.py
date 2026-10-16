@@ -20,6 +20,17 @@ def _allowance(exam, invited):
     return max(1, (exam.max_attempts or 1) + ((invited.extra_attempts or 0) if invited else 0))
 
 
+def _notify_teacher_exam(exam, student, extra=''):
+    """师生互动：学生交卷给考试创建教师发一条持久铃铛通知（经 ORM 事件实时推送）。"""
+    if exam is None or not getattr(exam, 'creator_id', None):
+        return
+    from api.notification_routes import create_notification
+    title = f'学生交卷：{exam.title}'
+    content = (f'{student.username} 已提交「{exam.title}」的试卷' + (extra or '') + '。')
+    create_notification(exam.creator_id, title, content,
+                        type='info', related_type='exam', related_id=exam.id)
+
+
 def _finalize_submission(sess):
     """交卷结算（手动交卷 / 切屏 3 次强制交卷 / 超时收卷共用入口）：
     1. AI 批改（v4.3：按会话题单，含逐人随机卷；多选遵循 multi_score_rule）；
@@ -237,6 +248,8 @@ def api_submit_exam(exam_id):
     exam = db.session.get(Exam, exam_id)
     notify_teacher(exam, {'type': 'submitted', 'exam_id': exam_id,
                           'student': user.username, 'attempt_no': session.attempt_no or 1})
+    # 师生互动：学生交卷 → 铃铛通知考试创建教师（实时监考事件之外的持久提醒）
+    _notify_teacher_exam(exam, user)
     try:
         _finalize_submission(session)
         return jsonify({'message': '提交成功，正在批改...'})
@@ -271,6 +284,8 @@ def api_report_switch(exam_id):
     if force_submitted:
         notify_teacher(exam, {'type': 'force_submitted', 'exam_id': exam_id,
                               'student': user.username, 'switch_count': session.switch_count})
+        # 切屏达上限被强制交卷：同样铃铛通知教师
+        _notify_teacher_exam(exam, user, extra='（切屏超限，系统已强制交卷）')
         try:
             _finalize_submission(session)
         except Exception:

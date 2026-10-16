@@ -20,6 +20,10 @@ def create_notification(user_id, title, content='', type='info', related_type=No
     commit=True（默认）：立即提交，适合请求路径单次调用；
     commit=False：仅 add 不提交，由调用方在外层循环结束后统一 commit
     （如 scheduler 批量收卷，避免循环内逐行提交争抢写锁、提前半提交）。
+
+    外部渠道旁路投递仅在 commit=True 且站内落库成功后触发（默认关闭、
+    按 related_type 白名单、后台线程尽力而为）；commit=False 批量路径不投递，
+    以免半提交误发与循环刷屏。
     """
     notification = Notification(
         user_id=user_id,
@@ -32,6 +36,11 @@ def create_notification(user_id, title, content='', type='info', related_type=No
     db.session.add(notification)
     if commit:
         db.session.commit()
+        # 站内落库成功后旁路投递邮件/webhook（默认关闭，异常不冒泡）
+        from utils.notify_channels import dispatch
+        dispatch(user_id, title, content, related_type)
+    # 实时推送不在此处手动发：由 utils/notify_socket 的 ORM 事件在事务 commit 后统一
+    # 自动发出（覆盖全模块与 commit=False 批量路径，且回滚不发、无幽灵推送）。
     return notification
 
 def create_exam_publish_notification(exam):
@@ -48,11 +57,17 @@ def create_exam_publish_notification(exam):
         )
 
 def create_exam_result_notification(result, commit=True):
-    """考试成绩发布时给学生发送通知"""
+    """考试成绩发布时给学生发送通知。
+
+    防御性处理：若关联考试已被删除（孤儿 Result），则用通用文案兜底，
+    避免 result.exam 为 None 时整条交卷/发布链路崩溃。
+    """
+    exam = result.exam
+    exam_title = exam.title if exam is not None else '某次考试'
     create_notification(
         user_id=result.student_id,
-        title=f'考试成绩已公布：{result.exam.title}',
-        content=f'您在「{result.exam.title}」中的成绩为 {result.score}/{result.total_score}。',
+        title=f'考试成绩已公布：{exam_title}',
+        content=f'您在「{exam_title}」中的成绩为 {result.score}/{result.total_score}。',
         type='success',
         related_type='result',
         related_id=result.id,

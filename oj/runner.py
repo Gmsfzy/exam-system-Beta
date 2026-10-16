@@ -28,6 +28,16 @@ _DANGER_PATTERNS = [
 ]
 _DANGER_RE = [re.compile(p) for p in _DANGER_PATTERNS]
 
+# 子进程最小可用环境：Windows 下空环境（env={}）会让 Python 子进程初始化
+# 随机数源失败（Fatal Python error: _Py_HashRandomization_Init），SYSTEMROOT
+# 为必需项；白名单不含任何业务环境变量（密钥等），与 dsci/runner.py 同一做法
+_ENV_ALLOW = ('PATH', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'TEMP', 'TMP',
+              'LANG', 'LC_ALL', 'HOME', 'USERPROFILE')
+
+
+def _minimal_env():
+    return {k: os.environ[k] for k in _ENV_ALLOW if k in os.environ}
+
 
 def check_code(code):
     """静态防呆检查：命中危险模式返回原因字符串，干净返回 None。"""
@@ -86,7 +96,7 @@ def run_python(code, stdin='', timeout=5.0):
                 [sys.executable, '-I', script],
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE, cwd=workdir,
-                env={},  # -I + 空环境：不继承任何业务环境变量
+                env=_minimal_env(),  # -I + 最小白名单环境：不带任何业务环境变量
                 **kwargs)
         except OSError as exc:
             return {'stdout': '', 'stderr': str(exc), 'exit_code': None,

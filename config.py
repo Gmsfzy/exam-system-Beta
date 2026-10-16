@@ -36,7 +36,7 @@ class Config:
         'http://localhost:5175', 'http://localhost:5176',
         'http://127.0.0.1:5173', 'http://127.0.0.1:5174',
         'http://127.0.0.1:5175', 'http://127.0.0.1:5176',
-        'http://localhost:5000', 'http://172.16.10.172:5000',
+        'http://localhost:5000', 'http://127.0.0.1:5000', 'http://172.16.10.172:5000',
     ]
     _env_origins = [
         o.strip() for o in os.getenv('CORS_ORIGINS', '').split(',') if o.strip()
@@ -70,6 +70,27 @@ class Config:
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     # SQLite 锁超时时间（秒），避免 AI 调用期间数据库锁报错
     SQLALCHEMY_ENGINE_OPTIONS = {"connect_args": {"timeout": 30}}
+    # 数据库定时备份（utils.backup，由后台调度线程按日执行）：
+    # 默认开启，每天最多一份，轮转保留最近 N 份（仅清理自动备份，不动手工 .bak_*）。
+    DB_BACKUP_ENABLED = os.getenv('DB_BACKUP_ENABLED', 'true').lower() == 'true'
+    DB_BACKUP_KEEP = int(os.getenv('DB_BACKUP_KEEP', '7'))
+
+    # 通知外部渠道旁路投递（utils.notify_channels）：默认关闭，开启后按事件
+    # 白名单将站内通知镜像投递到邮件/企微钉钉群机器人 webhook。
+    NOTIFY_EXTERNAL_ENABLED = os.getenv('NOTIFY_EXTERNAL_ENABLED', 'false').lower() == 'true'
+    # 逗号分隔的可外发 related_type 白名单，默认仅成绩公布（防群发刷屏）
+    NOTIFY_EXTERNAL_RELATED_TYPES = os.getenv('NOTIFY_EXTERNAL_RELATED_TYPES', 'result')
+    # SMTP 发件（收件人本人邮箱）
+    NOTIFY_SMTP_HOST = os.getenv('NOTIFY_SMTP_HOST', '')
+    NOTIFY_SMTP_PORT = int(os.getenv('NOTIFY_SMTP_PORT', '465'))
+    NOTIFY_SMTP_USER = os.getenv('NOTIFY_SMTP_USER', '')
+    NOTIFY_SMTP_PASSWORD = os.getenv('NOTIFY_SMTP_PASSWORD', '')
+    NOTIFY_SMTP_FROM = os.getenv('NOTIFY_SMTP_FROM', '')
+    NOTIFY_SMTP_SSL = os.getenv('NOTIFY_SMTP_SSL', 'true').lower() == 'true'
+    NOTIFY_SMTP_STARTTLS = os.getenv('NOTIFY_SMTP_STARTTLS', 'false').lower() == 'true'
+    # 群机器人 webhook（generic/wechat/dingtalk）
+    NOTIFY_WEBHOOK_URL = os.getenv('NOTIFY_WEBHOOK_URL', '')
+    NOTIFY_WEBHOOK_KIND = os.getenv('NOTIFY_WEBHOOK_KIND', 'generic')
     # 火山引擎豆包配置
     DOUBAN_API_KEY = os.getenv('DOUBAN_API_KEY', '')
     DOUBAN_API_URL = os.getenv('DOUBAN_API_URL')

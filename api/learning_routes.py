@@ -2342,6 +2342,13 @@ def api_today():
     daily_tasks = DailyTask.query.filter_by(user_id=user.id, day=today) \
         .order_by(DailyTask.id).all()
 
+    # 6) 薄弱知识点自适应推荐：推已有题（非动态生成），异常不阻断整页
+    try:
+        weak_recommendations = eng.recommend_practice_questions(user.id, limit=5)
+    except Exception:  # noqa: BLE001 推荐为非关键路径
+        logger.exception('薄弱点推荐失败 user_id=%s', user.id)
+        weak_recommendations = []
+
     return jsonify({
         'date': today.isoformat(),
         'streak_days': streak,
@@ -2358,6 +2365,7 @@ def api_today():
         'due_review_count': due_count,
         'next_node': next_node,
         'active_plans': len(plans),
+        'weak_recommendations': weak_recommendations,
     })
 
 
@@ -4150,6 +4158,11 @@ def api_follow_toggle(uid):
         return jsonify({'message': '已取消关注', 'following': False})
     db.session.add(UserFollow(follower_id=user.id, followee_id=uid))
     db.session.commit()
+    # 互动通知：被关注→通知本人（取关不发；经 ORM 事件实时推送）
+    from api.notification_routes import create_notification
+    create_notification(target.id, '有人关注了你',
+                        f'{user.username} 关注了你，可去对方主页看看。',
+                        type='info', related_type='user', related_id=user.id)
     return jsonify({'message': '已关注', 'following': True})
 
 

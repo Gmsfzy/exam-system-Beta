@@ -406,9 +406,10 @@ def ai_analyze_wrong_answer(session, question, wrong_answer: str, wrong_count: i
         "3) 给出 1~2 条可执行的后续行动建议。总字数 150 字以内，"
         "直接输出正文，不要标题、不要前缀、不要 markdown。"
     )
+    option_line = f"选项：\n{options}" if options else ''
     prompt = (
         f"题目：{question.content}\n"
-        f"{('选项：\n' + options) if options else ''}\n"
+        f"{option_line}\n"
         f"正确答案：{question.answer}\n"
         f"学生答案：{wrong_answer or '（未作答）'}\n"
         f"该题累计答错：{wrong_count} 次"

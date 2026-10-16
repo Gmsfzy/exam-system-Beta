@@ -1,5 +1,4 @@
 # 在线考试系统 Beta — Python 依赖清单
-# Python 3.12, 运行时路径: D:\Python312\python.exe
 # 安装命令: pip install -r requirements.txt
 
 # ── Web 框架 & ORM ──

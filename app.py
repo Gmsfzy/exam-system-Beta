@@ -70,6 +70,7 @@ from competition.gamification_routes import gamification_bp
 from competition.team_routes import team_bp
 from bounty.routes import bounty_bp
 from dsci.routes import dsci_bp
+from homework.routes import homework_bp
 # 注意：api/routes.py 已废弃，路由已拆分到以上独立模块
 
 api_bps = [api_auth_bp,
@@ -91,7 +92,8 @@ api_bps = [api_auth_bp,
            gamification_bp,
            team_bp,
            bounty_bp,
-           dsci_bp]
+           dsci_bp,
+           homework_bp]
 for bp in api_bps:
     # CSRF 由 security._smart_csrf_check 统一处理：Bearer token 请求自动豁免，其余强制校验
     app.register_blueprint(bp, url_prefix='/api')
@@ -108,6 +110,10 @@ try:
     print('[SocketIO] 实时推送已启用')
 except ImportError:
     print('[SocketIO] 未安装 flask-socketio，实时推送降级为前端轮询')
+
+# 全局通知实时推送：注册 Notification 的 ORM 事件（commit 后自动推送到个人房间，
+# 覆盖五大模块所有通知产生点；无 Socket.IO 时 notify_user 静默降级为轮询）。
+import utils.notify_socket  # noqa: E402  (导入即注册 @event.listens_for 监听)
 
 def _wants_json():
     """API 路径或纯 JSON 协商请求返回 JSON 错误；其余（浏览器页面）返回错误页"""

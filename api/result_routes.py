@@ -38,6 +38,30 @@ def _anon_name(exam, student_id):
     return f'考生{idx:02d}'
 
 
+@api_result_bp.route('/results/plagiarism/<int:exam_id>', methods=['GET'])
+@limiter.limit(RateLimitConfig.RESULT_QUERY)
+def api_plagiarism_check(exam_id):
+    """编程题代码抄袭查重：返回同一考试内高相似提交对，供教师阅卷/监考复核。
+
+    query: question_id 限定单题；threshold 相似度阈值(默认 0.7, 0~1)。
+    仅为复核线索，相似高不等于必然抄袭（模板/标准库/极短代码）。
+    """
+    user, err = require_teacher(deny_msg='无权访问', unauth_msg='无权访问', unauth_status=403)
+    if err:
+        return err
+    Exam.query.get_or_404(exam_id)
+    try:
+        threshold = float(request.args.get('threshold', 0.7))
+    except (TypeError, ValueError):
+        return jsonify({'message': 'threshold 需为 0~1 的数值'}), 400
+    if not 0.0 <= threshold <= 1.0:
+        return jsonify({'message': 'threshold 需为 0~1 的数值'}), 400
+    question_id = request.args.get('question_id', type=int)
+    from oj.plagiarism import find_similar_pairs
+    items = find_similar_pairs(exam_id, question_id=question_id, threshold=threshold)
+    return jsonify({'exam_id': exam_id, 'threshold': threshold, 'items': items})
+
+
 @api_result_bp.route('/results/me', methods=['GET'])
 def api_my_results():
     user = verify_token()
