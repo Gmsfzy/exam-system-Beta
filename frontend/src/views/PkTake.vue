@@ -55,7 +55,7 @@
           <el-tag size="small" effect="plain">{{ typeLabel(currentQuestion.q_type) }}</el-tag>
           <span class="q-score">{{ currentQuestion.score }}分</span>
         </div>
-        <h2 class="q-content">{{ currentQuestion.content }}</h2>
+        <RichContent class="q-content" :content="currentQuestion.content || ''" />
 
         <div v-if="['single_choice', 'true_false'].includes(currentQuestion.q_type)" class="options-list">
           <div
@@ -70,7 +70,7 @@
             @click="!feedback && (singleAnswer = opt.key)"
           >
             <span class="opt-key">{{ opt.key }}</span>
-            <span class="opt-value">{{ opt.value }}</span>
+            <span class="opt-value"><RichContent :content="String(opt.value ?? '')" /></span>
           </div>
         </div>
 
@@ -84,7 +84,7 @@
           >
             <el-checkbox :model-value="multiAnswer.includes(opt.key)" style="pointer-events: none" />
             <span class="opt-key">{{ opt.key }}</span>
-            <span class="opt-value">{{ opt.value }}</span>
+            <span class="opt-value"><RichContent :content="String(opt.value ?? '')" /></span>
           </div>
         </div>
 
@@ -127,6 +127,7 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import request from '../utils/request'
+import RichContent from '../components/RichContent.vue'
 import { getSocket, authToken } from '../utils/socket'
 import { useAuthStore } from '../stores/auth'
 import { Trophy, Clock, CircleCheckFilled, CircleCloseFilled, Warning } from '@element-plus/icons-vue'

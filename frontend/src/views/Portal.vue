@@ -70,7 +70,7 @@ import { useThemeStore } from '../stores/theme'
 import { ElMessage } from 'element-plus'
 import {
   Calendar, VideoPlay, Trophy, Money, Reading,
-  School, Sunny, Moon, SwitchButton, ArrowRight
+  School, Sunny, Moon, SwitchButton, ArrowRight, Notebook
 } from '@element-plus/icons-vue'
 
 const router = useRouter()
@@ -117,6 +117,14 @@ const teacherModules = [
     icon: Reading,
     gradient: 'linear-gradient(135deg, #06b6d4 0%, #0891b2 100%)',
     path: '/learning'
+  },
+  {
+    key: 'homework',
+    title: '作业练习',
+    desc: '发布题集/开放作业，自动判分与人工批改',
+    icon: Notebook,
+    gradient: 'linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%)',
+    path: '/homeworks/manage'
   }
 ]
 
@@ -152,6 +160,14 @@ const studentModules = [
     icon: Reading,
     gradient: 'linear-gradient(135deg, #06b6d4 0%, #0891b2 100%)',
     path: '/learning'
+  },
+  {
+    key: 'homework',
+    title: '作业练习',
+    desc: '接收老师发布的作业，按时作答与提交',
+    icon: Notebook,
+    gradient: 'linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%)',
+    path: '/homeworks/my'
   }
 ]
 

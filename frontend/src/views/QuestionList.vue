@@ -132,13 +132,13 @@
 
         <div class="card-body">
           <div class="question-content">
-            <KatexRenderer :formula="q.content" />
+            <RichContent :content="q.content || ''" />
           </div>
           <div v-if="q.options" class="question-options">
             <div v-for="(opt, idx) in parseOptions(q.options)" :key="idx" class="option-item">
               <span class="option-label">{{ ['A','B','C','D','E','F'][idx] }}</span>
               <span class="option-text">
-                <KatexRenderer :formula="opt" />
+                <RichContent :content="String(opt ?? '')" />
               </span>
             </div>
           </div>
@@ -469,22 +469,22 @@
         </div>
         <div class="detail-section">
           <h4>题目内容</h4>
-          <p><KatexRenderer :formula="detailQuestion.content" /></p>
+          <div class="question-rich"><RichContent :content="detailQuestion.content || ''" /></div>
         </div>
         <div v-if="detailQuestion.options" class="detail-section">
           <h4>选项</h4>
           <div v-for="(opt, idx) in parseOptions(detailQuestion.options)" :key="idx" class="detail-option">
             <span class="opt-label">{{ ['A','B','C','D','E','F'][idx] }}</span>
-            <span><KatexRenderer :formula="opt" /></span>
+            <span><RichContent :content="String(opt ?? '')" /></span>
           </div>
         </div>
         <div class="detail-section">
           <h4>答案</h4>
-          <p class="answer-text"><KatexRenderer :formula="detailQuestion.answer" /></p>
+          <div class="answer-text"><RichContent :content="detailQuestion.answer || ''" /></div>
         </div>
         <div v-if="detailQuestion.analysis" class="detail-section">
           <h4>解析</h4>
-          <p class="analysis-text"><KatexRenderer :formula="detailQuestion.analysis" /></p>
+          <div class="analysis-text"><RichContent :content="detailQuestion.analysis || ''" /></div>
         </div>
         <div v-if="detailQuestion.knowledge" class="detail-section">
           <h4>知识点</h4>
@@ -526,7 +526,7 @@ import {
   Plus, Search, More, Edit, Delete, Collection, Close, Upload, Share,
   Document, DocumentDelete, DocumentChecked, Warning, VideoPlay, PictureFilled, Picture
 } from '@element-plus/icons-vue'
-import KatexRenderer from '../components/KatexRenderer.vue'
+import RichContent from '../components/RichContent.vue'
 
 const questions = ref([])
 const majors = ref([])

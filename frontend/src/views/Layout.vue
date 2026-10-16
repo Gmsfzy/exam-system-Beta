@@ -279,6 +279,11 @@ const handleNotificationClick = async (notification) => {
     router.push(`/exams/${notification.related_id}`)
   } else if (notification.related_type === 'result') {
     router.push('/results')
+  } else if (notification.related_type === 'homework') {
+    // 作业通知：学生直奔作答页，教师去批改页
+    router.push(auth.user?.role === 'teacher'
+      ? `/homeworks/${notification.related_id}/grade`
+      : `/homeworks/${notification.related_id}/take`)
   }
 }
 
@@ -333,6 +338,20 @@ const setupRealtimeProfile = () => {
         type: 'success',
       })
     })
+    // 新站内通知实时推送：即时入列更新角标 + 弹提示（点击跳转），轮询仍作兜底对账
+    socket.on('new_notification', (data) => {
+      if (!data || data.id == null) return
+      if (notifications.value.some(n => n.id === data.id)) return
+      notifications.value.unshift(data)
+      const map = { success: 'success', error: 'error', warning: 'warning' }
+      ElNotification({
+        title: data.title || '新消息',
+        message: data.content || '',
+        type: map[data.type] || 'info',
+        duration: 4000,
+        onClick: () => handleNotificationClick(data),
+      })
+    })
   } catch (e) {
     console.warn('实时推送连接失败，已降级:', e)
   }
@@ -344,6 +363,7 @@ const teardownRealtimeProfile = () => {
     const socket = getSocket()
     socket.off('profile_update')
     socket.off('badge_granted')
+    socket.off('new_notification')
     leaveUserRoom(auth.user.id)
   } catch (e) { /* 忽略 */ }
 }
@@ -437,6 +457,14 @@ const moduleMenus = {
       { path: '/learning/plan', label: '学习计划', icon: iconMap.Star },
       { path: '/learning/report', label: '学习报告', icon: iconMap.TrendCharts },
     ]
+  },
+  homework: {
+    teacher: [
+      { path: '/homeworks/manage', label: '作业管理', icon: iconMap.Notebook },
+    ],
+    student: [
+      { path: '/homeworks/my', label: '我的作业', icon: iconMap.Notebook },
+    ]
   }
 }
 
@@ -447,7 +475,8 @@ const moduleBrandNames = {
   exam: '在线考试',
   competition: '答题竞赛',
   bounty: '征集悬赏',
-  learning: '自我学习'
+  learning: '自我学习',
+  homework: '作业练习'
 }
 const brandName = computed(() => moduleBrandNames[currentModule.value] || '智汇学场')
 

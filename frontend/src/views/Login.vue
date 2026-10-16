@@ -117,12 +117,13 @@
 
 <script setup>
 import { reactive, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRouter, useRoute } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
 import { ElMessage } from 'element-plus'
 import { User, Lock, ArrowRight, ArrowLeft, School, Check } from '@element-plus/icons-vue'
 
 const router = useRouter()
+const route = useRoute()
 const auth = useAuthStore()
 const loading = ref(false)
 const form = reactive({ username: '', password: '', remember: false })
@@ -136,7 +137,14 @@ const handleLogin = async () => {
   try {
     await auth.login(form.username, form.password)
     ElMessage.success('登录成功，欢迎回来！')
-    router.push('/')
+    // 优先跳回 redirect 参数指定的原路径（防止 token 过期被踢后丢失草稿位置）
+    // 安全校验：必须是站内相对路径（/ 开头但不能是 //，防止开放重定向）
+    const redirect = route.query.redirect
+    if (typeof redirect === 'string' && redirect.startsWith('/') && !redirect.startsWith('//')) {
+      router.push(redirect)
+    } else {
+      router.push('/')
+    }
   } catch (e) {
     console.error(e)
   } finally {

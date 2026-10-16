@@ -183,7 +183,7 @@
             {{ review.current.source_type === 'wrong' ? '错题重看' : '防遗忘' }}
           </el-tag>
         </div>
-        <div class="rc-content">{{ review.current.question?.content }}</div>
+        <div class="rc-content"><RichContent :content="review.current.question?.content || ''" /></div>
 
         <!-- 答案未揭晓 -->
         <template v-if="!review.result">
@@ -191,7 +191,7 @@
             <div v-for="(opt, i) in (review.current.question?.options || [])" :key="i"
                  :class="['rc-option', { selected: isOptionSelected(i) }]" @click="selectOption(i)">
               <span class="opt-label">{{ optionLabel(i) }}</span>
-              <span class="opt-text">{{ opt }}</span>
+              <span class="opt-text"><RichContent :content="String(opt ?? '')" /></span>
             </div>
           </div>
           <div v-else-if="review.current.question?.type === 'true_false'" class="rc-options">
@@ -223,8 +223,8 @@
           <div class="rc-result" :class="review.result.is_correct ? 'ok' : 'no'">
             <span class="rc-result-icon">{{ review.result.is_correct ? '✓' : '✗' }}</span>
             <div>
-              <div v-if="!review.result.is_correct"><b>正确答案：</b>{{ review.result.correct_answer }}</div>
-              <div v-if="review.result.analysis" class="rc-analysis"><b>解析：</b>{{ review.result.analysis }}</div>
+              <div v-if="!review.result.is_correct"><b>正确答案：</b><RichContent :content="String(review.result.correct_answer ?? '')" /></div>
+              <div v-if="review.result.analysis" class="rc-analysis"><b>解析：</b><RichContent :content="review.result.analysis || ''" /></div>
               <div class="rc-next-plan">
                 {{ review.result.status === 'retired' ? '🎉 该题已退休，无需再复习'
                    : `下次复习：${review.result.next_interval_days} 天后` }}
@@ -239,6 +239,28 @@
           </div>
         </template>
       </div>
+    </div>
+
+    <!-- 薄弱点专项练习 -->
+    <div v-if="data.weak_recommendations && data.weak_recommendations.length" class="panel">
+      <div class="panel-head">
+        <h3>针对薄弱点 <el-tag size="small" type="danger" effect="plain">掌握度偏低</el-tag></h3>
+        <el-button size="small" text type="primary" @click="$router.push('/learning/practice')">去练习 →</el-button>
+      </div>
+      <div class="weak-list">
+        <div v-for="r in data.weak_recommendations" :key="r.question_id" class="weak-item"
+             @click="$router.push('/learning/practice')">
+          <span class="weak-mastery" :class="masteryClass(r.mastery)">{{ Math.round(r.mastery) }}</span>
+          <div class="weak-main">
+            <span class="weak-text">{{ clip(r.content) }}</span>
+            <span class="weak-sub">
+              {{ r.knowledge_point || '未标知识点' }} · {{ difficultyLabel(r.difficulty) }}
+            </span>
+          </div>
+          <el-tag size="small" effect="plain">{{ typeLabel(r.type) }}</el-tag>
+        </div>
+      </div>
+      <p class="weak-tip">根据你各知识点的掌握度，从题库中挑选尚未练过、最能补弱的题（推荐已有题，非生成）。</p>
     </div>
 
     <!-- AI 学习建议弹窗 -->
@@ -265,6 +287,7 @@ import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import request from '../utils/request'
+import RichContent from '../components/RichContent.vue'
 
 const router = useRouter()
 
@@ -272,6 +295,7 @@ const data = ref({
   date: '', streak_days: 0, checked_in_today: false, today_minutes: 0,
   week_days: {}, todo_tasks: [], daily_tasks: [], due_reviews: [],
   due_review_count: 0, next_node: null, active_plans: 0,
+  weak_recommendations: [],
 })
 
 // ── 打卡日历条：以接口 date 为终点排 7 格 ─────────────────────
@@ -480,8 +504,15 @@ function clip(text, n = 46) {
   return text.length > n ? text.slice(0, n) + '…' : text
 }
 // v4.6.1 枚举收敛：题型/选项题型单一来源 frontend/src/utils/enums.js
-import { typeLabel, hasOptions } from '../utils/enums'
+import { typeLabel, hasOptions, difficultyLabel } from '../utils/enums'
 const isChoiceType = hasOptions
+// 薄弱度分档着色：展示掌握度越低越红
+function masteryClass(m) {
+  if (m == null) return 'lv-mid'
+  if (m < 40) return 'lv-low'
+  if (m < 70) return 'lv-mid'
+  return 'lv-ok'
+}
 function optionLabel(i) { return String.fromCharCode(65 + i) }
 function isOptionSelected(i) {
   return (review.answer || '').includes(optionLabel(i))
@@ -667,6 +698,27 @@ async function quitReview() {
 .rc-result.no { background: rgba(239, 68, 68, 0.08); color: var(--text-primary); }
 .rc-result-icon { font-size: 20px; font-weight: 700; }
 .rc-next-plan { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
+
+/* 薄弱点推荐 */
+.weak-list { display: flex; flex-direction: column; gap: 6px; }
+.weak-item {
+  display: flex; align-items: center; gap: 12px; padding: 10px 12px;
+  border: 1px solid var(--border-color); border-radius: 10px; cursor: pointer;
+  transition: border-color 0.2s, background 0.2s;
+}
+.weak-item:hover { border-color: var(--primary-color, #6366f1); background: var(--bg-tertiary); }
+.weak-mastery {
+  flex-shrink: 0; width: 40px; height: 40px; border-radius: 10px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 15px; font-weight: 700; color: #fff;
+}
+.weak-mastery.lv-low { background: #ef4444; }
+.weak-mastery.lv-mid { background: #f59e0b; }
+.weak-mastery.lv-ok { background: #10b981; }
+.weak-main { flex: 1; display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.weak-text { font-size: 14px; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.weak-sub { font-size: 12px; color: var(--text-muted); }
+.weak-tip { margin: 10px 0 0; font-size: 12px; color: var(--text-muted); }
 
 /* AI 建议 */
 .suggest-tip { font-size: 13px; color: var(--text-muted); margin: 0 0 10px; }

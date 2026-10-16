@@ -42,7 +42,7 @@
           <span class="q-num">第 {{ currentIdx + 1 }} 题</span>
           <el-tag size="small" v-if="currentQ.type">{{ typeLabel(currentQ.type) }}</el-tag>
         </div>
-        <div class="q-content">{{ currentQ.content }}</div>
+        <div class="q-content"><RichContent :content="currentQ.content || ''" /></div>
 
         <!-- 选择题 -->
         <div v-if="isChoiceType(currentQ.type)" class="q-options">
@@ -50,7 +50,7 @@
                :class="['q-option', { selected: isOptionSelected(i) }]"
                @click="selectOption(i)">
             <span class="opt-label">{{ optionLabel(i) }}</span>
-            <span class="opt-text">{{ opt }}</span>
+            <span class="opt-text"><RichContent :content="String(opt ?? '')" /></span>
           </div>
         </div>
 
@@ -102,14 +102,14 @@
               {{ ans.is_correct ? '答对' : '答错' }}
             </el-tag>
           </div>
-          <div class="res-q">{{ ans.question_content }}</div>
+          <div class="res-q"><RichContent :content="ans.question_content || ''" /></div>
           <div class="res-a">
             <div class="res-row"><span class="label">你的作答：</span>{{ ans.student_answer || '（空）' }}</div>
-            <div class="res-row correct"><span class="label">正确答案：</span>{{ ans.correct_answer }}</div>
+            <div class="res-row correct"><span class="label">正确答案：</span><RichContent :content="String(ans.correct_answer ?? '')" /></div>
           </div>
           <div v-if="ans.analysis" class="res-analysis">
             <el-divider content-position="left">解析</el-divider>
-            <div>{{ ans.analysis }}</div>
+            <div><RichContent :content="ans.analysis || ''" /></div>
           </div>
         </div>
       </div>
@@ -121,6 +121,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import request from '../utils/request'
+import RichContent from '../components/RichContent.vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
 const route = useRoute()

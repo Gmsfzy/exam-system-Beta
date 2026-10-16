@@ -83,6 +83,7 @@
                 <el-dropdown-item command="students">邀请学生</el-dropdown-item>
                 <el-dropdown-item command="monitor">实时监考</el-dropdown-item>
                 <el-dropdown-item command="analysis">试题分析</el-dropdown-item>
+                <el-dropdown-item command="plagiarism">代码查重</el-dropdown-item>
                 <el-dropdown-item command="inspect">AI 试卷质检</el-dropdown-item>
                 <el-dropdown-item command="export">导出成绩</el-dropdown-item>
                 <el-dropdown-item command="publishResults" divided>
@@ -765,6 +766,9 @@ const handleDropdownAction = async (action, exam) => {
       break
     case 'analysis':
       router.push(`/exams/${exam.id}/item-analysis`)
+      break
+    case 'plagiarism':
+      router.push(`/exams/${exam.id}/plagiarism`)
       break
     case 'inspect':
       aiInspectExam(exam)

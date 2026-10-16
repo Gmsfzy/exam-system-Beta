@@ -6,12 +6,12 @@
         <span>第 {{ idx + 1 }} / {{ questions.length }} 题</span>
         <el-tag size="small">{{ typeLabel(current.type) }}</el-tag>
       </div>
-      <div class="qz-content">{{ current.content }}</div>
+      <div class="qz-content"><RichContent :content="current.content || ''" /></div>
       <div v-if="isChoice(current.type)" class="qz-options">
         <div v-for="(opt, i) in (current.options || [])" :key="i"
              :class="['qz-option', { selected: isPicked(i) }]" @click="pick(i)">
           <span class="opt-label">{{ String.fromCharCode(65 + i) }}</span>
-          <span>{{ opt }}</span>
+          <span><RichContent :content="String(opt ?? '')" /></span>
         </div>
       </div>
       <div v-else-if="current.type === 'true_false'" class="qz-options">
@@ -60,6 +60,7 @@
 import { ref, computed, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import request from '../utils/request'
+import RichContent from '../components/RichContent.vue'
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },

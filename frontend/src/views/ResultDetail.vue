@@ -40,7 +40,7 @@
       <h3 class="card-title">
         <el-icon><InfoFilled /></el-icon> AI分析报告
       </h3>
-      <div class="analysis-content">{{ resultData.ai_analysis }}</div>
+      <div class="analysis-content"><RichContent :content="resultData.ai_analysis || ''" /></div>
     </div>
 
     <el-alert
@@ -70,11 +70,11 @@
             <el-icon><Minus /></el-icon>未答
           </span>
         </div>
-        <div class="question-content">{{ answer.content }}</div>
+        <div class="question-content"><RichContent :content="answer.content || ''" /></div>
         <div v-if="answer.options" class="options-list">
           <div v-for="(opt, idx) in getOptions(answer.options)" :key="idx" class="option-item">
             <span class="option-key">{{ opt.key }}</span>
-            <span class="option-text">{{ opt.value }}</span>
+            <span class="option-text"><RichContent :content="String(opt.value ?? '')" /></span>
           </div>
         </div>
         <div class="answer-section">
@@ -84,11 +84,11 @@
           </div>
           <div v-if="resultData.answers_released" class="answer-row">
             <span class="answer-label">正确答案：</span>
-            <span class="answer-value correct">{{ answer.correct_answer }}</span>
+            <span class="answer-value correct"><RichContent :content="String(answer.correct_answer ?? '')" /></span>
           </div>
           <div v-if="resultData.answers_released && answer.analysis" class="answer-row">
             <span class="answer-label">解析：</span>
-            <span class="answer-value analysis">{{ answer.analysis }}</span>
+            <span class="answer-value analysis"><RichContent :content="answer.analysis || ''" /></span>
           </div>
         </div>
       </div>
@@ -112,6 +112,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { InfoFilled, Check, Close, Minus, Clock } from '@element-plus/icons-vue'
 import request from '../utils/request'
+import RichContent from '../components/RichContent.vue'
 
 const route = useRoute()
 const router = useRouter()

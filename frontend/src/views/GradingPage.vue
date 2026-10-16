@@ -20,11 +20,11 @@
           <span v-if="answer.oj_verdict" class="badge-oj" :class="{ ac: answer.oj_verdict === 'AC' }">OJ {{ answer.oj_verdict }}</span>
           <span v-if="answer.needs_manual_grade" class="badge-pending">需人工评分</span>
         </div>
-        <div class="question-content">{{ answer.content }}</div>
+        <div class="question-content"><RichContent :content="answer.content || ''" /></div>
         <div v-if="answer.options" class="options-list">
           <div v-for="(opt, idx) in getOptions(answer.options)" :key="idx" class="option-item">
             <span class="option-key">{{ opt.key }}</span>
-            <span class="option-text">{{ opt.value }}</span>
+            <span class="option-text"><RichContent :content="String(opt.value ?? '')" /></span>
           </div>
         </div>
         <div class="answer-section">
@@ -34,7 +34,7 @@
           </div>
           <div class="answer-row">
             <span class="answer-label">正确答案：</span>
-            <span class="answer-value correct">{{ answer.correct_answer }}</span>
+            <span class="answer-value correct"><RichContent :content="String(answer.correct_answer ?? '')" /></span>
           </div>
         </div>
         <div v-if="answer.needs_manual_grade" class="grading-section">
@@ -97,6 +97,7 @@ import { ref, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import request from '../utils/request'
+import RichContent from '../components/RichContent.vue'
 
 const route = useRoute()
 const router = useRouter()

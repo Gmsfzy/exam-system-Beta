@@ -65,7 +65,7 @@
         </div>
 
         <div class="question-content">
-          <p>{{ currentQuestion.content }}</p>
+          <RichContent :content="currentQuestion.content || ''" />
         </div>
 
         <div v-if="currentQuestion.type === 'single_choice'" class="options-list">
@@ -77,7 +77,7 @@
             @click="selectOption(opt.key)"
           >
             <span class="option-key">{{ opt.key }}</span>
-            <span class="option-text">{{ opt.value }}</span>
+            <span class="option-text"><RichContent :content="String(opt.value ?? '')" /></span>
           </div>
         </div>
 
@@ -90,7 +90,7 @@
             @click="toggleOption(currentQuestion.id, opt.key)"
           >
             <span class="option-key">{{ opt.key }}</span>
-            <span class="option-text">{{ opt.value }}</span>
+            <span class="option-text"><RichContent :content="String(opt.value ?? '')" /></span>
           </div>
         </div>
 
@@ -149,6 +149,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Clock, Warning } from '@element-plus/icons-vue'
 import request from '../utils/request'
+import RichContent from '../components/RichContent.vue'
 
 const route = useRoute()
 const router = useRouter()

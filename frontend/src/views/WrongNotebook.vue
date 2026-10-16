@@ -50,7 +50,7 @@
         <span class="wrong-count">错 {{ rec.wrong_count }} 次</span>
       </div>
 
-      <div class="question-content" v-html="renderContent(rec.question_content)"></div>
+      <div class="question-content"><RichContent :content="rec.question_content || ''" /></div>
 
       <!-- 选项（客观题） -->
       <div v-if="rec.options && rec.question_type !== 'fill_blank' && rec.question_type !== 'essay'" class="options">
@@ -148,6 +148,7 @@ import request from '../utils/request'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Loading, Search, MagicStick } from '@element-plus/icons-vue'
 import AIChatDialog from '../components/AIChatDialog.vue'
+import RichContent from '../components/RichContent.vue'
 
 const router = useRouter()
 
@@ -214,7 +215,6 @@ function isWrongOption(rec, i) {
   const a = (rec.wrong_answer || '').toUpperCase().trim()
   return a.includes(optionLabel(i))
 }
-function renderContent(text) { return text || '' }
 
 async function toggleMastered(rec) {
   try {

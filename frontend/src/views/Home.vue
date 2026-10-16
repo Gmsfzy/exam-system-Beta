@@ -26,7 +26,7 @@
           <button class="theme-toggle" @click="toggleTheme" :title="isDark ? '切换亮色' : '切换暗色'">
             <el-icon :size="17"><Moon v-if="isDark" /><Sunny v-else /></el-icon>
           </button>
-          <router-link to="/login" class="btn btn-ghost">登录</router-link>
+          <router-link :to="loginLink" class="btn btn-ghost">登录</router-link>
           <router-link to="/register" class="btn btn-ghost">注册</router-link>
           <router-link to="/register" class="btn btn-primary btn-glow">免费试用</router-link>
         </div>
@@ -239,7 +239,7 @@
                   <b>{{ f.num }}</b><span>{{ f.label }}</span>
                 </div>
               </div>
-              <router-link to="/login" class="btn btn-enter" :style="{ background: modules[active].gradient }">
+              <router-link :to="loginLink" class="btn btn-enter" :style="{ background: modules[active].gradient }">
                 进入{{ modules[active].title }} <el-icon :size="15"><ArrowRight /></el-icon>
               </router-link>
             </div>
@@ -418,7 +418,7 @@
         <p>注册即享全部功能，把学习交给智汇学场</p>
         <div class="cta-btns">
           <router-link to="/register" class="btn btn-xl btn-primary btn-glow">免费注册 <el-icon :size="17"><ArrowRight /></el-icon></router-link>
-          <router-link to="/login" class="btn btn-xl btn-glass">已有账号，登录</router-link>
+          <router-link :to="loginLink" class="btn btn-xl btn-glass">已有账号，登录</router-link>
         </div>
         <div class="cta-notes">
           <span><el-icon :size="13"><Check /></el-icon> 永久免费基础功能</span>
@@ -457,7 +457,8 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted, markRaw, nextTick } from 'vue'
+import { ref, computed, onMounted, onUnmounted, markRaw, nextTick } from 'vue'
+import { useRoute } from 'vue-router'
 import {
   School, Moon, Sunny, ArrowRight, VideoPlay, MagicStick, Check, Grid, Refresh,
   Calendar, Trophy, Coin, Reading, EditPen, DataAnalysis, ChatDotRound, Compass,
@@ -465,11 +466,18 @@ import {
 } from '@element-plus/icons-vue'
 import VideoModal from '../components/VideoModal.vue'
 
+const route = useRoute()
 const isDark = ref(true)
 const isScrolled = ref(false)
 const showVideoModal = ref(false)
 const active = ref(0)
 const faqOpen = ref(0)
+
+// 带 redirect 参数时把登录链接透传下去，方便用户登录后跳回原路径
+const loginLink = computed(() => {
+  const r = route.query.redirect
+  return (typeof r === 'string' && r.startsWith('/') && !r.startsWith('//')) ? `/login?redirect=${encodeURIComponent(r)}` : '/login'
+})
 
 const heroRef = ref(null); const modulesRef = ref(null); const aiRef = ref(null)
 const panoRef = ref(null); const workflowRef = ref(null); const voicesRef = ref(null)

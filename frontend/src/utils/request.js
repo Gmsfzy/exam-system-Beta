@@ -52,7 +52,9 @@ request.interceptors.response.use(
     if (status === 401) {
       localStorage.removeItem('token')
       localStorage.removeItem('user')
-      window.location.href = '/home'
+      // 带 redirect 参数保留原路径，登录后可跳回（防止用户在编辑页 token 过期丢失草稿位置）
+      const redirect = window.location.pathname + window.location.search
+      window.location.href = `/home?redirect=${encodeURIComponent(redirect)}`
     }
     
     return Promise.reject(error)
