@@ -7,7 +7,8 @@
         含赛事竞赛版：冻结→审核→结算释放/驳回退回）、
   分链（建卷→组卷→邀请→发布→开考→作答→交卷→成绩 HTTP 往返，
         含 PK 对战建房→应战→逐题→双方交卷→Elo/积分镜像、
-        自由练习编程题 OJ 自动评测 AC/WA/CE）。
+        自由练习编程题 OJ 自动评测 AC/WA/CE、
+        作业练习全链：发布→通知→作答脱敏→自动判分→重交→人工批改→成绩）。
 边界：限流非被测目标（fixture 关闭）；判分数值语义由函数层判分矩阵测试
 负责，这里只保证端到端连通与响应形状；全程走 conftest 改指后的临时库，
 绝不触碰 instance 真库。
@@ -86,6 +87,7 @@ def app_module():
         import bounty.models          # noqa: F401
         import ledger.models          # noqa: F401
         import dsci.models            # noqa: F401
+        import homework.models        # noqa: F401
         db.create_all()
         yield prod
         db.session.remove()
@@ -228,6 +230,13 @@ def test_exam_score_chain(ctx):
     assert c.post(f'/api/exam/{exam_id}/submit',
                   json={'session_id': session_id},
                   headers=_auth(ctx['s2'])).status_code == 400
+
+    # 师生互动：学生交卷 → 教师（创建者 t1）收到铃铛通知
+    from database.models import Notification
+    with a.app_context():
+        assert Notification.query.filter_by(
+            user_id=ctx['t1_id'], related_type='exam', related_id=exam_id,
+            title='学生交卷：E2E 测验').count() == 1
 
     # 教师侧成绩：已提交会话 + 客观题自动判分（答对得满分）
     r = c.get(f'/api/results/exam/{exam_id}', headers=_auth(ctx['t1']))
@@ -587,3 +596,373 @@ def test_ds_competition_chain(ctx):
     assert _bal(c, ctx['t1']) == b0
     with ctx['_app'].app_context():
         assert ledger.assert_conservation() == []
+
+
+# ─────────────────────────── 作业链（v5.0） ───────────────────────────
+
+def test_homework_full_chain(ctx):
+    """发布→通知→作答脱敏→自动判分→重交→人工批改→成绩→账本零流水→时效边界。"""
+    from datetime import timedelta
+    from database import db
+    from database.models import Question, Notification
+    from ledger.models import LedgerTxn
+    from utils.timeutil import utcnow, iso_local
+    from homework.models import Homework, HomeworkSubmission
+    c = ctx['_client']
+    with ctx['_app'].app_context():
+        # s1 可能已有 PK/竞赛积分镜像流水：取基准值，作业链应零增量
+        ledger_base = LedgerTxn.query.filter_by(user_id=ctx['s1_id']).count()
+
+    # 造题：编程（OJ 用例）+ 简答（主观）；单选复用 ctx['question_id']
+    with ctx['_app'].app_context():
+        q_prog = Question(content='读入 n 输出 n+1', answer='', type='programming',
+                          difficulty='easy', major_id=ctx['major_id'],
+                          test_cases=[{'input': '3', 'expected': '4'}])
+        q_short = Question(content='简述快排思想', answer='分治', type='short_answer',
+                           difficulty='easy', major_id=ctx['major_id'])
+        db.session.add_all([q_prog, q_short])
+        db.session.commit()
+        prog_id, short_id = q_prog.id, q_short.id
+
+    # 权限：student 建作业 → 403
+    assert c.post('/api/homeworks', json={'title': 'x'},
+                  headers=_auth(ctx['s1'])).status_code == 403
+
+    # 教师建草稿（题集式：单选5 + 编程10 + 简答6）→ 发布通知 s1
+    # 注：parse_dt 对 naive 输入按上海墙上时间解释（全系统约定），故用 iso_local 产串
+    deadline = iso_local(utcnow() + timedelta(hours=6))
+    r = c.post('/api/homeworks', json={
+        'title': 'E2E 作业', 'deadline': deadline, 'student_ids': [ctx['s1_id']],
+        'questions': [{'question_id': ctx['question_id'], 'score': 5},
+                      {'question_id': prog_id, 'score': 10},
+                      {'question_id': short_id, 'score': 6}]},
+        headers=_auth(ctx['t1']))
+    assert r.status_code == 201, r.get_json()
+    hw_id = r.get_json()['homework']['id']
+    r = c.post(f'/api/homeworks/{hw_id}/publish', headers=_auth(ctx['t1']))
+    assert r.status_code == 200 and '通知 1 名学生' in r.get_json()['message']
+
+    # 学生收发布通知
+    with ctx['_app'].app_context():
+        assert Notification.query.filter_by(
+            user_id=ctx['s1_id'], related_type='homework', related_id=hw_id).count() == 1
+
+    # 名单边界：非名单学生 s2 → 403；学生 take 序列化不得下发答案/解析
+    assert c.get(f'/api/homeworks/{hw_id}/take', headers=_auth(ctx['s2'])).status_code == 403
+    r = c.get(f'/api/homeworks/{hw_id}/take', headers=_auth(ctx['s1']))
+    assert r.status_code == 200 and r.get_json()['editable'] is True
+    qs = r.get_json()['questions']
+    assert len(qs) == 3
+    flat = str(qs)
+    assert '分治' not in flat and '"answer"' not in flat
+
+    # 自动保存草稿作答 → 首次提交：单选+编程自动判分，简答待人工
+    answers = {str(ctx['question_id']): 'B', str(prog_id): 'print(int(input())+1)',
+               str(short_id): '分治递归'}
+    r = c.post(f'/api/homeworks/{hw_id}/answers', json={'answers': answers},
+               headers=_auth(ctx['s1']))
+    assert r.status_code == 200 and r.get_json()['saved'] == 3
+    r = c.post(f'/api/homeworks/{hw_id}/submit', json={'answers': answers},
+               headers=_auth(ctx['s1']))
+    assert r.status_code == 201, r.get_json()
+    sub = r.get_json()['submission']
+    sub_id = sub['id']
+    assert sub['status'] == 'submitted' and sub['version'] == 1 and sub['max_score'] == 21.0
+
+    # 重交：version+1，人工痕迹清零、自动判分重跑
+    r = c.post(f'/api/homeworks/{hw_id}/submit', json={'answers': answers},
+               headers=_auth(ctx['s1']))
+    assert r.status_code == 201 and r.get_json()['submission']['version'] == 2
+
+    # 师生互动：提交/重交各给教师发一条通知
+    with ctx['_app'].app_context():
+        assert Notification.query.filter_by(
+            user_id=ctx['t1_id'], related_type='homework', related_id=hw_id,
+            title='收到作业提交').count() == 1
+        assert Notification.query.filter_by(
+            user_id=ctx['t1_id'], related_type='homework', related_id=hw_id,
+            title='收到作业重交').count() == 1
+
+    # 教师列表：s1 已交、s2 不在名单（not_submitted 只含名单内未交者，此处为空）
+    r = c.get(f'/api/homeworks/{hw_id}/submissions', headers=_auth(ctx['t1']))
+    body = r.get_json()
+    assert body['student_count'] == 1 and len(body['items']) == 1
+    assert body['items'][0]['status'] == 'submitted'
+
+    # 批改视图 → 给主观 4 分 + 总评 → pending=0 转 graded
+    r = c.get(f'/api/homeworks/{hw_id}/grade/{sub_id}', headers=_auth(ctx['t1']))
+    g = r.get_json()
+    short_row = next(a for a in g['answers'] if a['question_id'] == short_id)
+    assert short_row['needs_manual_grade'] is True
+    r = c.post(f'/api/homeworks/{hw_id}/grade/{sub_id}', json={
+        'answers': [{'answer_id': short_row['id'], 'score': 4, 'comment': '思路正确'}],
+        'comment': '整体不错'}, headers=_auth(ctx['t1']))
+    body = r.get_json()
+    assert body['graded'] is True and body['submission']['total_score'] == 19.0
+
+    # 成绩公布通知 + 学生查成绩
+    with ctx['_app'].app_context():
+        assert Notification.query.filter_by(
+            user_id=ctx['s1_id'], related_type='homework',
+            related_id=hw_id, title='作业已批改').count() == 1
+    r = c.get(f'/api/homeworks/{hw_id}/result', headers=_auth(ctx['s1']))
+    body = r.get_json()
+    assert body['submission']['status'] == 'graded' and body['submission']['total_score'] == 19.0
+
+    # graded 后锁定：再提交 → 400
+    assert c.post(f'/api/homeworks/{hw_id}/submit', json={'answers': answers},
+                  headers=_auth(ctx['s1'])).status_code == 400
+
+    # 账本零增量：作业不进 ledger
+    with ctx['_app'].app_context():
+        assert LedgerTxn.query.filter_by(user_id=ctx['s1_id']).count() == ledger_base
+
+    # 时效边界：先正常发布，再直改库把截止拨到过去模拟过期（publish 有未过期护栏）
+    future = iso_local(utcnow() + timedelta(hours=6))
+    hids = []
+    for allow_late in (False, True):
+        r = c.post('/api/homeworks', json={
+            'title': f'E2E 时效{allow_late}', 'deadline': future, 'allow_late': allow_late,
+            'student_ids': [ctx['s1_id']],
+            'questions': [{'question_id': ctx['question_id'], 'score': 1}]},
+            headers=_auth(ctx['t1']))
+        hid = r.get_json()['homework']['id']
+        assert c.post(f'/api/homeworks/{hid}/publish',
+                      headers=_auth(ctx['t1'])).status_code == 200
+        with ctx['_app'].app_context():
+            hw = db.session.get(Homework, hid)
+            hw.deadline = utcnow() - timedelta(hours=1)
+            db.session.commit()
+        hids.append(hid)
+
+    # 过期禁迟交 → 403；允许迟交 → 提交成功且标记 is_late
+    r = c.post(f'/api/homeworks/{hids[0]}/submit',
+               json={'answers': {str(ctx['question_id']): 'B'}}, headers=_auth(ctx['s1']))
+    assert r.status_code == 403
+    r = c.post(f'/api/homeworks/{hids[1]}/submit',
+               json={'answers': {str(ctx['question_id']): 'B'}}, headers=_auth(ctx['s1']))
+    assert r.status_code == 201 and r.get_json()['submission']['is_late'] is True
+
+    # 教师关闭作业 → 再提交 400
+    hid = hids[0]
+    assert c.post(f'/api/homeworks/{hid}/close', headers=_auth(ctx['t1'])).status_code == 200
+    assert c.post(f'/api/homeworks/{hid}/submit',
+                  json={'answers': {str(ctx['question_id']): 'B'}},
+                  headers=_auth(ctx['s1'])).status_code == 400
+    with ctx['_app'].app_context():
+        assert db.session.get(Homework, hid).status == 'closed'
+
+
+def test_homework_open_grading(ctx):
+    """开放式作业：正文提交→整体待批→教师给总分转 graded→学生可查分。"""
+    from datetime import timedelta
+    from utils.timeutil import utcnow, iso_local
+    c = ctx['_client']
+    deadline = iso_local(utcnow() + timedelta(hours=6))
+
+    # 开放式无正文不可发布（需填 description）
+    r = c.post('/api/homeworks', json={
+        'title': 'E2E 小论文', 'hw_type': 'open', 'deadline': deadline,
+        'student_ids': [ctx['s1_id']]}, headers=_auth(ctx['t1']))
+    assert r.status_code == 201, r.get_json()
+    hid = r.get_json()['homework']['id']
+    assert c.post(f'/api/homeworks/{hid}/publish',
+                  headers=_auth(ctx['t1'])).status_code == 400   # 缺说明拦截
+    c.put(f'/api/homeworks/{hid}', json={'description': '写一篇学习总结'},
+          headers=_auth(ctx['t1']))
+    assert c.post(f'/api/homeworks/{hid}/publish',
+                  headers=_auth(ctx['t1'])).status_code == 200
+
+    # 空内容提交被拒 → 填正文后提交成功（整体待批）
+    assert c.post(f'/api/homeworks/{hid}/submit', json={'content': ''},
+                  headers=_auth(ctx['s1'])).status_code == 400
+    r = c.post(f'/api/homeworks/{hid}/submit', json={'content': '我的学习总结正文'},
+               headers=_auth(ctx['s1']))
+    assert r.status_code == 201, r.get_json()
+    sub = r.get_json()['submission']
+    assert sub['status'] == 'submitted' and sub['total_score'] is None
+
+    # 未给分只存评语：保持待批；给分后转 graded
+    r = c.post(f'/api/homeworks/{hid}/grade/{sub["id"]}',
+               json={'comment': '再补充点数据'}, headers=_auth(ctx['t1']))
+    assert r.status_code == 200 and r.get_json()['graded'] is False
+    r = c.post(f'/api/homeworks/{hid}/grade/{sub["id"]}',
+               json={'score': 88, 'max_score': 100, 'comment': '优秀'},
+               headers=_auth(ctx['t1']))
+    assert r.status_code == 200 and r.get_json()['graded'] is True
+    assert r.get_json()['submission']['total_score'] == 88.0
+
+    # 分数越界拒绝
+    assert c.post(f'/api/homeworks/{hid}/grade/{sub["id"]}',
+                  json={'score': 200}, headers=_auth(ctx['t1'])).status_code == 400
+
+    # 学生查成绩可见总分与评语
+    body = c.get(f'/api/homeworks/{hid}/result', headers=_auth(ctx['s1'])).get_json()
+    assert body['submission']['status'] == 'graded' and body['submission']['total_score'] == 88.0
+    assert body['submission']['comment'] == '优秀'
+
+
+def test_homework_v51_features(ctx):
+    """v5.1 增强：截止时间可选 + 及格线统计 + 导出 + 复制 + 随机抽题 + 参考资料 + 催交。"""
+    import io
+    from datetime import timedelta
+    from database import db
+    from database.models import Notification
+    from homework.models import Homework
+    from utils.timeutil import utcnow, iso_local
+    c = ctx['_client']
+
+    # 1) 无截止时间：缺省 deadline → has_deadline False，可发布/作答/永不判过期
+    r = c.post('/api/homeworks', json={
+        'title': 'E2E 无截止', 'student_ids': [ctx['s1_id']], 'pass_score': 6,
+        'questions': [{'question_id': ctx['question_id'], 'score': 10}]},
+        headers=_auth(ctx['t1']))
+    assert r.status_code == 201, r.get_json()
+    hw = r.get_json()['homework']
+    hid = hw['id']
+    assert hw['has_deadline'] is False and hw['deadline'] is None
+    assert hw['pass_score'] == 6 and hw['is_expired'] is False
+    assert c.post(f'/api/homeworks/{hid}/publish', headers=_auth(ctx['t1'])).status_code == 200
+    r = c.get(f'/api/homeworks/{hid}/take', headers=_auth(ctx['s1']))
+    assert r.status_code == 200 and r.get_json()['editable'] is True
+    r = c.post(f'/api/homeworks/{hid}/submit',
+               json={'answers': {str(ctx['question_id']): 'B'}}, headers=_auth(ctx['s1']))
+    assert r.status_code == 201 and r.get_json()['submission']['is_late'] is False
+    sub_id = r.get_json()['submission']['id']
+
+    # 纯客观题批改（pending=0 直接转 graded）→ 满分 10
+    r = c.post(f'/api/homeworks/{hid}/grade/{sub_id}', json={'comment': '全对'},
+               headers=_auth(ctx['t1']))
+    assert r.get_json()['graded'] is True and r.get_json()['submission']['total_score'] == 10.0
+
+    # 2) 成绩统计：及格率/优秀率（pass_score=6，满分 10）
+    st = c.get(f'/api/homeworks/{hid}/stats', headers=_auth(ctx['t1'])).get_json()['stats']
+    assert st['student_count'] == 1 and st['submitted_count'] == 1 and st['graded_count'] == 1
+    assert st['avg_score'] == 10.0 and st['full_score'] == 10.0
+    assert st['pass_rate'] == 100.0 and st['excellent_rate'] == 100.0
+
+    # 3) 导出 CSV：含表头与已批改行
+    r = c.get(f'/api/homeworks/{hid}/export', headers=_auth(ctx['t1']))
+    assert r.status_code == 200 and 'csv' in r.content_type
+    body = r.data.decode('utf-8-sig')
+    assert '学生' in body and '已批改' in body
+
+    # 4) 复制为草稿：题量/及格线/无截止一并带走
+    r = c.post(f'/api/homeworks/{hid}/copy', headers=_auth(ctx['t1']))
+    assert r.status_code == 201
+    cp = r.get_json()['homework']
+    assert cp['status'] == 'draft' and cp['title'].endswith('（副本）')
+    assert cp['question_count'] == 1 and cp['pass_score'] == 6 and cp['has_deadline'] is False
+
+    # 5) 随机抽题：按专业抽题，返回可预填题单
+    r = c.get(f'/api/homeworks/random_questions?count=3&major_id={ctx["major_id"]}',
+              headers=_auth(ctx['t1']))
+    assert r.status_code == 200 and len(r.get_json()['items']) >= 1
+
+    # 6) 参考资料：教师上传→名单内学生下载→非名单 403
+    r = c.post(f'/api/homeworks/{hid}/reference',
+               data={'file': (io.BytesIO(b'reference-material'), 'note.txt')},
+               content_type='multipart/form-data', headers=_auth(ctx['t1']))
+    assert r.status_code == 200 and r.get_json()['reference']['filename'] == 'note.txt'
+    r = c.get(f'/api/homeworks/{hid}/reference', headers=_auth(ctx['s1']))
+    assert r.status_code == 200 and r.data == b'reference-material'
+    assert c.get(f'/api/homeworks/{hid}/reference', headers=_auth(ctx['s2'])).status_code == 403
+
+    # 7) 催交：仅提醒未交学生（s1 已交、s2 未交）
+    r = c.post('/api/homeworks', json={
+        'title': 'E2E 催交', 'student_ids': [ctx['s1_id'], ctx['s2_id']],
+        'questions': [{'question_id': ctx['question_id'], 'score': 1}]},
+        headers=_auth(ctx['t1']))
+    uh = r.get_json()['homework']['id']
+    c.post(f'/api/homeworks/{uh}/publish', headers=_auth(ctx['t1']))
+    c.post(f'/api/homeworks/{uh}/submit', json={'answers': {str(ctx['question_id']): 'B'}},
+           headers=_auth(ctx['s1']))
+    r = c.post(f'/api/homeworks/{uh}/urge', headers=_auth(ctx['t1']))
+    assert r.status_code == 200 and r.get_json()['urged'] == 1
+    with ctx['_app'].app_context():
+        assert Notification.query.filter_by(
+            user_id=ctx['s2_id'], related_type='homework', related_id=uh,
+            title='作业催交提醒').count() == 1
+        assert Notification.query.filter_by(
+            user_id=ctx['s1_id'], related_type='homework', related_id=uh,
+            title='作业催交提醒').count() == 0
+
+    # 8) 改期：无截止→设截止；再取消回无截止
+    future = iso_local(utcnow() + timedelta(hours=3))
+    c.put(f'/api/homeworks/{uh}', json={'deadline': future}, headers=_auth(ctx['t1']))
+    with ctx['_app'].app_context():
+        assert db.session.get(Homework, uh).deadline is not None
+    c.put(f'/api/homeworks/{uh}', json={'deadline': ''}, headers=_auth(ctx['t1']))
+    with ctx['_app'].app_context():
+        assert db.session.get(Homework, uh).deadline is None
+
+
+def test_notification_realtime_push(ctx, monkeypatch):
+    """全局通知实时推送（ORM 事件层）：任何模块通知 commit 后自动推 new_notification，
+    覆盖 commit=True 单发与 commit=False 批量；回滚不推（防幽灵推送）。
+    锁死「Notification 无 to_dict 导致推送静默失败」这类回归。"""
+    import competition.realtime as rt
+    from database import db
+    from database.models import Notification
+    from api.notification_routes import create_notification
+    from utils.timeutil import utcnow, iso_local
+    from datetime import timedelta
+    c = ctx['_client']
+
+    pushed = []
+    monkeypatch.setattr(rt, 'notify_user',
+                        lambda uid, ev, payload: pushed.append((uid, ev, payload)))
+
+    # 1) commit=True 单发：直接经全局助手创建通知 → 立即推送，负载形状与轮询一致
+    with ctx['_app'].app_context():
+        create_notification(ctx['s1_id'], '推送机制直发', '正文', type='success',
+                            related_type='exam', related_id=999, commit=True)
+    hit = [p for p in pushed if p[0] == ctx['s1_id'] and p[2]['title'] == '推送机制直发']
+    assert hit, f'commit=True 未实时推送: {pushed}'
+    assert hit[0][1] == 'new_notification'
+    pl = hit[0][2]
+    assert pl['read'] is False and pl['id'] and pl['related_type'] == 'exam'
+    assert 'created_at' in pl and 'time_ago' in pl and pl['type'] == 'success'
+
+    # 2) commit=False 批量：教师发布作业（名单学生通知走批量路径）→ 学生收到推送
+    pushed.clear()
+    deadline = iso_local(utcnow() + timedelta(hours=6))
+    r = c.post('/api/homeworks', json={
+        'title': '推送验证作业', 'deadline': deadline, 'student_ids': [ctx['s1_id']],
+        'questions': [{'question_id': ctx['question_id'], 'score': 5}]},
+        headers=_auth(ctx['t1']))
+    hw_id = r.get_json()['homework']['id']
+    assert c.post(f'/api/homeworks/{hw_id}/publish',
+                  headers=_auth(ctx['t1'])).status_code == 200
+    pub = [p for p in pushed if p[0] == ctx['s1_id']
+           and p[2].get('related_type') == 'homework' and p[2].get('related_id') == hw_id]
+    assert pub, f'发布(批量路径)未实时推送: {pushed}'
+
+    # 3) 回滚不推送：flush 暂存后 rollback，负载应被丢弃
+    pushed.clear()
+    with ctx['_app'].app_context():
+        ghost = Notification(user_id=ctx['s1_id'], title='幽灵通知', content='', type='info')
+        db.session.add(ghost)
+        db.session.flush()          # after_insert 暂存
+        db.session.rollback()       # after_rollback 丢弃
+    assert [p for p in pushed if p[2].get('title') == '幽灵通知'] == []
+
+
+def test_follow_notification(ctx):
+    """学习模块互动：A 关注 B → B 收到“有人关注了你”；取关不新增。"""
+    from database.models import Notification
+    c = ctx['_client']
+    fa, _ = _register(c, 'e2e_follow_a', 'student')
+    fb, fbu = _register(c, 'e2e_follow_b', 'student')
+    r = c.post(f'/api/learning/users/{fbu["id"]}/follow', headers=_auth(fa))
+    assert r.status_code == 200 and r.get_json()['following'] is True
+    with ctx['_app'].app_context():
+        assert Notification.query.filter_by(
+            user_id=fbu['id'], related_type='user', title='有人关注了你').count() == 1
+    # 取关：不新增通知
+    assert c.post(f'/api/learning/users/{fbu["id"]}/follow',
+                  headers=_auth(fa)).get_json()['following'] is False
+    with ctx['_app'].app_context():
+        assert Notification.query.filter_by(
+            user_id=fbu['id'], related_type='user', title='有人关注了你').count() == 1
+

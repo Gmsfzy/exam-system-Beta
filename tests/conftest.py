@@ -48,6 +48,7 @@ def app():
         import bounty.models          # noqa: F401
         import ledger.models          # noqa: F401
         import dsci.models            # noqa: F401
+        import homework.models        # noqa: F401
         db.create_all()
         yield a
         db.session.remove()
