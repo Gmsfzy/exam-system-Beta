@@ -163,7 +163,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { Back, ChatLineSquare, ChatDotRound, MagicStick, UserFilled } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -193,6 +193,11 @@ const personalReview = ref(null)   // 单份 AI 讲评（批改后）
 const peerReview = ref(null)       // 生生互评结果（批改后匿名）
 const myGroup = ref(null)          // 小组作业：本人所在小组
 
+// v5.16 本地草稿容灾 + 作答防作弊采集
+const DRAFT_KEY = `hw_draft_${hwId}`
+let draftTimer = null
+let reportingReady = false
+
 const typeName = (t) => ({ single_choice: '单选', multiple_choice: '多选', true_false: '判断',
   fill_blank: '填空', programming: '编程', short_answer: '简答', essay: '论述' }[t] || t)
 const isSingle = (t) => t === 'single_choice' || t === 'true_false'
@@ -218,6 +223,47 @@ const collectAnswers = () => {
   return out
 }
 
+// ── v5.16 本地草稿容灾（防抖写 localStorage，进入优先回填，提交成功清本地）──
+const snapshotLocal = () => (hw.value.hw_type === 'open'
+  ? { content: content.value }
+  : { answers: { ...answers }, multi: Object.fromEntries(
+      Object.entries(multi).map(([k, v]) => [k, Array.isArray(v) ? [...v] : v])) })
+
+const scheduleLocalSave = () => {
+  if (!editable.value || !hw.value.id) return
+  if (draftTimer) clearTimeout(draftTimer)
+  draftTimer = setTimeout(() => {
+    try { localStorage.setItem(DRAFT_KEY, JSON.stringify(snapshotLocal())) } catch (e) { /* 存满忽略 */ }
+  }, 500)
+}
+
+const restoreLocal = () => {
+  let raw
+  try { raw = localStorage.getItem(DRAFT_KEY) } catch (e) { return false }
+  if (!raw) return false
+  let d
+  try { d = JSON.parse(raw) } catch (e) { return false }
+  if (hw.value.hw_type === 'open') {
+    if (d.content) content.value = d.content
+  } else if (d.answers) {
+    Object.keys(d.answers).forEach(qid => { answers[qid] = d.answers[qid] })
+    if (d.multi) Object.keys(d.multi).forEach(qid => { multi[qid] = d.multi[qid] })
+  }
+  return true
+}
+
+const clearLocal = () => { try { localStorage.removeItem(DRAFT_KEY) } catch (e) { /* 忽略 */ } }
+
+// ── v5.16 作答防作弊事件上报（仅作业开启监测且可作答时；只记不拦）──
+const reportProctor = (type) => {
+  if (!reportingReady || !hw.value.enable_monitor || !editable.value) return
+  request.post(`/api/homeworks/${hwId}/proctor`, { type }).catch(() => { /* 静默，不打断作答 */ })
+}
+const onVisibility = () => { if (document.hidden) reportProctor('tab_switch') }
+const onBlur = () => reportProctor('blur')
+const onPaste = () => reportProctor('paste')
+const onCopy = () => reportProctor('copy')
+
 const load = async () => {
   loading.value = true
   try {
@@ -241,6 +287,11 @@ const load = async () => {
     submission.value = d.submission || null
     myGroup.value = d.my_group || null
     if (submission.value) await loadResult()
+    // v5.16 本地草稿优先回填（仅可作答时）
+    if (editable.value && restoreLocal()) {
+      ElMessage.info('已恢复本地未提交草稿')
+    }
+    reportingReady = true
   } finally {
     loading.value = false
   }
@@ -298,13 +349,34 @@ const doSubmit = async () => {
       res = await request.post(`/api/homeworks/${hwId}/submit`, payload)
     }
     ElMessage.success(res.data.message || '提交成功')
+    clearLocal()   // v5.16 提交成功后清本地草稿
     await load()
   } finally {
     submitting.value = false
   }
 }
 
-onMounted(load)
+onMounted(async () => {
+  await load()
+  // v5.16 本地草稿防抖：正文/作答变化时写入
+  watch(content, scheduleLocalSave)
+  watch(answers, scheduleLocalSave, { deep: true })
+  watch(multi, scheduleLocalSave, { deep: true })
+  // v5.16 防作弊采集监听（只在开启监测的作业内实际上报）
+  document.addEventListener('visibilitychange', onVisibility)
+  window.addEventListener('blur', onBlur)
+  document.addEventListener('paste', onPaste)
+  document.addEventListener('copy', onCopy)
+})
+
+onUnmounted(() => {
+  reportingReady = false
+  if (draftTimer) clearTimeout(draftTimer)
+  document.removeEventListener('visibilitychange', onVisibility)
+  window.removeEventListener('blur', onBlur)
+  document.removeEventListener('paste', onPaste)
+  document.removeEventListener('copy', onCopy)
+})
 </script>
 
 <style scoped>

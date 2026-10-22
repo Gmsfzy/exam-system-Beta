@@ -30,6 +30,7 @@ from homework.models import (
     HomeworkTemplate, HomeworkSeries, HomeworkSeriesStatusEnum,
     HomeworkStatusEnum, HomeworkTypeEnum, SubmissionStatusEnum,
     PeerReviewStatusEnum, PeerReviewAuditEnum, HomeworkRubric,
+    HomeworkProctorEvent, ProctorEventTypeEnum,
 )
 from homework.services import (
     finalize_submission, recompute_total, notify_homework_students, ai_suggest_grading,
@@ -224,6 +225,9 @@ def _apply_common_fields(hw, data):
             if not rb or rb.teacher_id != hw.teacher_id:
                 return '量规不存在或不属于你'
             hw.rubric_id = rid
+    # v5.16 作答防作弊监测开关（仅记录事件、不强制交卷）
+    if 'enable_monitor' in data:
+        hw.enable_monitor = bool(data['enable_monitor'])
     return None
 
 
@@ -2446,4 +2450,76 @@ def api_rubric_delete(rid):
     db.session.delete(rb)
     db.session.commit()
     return jsonify({'message': '已删除'})
+
+
+# ═══════════════ v5.16 作答防作弊监测（只记不拦，不强制交卷）═══════════════
+
+@homework_bp.route('/homeworks/<int:hw_id>/proctor', methods=['POST'])
+@limiter.limit('60/minute')
+def api_proctor_report(hw_id):
+    """学生作答监测上报：记录一条异常行为事件（tab_switch|blur|paste|copy）。
+
+    仅当作业开启 enable_monitor 时落库；未开启则空操作（不影响作答）。
+    与考试不同：只记录、不强制交卷、不影响判分。无提交时先建 DRAFT 承载事件。
+    """
+    user, err = require_login()
+    if err:
+        return err
+    hw = db.session.get(Homework, hw_id)
+    if not hw or not _in_roster(hw, user.id):
+        return jsonify({'message': '作业不存在或未对你发布'}), 404
+    if hw.status != HomeworkStatusEnum.PUBLISHED:
+        return jsonify({'message': '作业未发布'}), 400
+    if not hw.enable_monitor:
+        return jsonify({'message': '本作业未开启监测', 'recorded': 0}), 200
+    data = request.get_json(silent=True) or {}
+    etype = str(data.get('type') or '').strip().lower()
+    if etype not in ProctorEventTypeEnum.ALL:
+        return jsonify({'message': '非法事件类型'}), 400
+    sub = _my_submission(hw, user.id)
+    if sub is None:
+        sub = HomeworkSubmission(homework_id=hw.id, student_id=user.id,
+                                 status=SubmissionStatusEnum.DRAFT)
+        if hw.is_group:
+            grp = get_student_group(hw, user.id)
+            if grp:
+                sub.group_id = grp.id
+        db.session.add(sub)
+        db.session.flush()
+    db.session.add(HomeworkProctorEvent(homework_id=hw.id, submission_id=sub.id,
+                                        student_id=user.id, type=etype, at=utcnow()))
+    db.session.commit()
+    return jsonify({'message': '已记录', 'recorded': 1}), 201
+
+
+@homework_bp.route('/homeworks/<int:hw_id>/monitor', methods=['GET'])
+def api_monitor(hw_id):
+    """教师监测看板：逐生聚合异常事件计数/时间线（按总数降序）。"""
+    user, err = require_teacher()
+    if err:
+        return err
+    hw, err = _get_own_homework(user, hw_id)
+    if err:
+        return err
+    events = (HomeworkProctorEvent.query.filter_by(homework_id=hw.id)
+              .order_by(HomeworkProctorEvent.at.asc()).all())
+    by_student = {}
+    for ev in events:
+        rec = by_student.setdefault(ev.student_id, {
+            'student_id': ev.student_id,
+            'username': ev.student.username if ev.student else None,
+            'counts': {t: 0 for t in ProctorEventTypeEnum.ALL},
+            'total': 0, 'timeline': []})
+        rec['counts'][ev.type] = rec['counts'].get(ev.type, 0) + 1
+        rec['total'] += 1
+        rec['timeline'].append({'type': ev.type, 'at': iso_local(ev.at)})
+    students = sorted(by_student.values(), key=lambda x: x['total'], reverse=True)
+    return jsonify({
+        'homework': {'id': hw.id, 'title': hw.title, 'status': hw.status,
+                     'enable_monitor': bool(hw.enable_monitor)},
+        'summary': {'students_with_events': len(students), 'total_events': len(events)},
+        'event_types': list(ProctorEventTypeEnum.ALL),
+        'students': students,
+    })
+
 

@@ -1586,3 +1586,63 @@ def test_homework_rubric_http(ctx):
     lst2 = c.get('/api/homeworks/rubrics', headers=_auth(ctx['t1'])).get_json()['items']
     assert not any(r['id'] == rid for r in lst2)
 
+
+def test_homework_proctor_http(ctx):
+    """v5.16 作答防作弊监测 HTTP 端侧：未开启空操作、开启后事件落库与聚合、
+    非法类型/非名单/跨教师鉴权、只记不拦（不改判分）。"""
+    c = ctx['_client']
+    # 学生无权访问教师监测看板
+    assert c.get('/api/homeworks/1/monitor', headers=_auth(ctx['s1'])).status_code == 403
+
+    # 未开启监测的作业：上报为空操作（200 recorded=0，不影响作答）
+    off = c.post('/api/homeworks', json={'title': '未监测作业', 'student_ids': [ctx['s1_id']],
+              'questions': [{'question_id': ctx['question_id'], 'score': 10}]},
+              headers=_auth(ctx['t1'])).get_json()['homework']['id']
+    assert c.get(f'/api/homeworks/{off}', headers=_auth(ctx['t1'])
+                 ).get_json()['enable_monitor'] is False
+    c.post(f'/api/homeworks/{off}/publish', headers=_auth(ctx['t1']))
+    r0 = c.post(f'/api/homeworks/{off}/proctor', json={'type': 'blur'}, headers=_auth(ctx['s1']))
+    assert r0.status_code == 200 and r0.get_json()['recorded'] == 0
+
+    # 开启监测的作业
+    on = c.post('/api/homeworks', json={'title': '监测作业', 'enable_monitor': True,
+             'student_ids': [ctx['s1_id'], ctx['s2_id']],
+             'questions': [{'question_id': ctx['question_id'], 'score': 10}]},
+             headers=_auth(ctx['t1'])).get_json()['homework']['id']
+    assert c.get(f'/api/homeworks/{on}', headers=_auth(ctx['t1'])
+                 ).get_json()['enable_monitor'] is True
+    c.post(f'/api/homeworks/{on}/publish', headers=_auth(ctx['t1']))
+
+    # 非法事件类型 → 400
+    assert c.post(f'/api/homeworks/{on}/proctor', json={'type': 'xxx'},
+                  headers=_auth(ctx['s1'])).status_code == 400
+    # 非名单学生（s2 不在 off 名单）→ 404
+    assert c.post(f'/api/homeworks/{off}/proctor', json={'type': 'blur'},
+                  headers=_auth(ctx['s2'])).status_code == 404
+
+    # 上报事件：s1 两条（tab_switch/paste）、s2 一条（blur）
+    for tok, t in ((ctx['s1'], 'tab_switch'), (ctx['s1'], 'paste'), (ctx['s2'], 'blur')):
+        rr = c.post(f'/api/homeworks/{on}/proctor', json={'type': t}, headers=_auth(tok))
+        assert rr.status_code == 201 and rr.get_json()['recorded'] == 1
+
+    # 教师聚合看板（仅统计本作业，与 ctx 共享库其它遗留无关）
+    mv = c.get(f'/api/homeworks/{on}/monitor', headers=_auth(ctx['t1'])).get_json()
+    assert mv['homework']['enable_monitor'] is True
+    assert mv['summary']['total_events'] == 3
+    assert mv['summary']['students_with_events'] == 2
+    # 按异常总数降序：首位应为 2 条事件的 s1
+    assert mv['students'][0]['total'] == 2
+    assert mv['students'][0]['counts']['tab_switch'] == 1
+    assert mv['students'][0]['counts']['paste'] == 1
+    assert len(mv['students'][0]['timeline']) == 2
+
+    # 跨教师隔离：t2 看不了 t1 的作业监测
+    assert c.get(f'/api/homeworks/{on}/monitor', headers=_auth(ctx['t2'])).status_code == 403
+
+    # 只记不拦：正常提交/判分不受事件影响（客观满分 10）
+    sub = c.post(f'/api/homeworks/{on}/submit', json={'answers': {str(ctx['question_id']): 'B'}},
+                 headers=_auth(ctx['s1'])).get_json()['submission']
+    gv = c.post(f'/api/homeworks/{on}/grade/{sub["id"]}', json={'answers': []},
+                headers=_auth(ctx['t1'])).get_json()
+    assert gv['graded'] is True and gv['submission']['total_score'] == 10.0
+

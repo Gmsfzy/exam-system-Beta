@@ -70,6 +70,8 @@ class Homework(db.Model):
     grade_scale_json = db.Column(JSONType)    # 自定义等级档位 [{label,min}]；空=内置 优/良/中/差 阈值
     # v5.15 评分量规 Rubric：关联教师量规库（仅作结构化拆解/建议，不改 manual_score/total_score 推导）
     rubric_id = db.Column(db.Integer, db.ForeignKey('homework_rubric.id'), nullable=True, index=True)
+    # v5.16 作答防作弊监测开关（仅记录事件、不强制交卷，与考试切屏强交卷口径不同）
+    enable_monitor = db.Column(db.Boolean, nullable=False, default=False)
 
     teacher = db.relationship('User', foreign_keys=[teacher_id], backref='homeworks')
     hw_questions = db.relationship('HomeworkQuestion', backref='homework', lazy=True,
@@ -169,7 +171,8 @@ class Homework(db.Model):
              if self.peer_review_deadline else None,
              'peer_review_weight': float(self.peer_review_weight or 0.0),
              'grade_mode': self.grade_mode or 'numeric',
-             'rubric_id': self.rubric_id}
+             'rubric_id': self.rubric_id,
+             'enable_monitor': bool(self.enable_monitor)}
         if for_teacher:
             d['teacher_name'] = self.teacher.username if self.teacher else ''
             d['grade_scale'] = list(self.grade_scale_json or [])
@@ -660,4 +663,36 @@ class HomeworkRubric(db.Model):
                 'dimensions': self.dimensions(), 'max_total': self.max_total(),
                 'created_at': iso_local(self.created_at),
                 'updated_at': iso_local(self.updated_at)}
+
+
+class ProctorEventTypeEnum:
+    """v5.16 作答防作弊事件类型（仅采集/展示，不触发强制交卷）。"""
+    TAB_SWITCH = 'tab_switch'  # visibilitychange 切标签/切屏
+    BLUR = 'blur'              # 窗口失焦
+    PASTE = 'paste'            # 外部粘贴
+    COPY = 'copy'              # 复制作答内容
+
+    ALL = (TAB_SWITCH, BLUR, PASTE, COPY)
+
+
+class HomeworkProctorEvent(db.Model):
+    """v5.16 作答监测事件：逐条记录学生作答过程中的异常行为（只记不拦）。
+
+    与考试 `switch_count` 不同：作业不强制交卷，仅沉淀时间线供教师事后查看。
+    """
+    __tablename__ = 'homework_proctor_event'
+
+    id = db.Column(db.Integer, primary_key=True)
+    homework_id = db.Column(db.Integer, db.ForeignKey('homework.id'), nullable=False, index=True)
+    submission_id = db.Column(db.Integer, db.ForeignKey('homework_submission.id'), nullable=True, index=True)
+    student_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False, index=True)
+    type = db.Column(db.String(20), nullable=False)   # ProctorEventTypeEnum
+    at = db.Column(UTCDateTime, nullable=False, default=utcnow)
+
+    student = db.relationship('User', foreign_keys=[student_id])
+
+    def to_dict(self):
+        return {'id': self.id, 'homework_id': self.homework_id,
+                'submission_id': self.submission_id, 'student_id': self.student_id,
+                'type': self.type, 'at': iso_local(self.at)}
 
