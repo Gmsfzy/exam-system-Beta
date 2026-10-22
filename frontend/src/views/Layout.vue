@@ -466,11 +466,13 @@ const moduleMenus = {
       { path: '/homeworks/rubrics', label: '评分量规', icon: iconMap.Memo },
       { path: '/homeworks/monitor', label: '防作弊监测', icon: iconMap.Warning },
       { path: '/homeworks/analytics', label: '学情分析', icon: iconMap.TrendCharts },
+      { path: '/homeworks/showcase', label: '优秀展示', icon: iconMap.Trophy },
     ],
     student: [
       { path: '/homeworks/my', label: '我的作业', icon: iconMap.Notebook },
       { path: '/homeworks/dashboard', label: '作业中心', icon: iconMap.Reading },
       { path: '/homeworks/redo', label: '待订正', icon: iconMap.EditPen },
+      { path: '/homeworks/showcase', label: '作业展示墙', icon: iconMap.Trophy },
     ]
   }
 }

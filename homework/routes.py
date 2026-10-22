@@ -31,6 +31,7 @@ from homework.models import (
     HomeworkStatusEnum, HomeworkTypeEnum, SubmissionStatusEnum,
     PeerReviewStatusEnum, PeerReviewAuditEnum, HomeworkRubric,
     HomeworkProctorEvent, ProctorEventTypeEnum,
+    ShowcaseStatusEnum,
 )
 from homework.services import (
     finalize_submission, recompute_total, notify_homework_students, ai_suggest_grading,
@@ -1493,6 +1494,167 @@ def api_homework_redo():
                       'graded_at': iso_local(sub.graded_at) if sub.graded_at else None})
     items.sort(key=lambda it: it['graded_at'] or '', reverse=True)
     return jsonify({'items': items, 'count': len(items)})
+
+
+# ═══════════════════ v5.19 优秀作业展示墙 / 精选归档 ═══════════════════
+
+def _showcase_visible(hw, user):
+    """展示墙可见性：该作业发布名单内成员，或作业创建教师本人。"""
+    return hw.teacher_id == user.id or bool(_in_roster(hw, user.id))
+
+
+def _showcase_author(sub, viewer):
+    """作者展示名：学生选择匿名且查看者非本人/非该作业教师 → 匿名同学。"""
+    name = sub.student.username if sub.student else ''
+    if sub.showcase_anon and viewer.id != sub.student_id:
+        hw = sub.homework
+        if hw and hw.teacher_id != viewer.id:
+            return '匿名同学'
+    return name
+
+
+def _showcase_summary(sub, viewer):
+    hw = sub.homework
+    return {
+        'sub_id': sub.id, 'homework_id': hw.id, 'homework_title': hw.title,
+        'hw_type': str(hw.hw_type), 'author': _showcase_author(sub, viewer),
+        'is_mine': sub.student_id == viewer.id,
+        'total_score': sub.total_score, 'max_score': sub.max_score,
+        'comment': sub.comment or '', 'excerpt': (sub.content or '')[:160],
+        'has_attachment': bool((sub.attachment_json or {}).get('stored_name')),
+        'showcase_anon': bool(sub.showcase_anon),
+        'showcase_status': sub.showcase_status,
+        'graded_at': iso_local(sub.graded_at) if sub.graded_at else None,
+    }
+
+
+@homework_bp.route('/homeworks/<int:hw_id>/grade/<int:sub_id>/feature', methods=['POST'])
+def api_showcase_feature(hw_id, sub_id):
+    """v5.19 教师提名/撤下优秀作业展示（仅已批改可提名；提名后待学生同意）。"""
+    user, err = require_teacher()
+    if err:
+        return err
+    hw, err = _get_own_homework(user, hw_id)
+    if err:
+        return err
+    sub = db.session.get(HomeworkSubmission, sub_id)
+    if not sub or sub.homework_id != hw.id:
+        return jsonify({'message': '提交不存在'}), 404
+    data = request.get_json(silent=True) or {}
+    action = (data.get('action') or 'nominate').strip()
+    if action == 'withdraw':
+        sub.showcase_status = ShowcaseStatusEnum.NONE
+        sub.showcase_at = utcnow()
+        db.session.commit()
+        return jsonify({'message': '已从展示墙撤下', 'submission': sub.to_dict(for_teacher=True)})
+    if sub.status != SubmissionStatusEnum.GRADED:
+        return jsonify({'message': '仅已批改的提交可提名展示'}), 400
+    sub.showcase_status = ShowcaseStatusEnum.NOMINATED
+    sub.showcase_at = utcnow()
+    create_notification(sub.student_id, '作品入选优秀作业展示',
+                        f'《{hw.title}》你的作业被老师推荐展示，同意后可在展示墙与同学分享（可选择匿名）。',
+                        type='success', related_type='homework', related_id=hw.id)
+    db.session.commit()
+    return jsonify({'message': '已提名，待学生确认授权后上墙',
+                    'submission': sub.to_dict(for_teacher=True)})
+
+
+@homework_bp.route('/homeworks/showcase/<int:sub_id>/consent', methods=['POST'])
+def api_showcase_consent(sub_id):
+    """v5.19 学生对提名作品授权/拒绝（accept=true 上 featured，可带 anonymous 匿名展示；
+    accept=false 撤回至 none）。仅提交本人（或小组成员）可操作。"""
+    user, err = require_login()
+    if err:
+        return err
+    sub = db.session.get(HomeworkSubmission, sub_id)
+    if not sub:
+        return jsonify({'message': '提交不存在'}), 404
+    owner = sub.student_id == user.id
+    if not owner and sub.group_id and sub.group:
+        owner = any(m.student_id == user.id for m in sub.group.members)
+    if not owner:
+        return jsonify({'message': '只能处理自己的作品'}), 403
+    if sub.showcase_status not in (ShowcaseStatusEnum.NOMINATED, ShowcaseStatusEnum.FEATURED):
+        return jsonify({'message': '当前状态无需确认'}), 400
+    data = request.get_json(silent=True) or {}
+    accept = bool(data.get('accept'))
+    if sub.showcase_status == ShowcaseStatusEnum.FEATURED and accept:
+        return jsonify({'message': '作品已在展示墙'}), 400
+    if accept:
+        sub.showcase_anon = bool(data.get('anonymous'))
+        sub.showcase_status = ShowcaseStatusEnum.FEATURED
+        create_notification(sub.homework.teacher_id, '学生已同意展示作品',
+                            f'《{sub.homework.title}》有作品已确认授权上展示墙。',
+                            type='success', related_type='homework', related_id=sub.homework_id)
+    else:
+        sub.showcase_status = ShowcaseStatusEnum.NONE
+    sub.showcase_at = utcnow()
+    db.session.commit()
+    return jsonify({'message': '已同意展示' if accept else '已拒绝/撤回展示',
+                    'showcase_status': sub.showcase_status})
+
+
+@homework_bp.route('/homeworks/showcase', methods=['GET'])
+@limiter.limit('60/minute')
+def api_showcase_wall():
+    """v5.19 展示墙：列出查看者所在名单作业里的 featured 作品（摘要+教师点评）。"""
+    user, err = require_login()
+    if err:
+        return err
+    subs = (HomeworkSubmission.query.filter(
+        HomeworkSubmission.showcase_status == ShowcaseStatusEnum.FEATURED).all())
+    items = []
+    for sub in subs:
+        hw = sub.homework
+        if not hw or not _showcase_visible(hw, user):
+            continue
+        items.append(_showcase_summary(sub, user))
+    items.sort(key=lambda x: x['graded_at'] or '', reverse=True)
+    return jsonify({'items': items, 'count': len(items)})
+
+
+@homework_bp.route('/homeworks/showcase/invitations', methods=['GET'])
+def api_showcase_invitations():
+    """v5.19 学生待确认的展示邀请（本人被提名 nominated 的作品）。教师 403。"""
+    user, err = require_login()
+    if err:
+        return err
+    if user.is_teacher():
+        return jsonify({'message': '展示邀请仅对学生开放'}), 403
+    subs = (HomeworkSubmission.query.filter_by(
+        student_id=user.id, showcase_status=ShowcaseStatusEnum.NOMINATED).all())
+    items = []
+    for sub in subs:
+        if not sub.homework:
+            continue
+        items.append({
+            'sub_id': sub.id, 'homework_id': sub.homework_id,
+            'homework_title': sub.homework.title, 'hw_type': str(sub.homework.hw_type),
+            'total_score': sub.total_score, 'max_score': sub.max_score,
+            'comment': sub.comment or '', 'excerpt': (sub.content or '')[:200],
+            'nominated_at': iso_local(sub.showcase_at) if sub.showcase_at else None,
+        })
+    items.sort(key=lambda x: x['nominated_at'] or '', reverse=True)
+    return jsonify({'items': items, 'count': len(items)})
+
+
+@homework_bp.route('/homeworks/showcase/<int:sub_id>', methods=['GET'])
+def api_showcase_detail(sub_id):
+    """v5.19 展示详情：名单内可查看完整正文/附件元信息（按可见性再校验）。"""
+    user, err = require_login()
+    if err:
+        return err
+    sub = db.session.get(HomeworkSubmission, sub_id)
+    if not sub or not sub.homework:
+        return jsonify({'message': '作品不存在'}), 404
+    if sub.showcase_status != ShowcaseStatusEnum.FEATURED and sub.student_id != user.id:
+        return jsonify({'message': '该作品未公开'}), 403
+    if not _showcase_visible(sub.homework, user):
+        return jsonify({'message': '无权查看该作品'}), 403
+    d = _showcase_summary(sub, user)
+    d['content'] = sub.content or ''
+    d['attachment'] = sub.attachment_meta()
+    return jsonify(d)
 
 
 @homework_bp.route('/homeworks/<int:hw_id>/grade/<int:sub_id>/ai_suggest', methods=['POST'])

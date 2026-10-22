@@ -35,6 +35,18 @@ class SubmissionStatusEnum:
     ALL = (DRAFT, SUBMITTED, GRADED, RETURNED)
 
 
+class ShowcaseStatusEnum:
+    """v5.19 优秀作业展示墙精选状态（与批改状态正交，String(12) 承载，无 DB CHECK）。
+
+    隐私口径：教师只能提名（nominated），必须学生同意（featured）才上展示墙；
+    学生可随时撤回（回到 none），教师亦可撤下。"""
+    NONE = 'none'            # 未参与展示
+    NOMINATED = 'nominated'  # 教师已提名，待学生确认授权
+    FEATURED = 'featured'    # 学生已同意，展示墙可见
+
+    ALL = (NONE, NOMINATED, FEATURED)
+
+
 class Homework(db.Model):
     __tablename__ = 'homework'
 
@@ -242,6 +254,10 @@ class HomeworkSubmission(db.Model):
     rubric_scores_json = db.Column(JSONType)
     # v5.17 订正重做：退回订正轮次（每次退回后重交递增；与 version 语义区分——version 计全部重交、revision_round 仅计订正）
     revision_round = db.Column(db.Integer, nullable=False, default=0)
+    # v5.19 优秀作业展示墙：精选状态（none/nominated/featured）+ 匿名展示开关 + 状态变更时间（与批改状态正交，不改判分）
+    showcase_status = db.Column(db.String(12), nullable=False, default=ShowcaseStatusEnum.NONE)
+    showcase_anon = db.Column(db.Boolean, nullable=False, default=False)
+    showcase_at = db.Column(UTCDateTime)
 
     student = db.relationship('User', foreign_keys=[student_id], backref='homework_submissions')
     grader = db.relationship('User', foreign_keys=[graded_by])
@@ -296,6 +312,9 @@ class HomeworkSubmission(db.Model):
         if for_teacher and self.student:
             d['username'] = self.student.username
             d['rubric_scores'] = self.rubric_scores_json or None
+        # v5.19 展示墙精选状态（回显给批改页/学生本人，不属敏感信息）
+        d['showcase_status'] = self.showcase_status or ShowcaseStatusEnum.NONE
+        d['showcase_anon'] = bool(self.showcase_anon)
         if self.group_id and self.group:
             d['group_id'] = self.group_id
             d['group_name'] = self.group.name

@@ -1740,3 +1740,78 @@ def test_homework_revision_http(ctx):
         subm = db.session.get(HomeworkSubmission, sub_id)
         assert subm.status == SubmissionStatusEnum.GRADED and subm.revision_round == 1
 
+
+def test_homework_showcase_http(ctx):
+    """v5.19 优秀作业展示墙 HTTP 全链：教师提名→学生同意才上墙、
+    名单内可见/非名单不可见、匿名展示、撤回、跨教师/跨人鉴权、未批不可提名。"""
+    c = ctx['_client']
+    # 建并发布含 s1、s2 名单的作业
+    hw = c.post('/api/homeworks', json={'title': '展示墙作业',
+             'student_ids': [ctx['s1_id'], ctx['s2_id']],
+             'questions': [{'question_id': ctx['question_id'], 'score': 10}]},
+             headers=_auth(ctx['t1'])).get_json()['homework']['id']
+    c.post(f'/api/homeworks/{hw}/publish', headers=_auth(ctx['t1']))
+    sub = c.post(f'/api/homeworks/{hw}/submit',
+                 json={'answers': {str(ctx['question_id']): 'B'}, 'content': '我的佳作正文'},
+                 headers=_auth(ctx['s1'])).get_json()['submission']
+    sid = sub['id']
+
+    # 未批改不可提名 → 400
+    assert c.post(f'/api/homeworks/{hw}/grade/{sid}/feature',
+                  json={'action': 'nominate'}, headers=_auth(ctx['t1'])).status_code == 400
+    # 跨教师提名 → 403
+    c.post(f'/api/homeworks/{hw}/grade/{sid}', json={'answers': []}, headers=_auth(ctx['t1']))
+    assert c.post(f'/api/homeworks/{hw}/grade/{sid}/feature',
+                  json={'action': 'nominate'}, headers=_auth(ctx['t2'])).status_code == 403
+    # 教师提名 → nominated（未同意前不上墙）
+    ft = c.post(f'/api/homeworks/{hw}/grade/{sid}/feature', json={'action': 'nominate'},
+                headers=_auth(ctx['t1']))
+    assert ft.status_code == 200 and ft.get_json()['submission']['showcase_status'] == 'nominated'
+    assert all(it['sub_id'] != sid for it in c.get('/api/homeworks/showcase',
+               headers=_auth(ctx['s2'])).get_json()['items'])
+    # s1 待确认邀请可见
+    inv = c.get('/api/homeworks/showcase/invitations',
+                headers=_auth(ctx['s1'])).get_json()
+    assert any(it['sub_id'] == sid for it in inv['items'])
+    # 他人（s2）不能替 s1 确认 → 403
+    assert c.post(f'/api/homeworks/showcase/{sid}/consent',
+                  json={'accept': True}, headers=_auth(ctx['s2'])).status_code == 403
+    # s1 同意且匿名 → featured
+    cs = c.post(f'/api/homeworks/showcase/{sid}/consent',
+                json={'accept': True, 'anonymous': True}, headers=_auth(ctx['s1']))
+    assert cs.status_code == 200 and cs.get_json()['showcase_status'] == 'featured'
+    # 展示墙：s1 本人见真名、s2 见匿名、非名单外人均不可见
+    wall_s1 = {it['sub_id']: it for it in c.get('/api/homeworks/showcase',
+               headers=_auth(ctx['s1'])).get_json()['items']}
+    assert wall_s1[sid]['author'] == 'e2e_student_1' and wall_s1[sid]['is_mine'] is True
+    wall_s2 = {it['sub_id']: it for it in c.get('/api/homeworks/showcase',
+               headers=_auth(ctx['s2'])).get_json()['items']}
+    assert wall_s2[sid]['author'] == '匿名同学'
+    outu, _ = _register(c, 'e2e_outsider', 'student')
+    assert c.get('/api/homeworks/showcase', headers=_auth(outu)).get_json()['count'] == 0
+    # 详情：名单内可访问（题集式正文可为空）；非名单 403
+    det = c.get(f'/api/homeworks/showcase/{sid}', headers=_auth(ctx['s2']))
+    assert det.status_code == 200 and det.get_json()['sub_id'] == sid
+    assert c.get(f'/api/homeworks/showcase/{sid}', headers=_auth(outu)).status_code == 403
+    # s1 撤回（accept=false）→ none，下墙
+    wd = c.post(f'/api/homeworks/showcase/{sid}/consent',
+                json={'accept': False}, headers=_auth(ctx['s1']))
+    assert wd.status_code == 200 and wd.get_json()['showcase_status'] == 'none'
+    assert all(it['sub_id'] != sid for it in c.get('/api/homeworks/showcase',
+               headers=_auth(ctx['s2'])).get_json()['items'])
+    # 教师重新提名 + s1 实名同意 → s2 见真名
+    c.post(f'/api/homeworks/{hw}/grade/{sid}/feature', json={'action': 'nominate'},
+           headers=_auth(ctx['t1']))
+    c.post(f'/api/homeworks/showcase/{sid}/consent',
+           json={'accept': True, 'anonymous': False}, headers=_auth(ctx['s1']))
+    wall2 = {it['sub_id']: it for it in c.get('/api/homeworks/showcase',
+             headers=_auth(ctx['s2'])).get_json()['items']}
+    assert wall2[sid]['author'] == 'e2e_student_1'
+    # 教师撤下（withdraw）→ none
+    c.post(f'/api/homeworks/{hw}/grade/{sid}/feature', json={'action': 'withdraw'},
+           headers=_auth(ctx['t1']))
+    assert all(it['sub_id'] != sid for it in c.get('/api/homeworks/showcase',
+               headers=_auth(ctx['s1'])).get_json()['items'])
+    # 展示邀请仅学生（教师 403）
+    assert c.get('/api/homeworks/showcase/invitations', headers=_auth(ctx['t1'])).status_code == 403
+

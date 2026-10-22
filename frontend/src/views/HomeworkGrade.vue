@@ -175,6 +175,12 @@
       <template #footer>
         <el-button v-if="grade && grade.homework.hw_type !== 'open'" :loading="aiLoading" @click="askAi">AI 建议</el-button>
         <el-button v-if="canReturn" :loading="returning" type="warning" plain @click="returnDialog = true">退回订正</el-button>
+        <el-tag v-if="canFeature && showcaseStatus !== 'none'" :type="showcaseStatus === 'featured' ? 'success' : 'info'"
+                size="small" effect="plain" style="margin-right: 8px">
+          {{ showcaseStatus === 'featured' ? '已上展示墙' : '已提名·待学生同意' }}
+        </el-tag>
+        <el-button v-if="canFeature" :loading="featuring" :type="showcaseStatus === 'featured' ? 'success' : 'primary'"
+                   plain @click="featureShowcase">{{ showcaseStatus === 'none' ? '推荐展示' : '撤下展示' }}</el-button>
         <el-button type="primary" :loading="saving" @click="submitGrade">保存批改</el-button>
       </template>
     </el-drawer>
@@ -427,6 +433,28 @@ const returnReason = ref('')
 const returning = ref(false)
 const canReturn = computed(() => !!grade.value
   && grade.value.submission?.status === 'graded' && !!hw.value.allow_revision)
+// v5.19 优秀作业展示墙：仅已批改可提名/撤下（提名后需学生同意才上墙）
+const featuring = ref(false)
+const showcaseStatus = computed(() => grade.value?.submission?.showcase_status || 'none')
+const canFeature = computed(() => !!grade.value && grade.value.submission?.status === 'graded')
+const featureShowcase = async () => {
+  featuring.value = true
+  try {
+    const action = showcaseStatus.value === 'none' ? 'nominate' : 'withdraw'
+    const res = await request.post(
+      `/api/homeworks/${hwId}/grade/${current.value.id}/feature`, { action })
+    ElMessage.success(res.data.message || '已更新展示状态')
+    if (current.value) {
+      const g = await request.get(`/api/homeworks/${hwId}/grade/${current.value.id}`)
+      grade.value = g.data
+    }
+    load()
+  } catch (e) {
+    ElMessage.error(e?.response?.data?.message || '操作失败')
+  } finally {
+    featuring.value = false
+  }
+}
 const rubricSum = computed(() => Object.values(rubricScores.value)
   .reduce((s, v) => s + (Number(v) || 0), 0))
 const rubricTouched = computed(() => Object.values(rubricScores.value).some(v => Number(v) > 0))
