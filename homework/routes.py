@@ -2154,3 +2154,68 @@ def api_weekly_homeworks():
                     'week_end': iso_local(week_end),
                     'items': items})
 
+
+@homework_bp.route('/homeworks/center', methods=['GET'])
+@limiter.limit('60/minute')
+def api_homework_center():
+    """v5.13 作业中心/待办看板（学生）：跨本人相关全部作业（发布名单含小组）的只读聚合。
+
+    每项返回 `{id,title,hw_type,deadline,has_deadline,status_of_me,days_left,total_score,max_score,
+    is_late,can_submit}`，按「待交且临近截止」优先排序（待交→待批→已批，组内按剩余天数升序）。
+    另附 `score_trend`（历次已批作业得分率序列）与 `stats`（待交/临近截止/待批/已批 计数）。
+    不改判分与成绩口径（分数口径与 `to_dict` 一致：仅已批改可见总分）。"""
+    user, err = require_login()
+    if err:
+        return err
+    if user.is_teacher():
+        return jsonify({'message': '作业中心仅对学生开放'}), 403
+    now = utcnow()
+    hws = (Homework.query.join(HomeworkStudent, HomeworkStudent.homework_id == Homework.id)
+           .filter(HomeworkStudent.student_id == user.id,
+                   Homework.status != HomeworkStatusEnum.DRAFT).all())
+    items = []
+    trend_src = []
+    for hw in hws:
+        sub = _my_submission(hw, user.id)
+        if sub is None or sub.status == SubmissionStatusEnum.DRAFT:
+            status_me = 'unsubmitted'
+        elif sub.status == SubmissionStatusEnum.SUBMITTED:
+            status_me = 'submitted'
+        else:
+            status_me = 'graded'
+        days_left = (round((hw.deadline - now).total_seconds() / 86400.0, 2)
+                     if hw.deadline else None)
+        max_sc = (sub.max_score if (sub and sub.max_score is not None) else hw.max_score())
+        can_submit = (status_me == 'unsubmitted'
+                      and (hw.deadline is None or hw.deadline >= now or bool(hw.allow_late))
+                      and hw.status == HomeworkStatusEnum.PUBLISHED)
+        items.append({'id': hw.id, 'title': hw.title, 'hw_type': str(hw.hw_type),
+                      'teacher_name': hw.teacher.username if hw.teacher else '',
+                      'deadline': iso_local(hw.deadline) if hw.deadline else None,
+                      'has_deadline': hw.deadline is not None,
+                      'is_expired': bool(hw.is_expired), 'allow_late': bool(hw.allow_late),
+                      'status_of_me': status_me, 'days_left': days_left,
+                      'total_score': (sub.total_score if status_me == 'graded' else None),
+                      'max_score': max_sc,
+                      'is_late': bool(sub.is_late) if sub else False,
+                      'can_submit': can_submit, 'sub_id': sub.id if sub else None})
+        if status_me == 'graded' and sub and sub.total_score is not None:
+            trend_src.append({'homework_id': hw.id, 'title': hw.title,
+                              'total_score': sub.total_score, 'max_score': max_sc,
+                              'graded_at': sub.graded_at})
+    items.sort(key=lambda it: ({'unsubmitted': 0, 'submitted': 1, 'graded': 2}[it['status_of_me']],
+                                it['days_left'] if it['days_left'] is not None else float('inf')))
+    stats = {'unsubmitted': sum(1 for it in items if it['status_of_me'] == 'unsubmitted'),
+             'submitted': sum(1 for it in items if it['status_of_me'] == 'submitted'),
+             'graded': sum(1 for it in items if it['status_of_me'] == 'graded'),
+             'due_soon': sum(1 for it in items if it['status_of_me'] == 'unsubmitted'
+                             and it['days_left'] is not None and 0 <= it['days_left'] <= 3)}
+    trend_src.sort(key=lambda x: x['graded_at'] or now)
+    score_trend = [{'homework_id': t['homework_id'], 'title': t['title'],
+                    'total_score': t['total_score'], 'max_score': t['max_score'],
+                    'ratio': (round(t['total_score'] / t['max_score'], 4) if t['max_score'] else None),
+                    'graded_at': iso_local(t['graded_at']) if t['graded_at'] else None}
+                   for t in trend_src]
+    return jsonify({'items': items, 'total': len(items), 'stats': stats,
+                    'score_trend': score_trend})
+

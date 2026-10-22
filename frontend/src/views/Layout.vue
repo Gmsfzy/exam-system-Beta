@@ -465,6 +465,7 @@ const moduleMenus = {
     ],
     student: [
       { path: '/homeworks/my', label: '我的作业', icon: iconMap.Notebook },
+      { path: '/homeworks/dashboard', label: '作业中心', icon: iconMap.Reading },
     ]
   }
 }

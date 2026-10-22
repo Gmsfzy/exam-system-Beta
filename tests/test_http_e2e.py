@@ -1420,3 +1420,64 @@ def test_homework_grading_queue_http(ctx):
     assert all(it['blind'] is True and it['student_id'] is None
                and str(it['username']).startswith('匿名') for it in bb['items'])
 
+
+def test_homework_center_http(ctx):
+    """v5.13 作业中心：跨作业待办聚合 + 状态机/排序/days_left/得分趋势/名单隔离/教师 403。"""
+    from datetime import timedelta
+    from utils.timeutil import utcnow, iso_local
+    c = ctx['_client']
+
+    # 作业1：临近截止（+2天），s1 未交 → unsubmitted
+    d1 = iso_local(utcnow() + timedelta(days=2))
+    hw1 = c.post('/api/homeworks', json={'title': '中心未交', 'deadline': d1,
+              'student_ids': [ctx['s1_id']],
+              'questions': [{'question_id': ctx['question_id'], 'score': 10}]},
+              headers=_auth(ctx['t1'])).get_json()['homework']['id']
+    c.post(f'/api/homeworks/{hw1}/publish', headers=_auth(ctx['t1']))
+
+    # 作业2：+5天，s1 已交未批 → submitted
+    d2 = iso_local(utcnow() + timedelta(days=5))
+    hw2 = c.post('/api/homeworks', json={'title': '中心待批', 'deadline': d2,
+              'student_ids': [ctx['s1_id']],
+              'questions': [{'question_id': ctx['question_id'], 'score': 10}]},
+              headers=_auth(ctx['t1'])).get_json()['homework']['id']
+    c.post(f'/api/homeworks/{hw2}/publish', headers=_auth(ctx['t1']))
+    assert c.post(f'/api/homeworks/{hw2}/submit',
+                  json={'answers': {str(ctx['question_id']): 'B'}},
+                  headers=_auth(ctx['s1'])).status_code == 201
+
+    # 作业3：无截止，s1 交并批改→graded（客观满分）
+    hw3 = c.post('/api/homeworks', json={'title': '中心已批', 'student_ids': [ctx['s1_id']],
+              'questions': [{'question_id': ctx['question_id'], 'score': 10}]},
+              headers=_auth(ctx['t1'])).get_json()['homework']['id']
+    c.post(f'/api/homeworks/{hw3}/publish', headers=_auth(ctx['t1']))
+    sub3 = c.post(f'/api/homeworks/{hw3}/submit',
+                  json={'answers': {str(ctx['question_id']): 'B'}},
+                  headers=_auth(ctx['s1'])).get_json()['submission']
+    c.post(f'/api/homeworks/{hw3}/grade/{sub3["id"]}', json={'answers': []},
+           headers=_auth(ctx['t1']))
+
+    # 教师不可用学生中心
+    assert c.get('/api/homeworks/center', headers=_auth(ctx['t1'])).status_code == 403
+
+    body = c.get('/api/homeworks/center', headers=_auth(ctx['s1'])).get_json()
+    byid = {it['id']: it for it in body['items'] if it['id'] in (hw1, hw2, hw3)}
+    assert set(byid) == {hw1, hw2, hw3}
+    assert byid[hw1]['status_of_me'] == 'unsubmitted' and byid[hw1]['can_submit'] is True
+    assert byid[hw2]['status_of_me'] == 'submitted'
+    assert byid[hw3]['status_of_me'] == 'graded' and byid[hw3]['total_score'] == 10.0
+    # days_left：hw1 约 2 天；hw3 无截止→ None
+    assert 1.5 < byid[hw1]['days_left'] <= 2.01
+    assert byid[hw3]['days_left'] is None
+    # 排序（忽略其它测试遗留同组项）：待交→待批→已批
+    order = [it['id'] for it in body['items'] if it['id'] in (hw1, hw2, hw3)]
+    assert order == [hw1, hw2, hw3]
+    # 得分趋势仅含已批（hw3），比率 1.0；hw1/hw2 不入趋势
+    trend_mine = [t for t in body['score_trend'] if t['homework_id'] in (hw1, hw2, hw3)]
+    assert len(trend_mine) == 1 and trend_mine[0]['homework_id'] == hw3
+    assert trend_mine[0]['ratio'] == 1.0
+    # 非名单学生 s2 看不到 s1 专属作业
+    b2 = c.get('/api/homeworks/center', headers=_auth(ctx['s2'])).get_json()
+    ids2 = {it['id'] for it in b2['items']}
+    assert ids2.isdisjoint({hw1, hw2, hw3})
+
