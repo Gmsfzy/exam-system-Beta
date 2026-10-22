@@ -161,7 +161,7 @@ import {
   SwitchButton, ArrowDown, School, Fold, Expand, Grid,
   Star, Calendar, VideoPlay, TrendCharts, Medal, Trophy, Lightning,
   Sunny, Moon, Check, Warning, InfoFilled,
-  Money, EditPen, Tickets, Close, Reading, Connection, Notebook
+  Money, EditPen, Tickets, Close, Reading, Connection, Notebook, Memo
 } from '@element-plus/icons-vue'
 
 const route = useRoute()
@@ -378,7 +378,7 @@ const iconMap = {
   Document, Collection, HomeFilled, Bell, User, Setting,
   SwitchButton, ArrowDown, School, Fold, Expand, Grid,
   Star, Calendar, VideoPlay, TrendCharts, Medal, Trophy, Lightning,
-  Money, EditPen, Tickets, Reading, Connection, Notebook
+  Money, EditPen, Tickets, Reading, Connection, Notebook, Memo
 }
 
 // 按模块分组的菜单：与路由 meta.module 对应，新增模块只需在此加分组
@@ -463,6 +463,7 @@ const moduleMenus = {
       { path: '/homeworks/manage', label: '作业管理', icon: iconMap.Notebook },
       { path: '/homeworks/grading-workbench', label: '批改工作台', icon: iconMap.EditPen },
       { path: '/homeworks/grading-scheme', label: '评分制', icon: iconMap.Medal },
+      { path: '/homeworks/rubrics', label: '评分量规', icon: iconMap.Memo },
     ],
     student: [
       { path: '/homeworks/my', label: '我的作业', icon: iconMap.Notebook },

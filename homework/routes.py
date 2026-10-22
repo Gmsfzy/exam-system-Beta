@@ -29,7 +29,7 @@ from homework.models import (
     HomeworkGroup, HomeworkGroupMember,
     HomeworkTemplate, HomeworkSeries, HomeworkSeriesStatusEnum,
     HomeworkStatusEnum, HomeworkTypeEnum, SubmissionStatusEnum,
-    PeerReviewStatusEnum, PeerReviewAuditEnum,
+    PeerReviewStatusEnum, PeerReviewAuditEnum, HomeworkRubric,
 )
 from homework.services import (
     finalize_submission, recompute_total, notify_homework_students, ai_suggest_grading,
@@ -210,7 +210,98 @@ def _apply_common_fields(hw, data):
                 cleaned.append({'label': str(it.get('label') or '')[:12],
                                 'min': round(mv, 4)})
             hw.grade_scale_json = cleaned
+    # v5.15 评分量规：关联本教师的量规（可置空解除）；不改判分口径
+    if 'rubric_id' in data:
+        rid = data.get('rubric_id')
+        if rid in (None, ''):
+            hw.rubric_id = None
+        else:
+            try:
+                rid = int(rid)
+            except (TypeError, ValueError):
+                return 'rubric_id 须为整数或留空'
+            rb = db.session.get(HomeworkRubric, rid)
+            if not rb or rb.teacher_id != hw.teacher_id:
+                return '量规不存在或不属于你'
+            hw.rubric_id = rid
     return None
+
+
+def _clean_rubric_dimensions(raw):
+    """校验/清洗量规维度；返回 (cleaned_list, err_str)。
+
+    元素：{label:str, max_score:float>=0, levels:[{score:float, desc:str}]}；levels 可选。
+    """
+    if not isinstance(raw, list) or not raw:
+        return None, 'dimensions 须为非空列表'
+    cleaned = []
+    for d in raw:
+        if not isinstance(d, dict):
+            return None, '维度元素须为对象 {label, max_score, levels?}'
+        label = str(d.get('label') or '').strip()[:60]
+        if not label:
+            return None, '维度 label 不能为空'
+        try:
+            mx = float(d.get('max_score'))
+        except (TypeError, ValueError):
+            return None, f'维度「{label}」max_score 须为数字'
+        if mx < 0:
+            return None, f'维度「{label}」max_score 不能为负'
+        levels = []
+        lv = d.get('levels')
+        if isinstance(lv, list):
+            for x in lv:
+                if not isinstance(x, dict):
+                    continue
+                try:
+                    sv = float(x.get('score'))
+                except (TypeError, ValueError):
+                    return None, f'维度「{label}」描述语 score 须为数字'
+                levels.append({'score': round(sv, 2), 'desc': str(x.get('desc') or '')[:200]})
+        cleaned.append({'label': label, 'max_score': round(mx, 2), 'levels': levels})
+    return cleaned, None
+
+
+def _normalize_rubric_scores(rubric, raw):
+    """按量规维度将提交的逐维度分归一为 [{index,label,score}]；返回 (list, err_str)。
+
+    raw 可为 {index:score} 字典或 [{index,label,score}] 列表；score 限 [0, dim.max_score]。
+    仅用于快照与“合计建议分”，不参与 total_score 推导。
+    """
+    dims = rubric.dimensions()
+    by_index = {}
+    if isinstance(raw, dict):
+        for k, v in raw.items():
+            try:
+                by_index[int(k)] = v
+            except (TypeError, ValueError):
+                return None, 'rubric_scores 键须为维度索引'
+    elif isinstance(raw, list):
+        for i, it in enumerate(raw):
+            if isinstance(it, dict):
+                idx = it.get('index', i)
+                try:
+                    by_index[int(idx)] = it.get('score')
+                except (TypeError, ValueError):
+                    return None, 'rubric_scores.index 须为整数'
+    else:
+        return None, 'rubric_scores 须为对象或列表'
+    out = []
+    for i, d in enumerate(dims):
+        if i not in by_index:
+            continue
+        sv = by_index[i]
+        if sv is None or sv == '':
+            continue
+        try:
+            sv = float(sv)
+        except (TypeError, ValueError):
+            return None, f'维度「{d.get("label")}」得分须为数字'
+        mx = float(d.get('max_score') or 0)
+        if sv < 0 or sv > mx:
+            return None, f'维度「{d.get("label")}」得分须在 0~{mx} 之间'
+        out.append({'index': i, 'label': d.get('label'), 'score': round(sv, 2)})
+    return out, None
 
 
 def _apply_groups(hw, groups):
@@ -1173,6 +1264,7 @@ def _grade_payload(hw, sub):
     return {'homework': hw.to_dict(for_teacher=True),
             'submission': sub_d,
             'blind': blind,
+            'rubric': hw.rubric.to_dict() if hw.rubric else None,
             'answers': [a.to_dict(for_teacher=True,
                                   max_score=hq_map[a.question_id].score if a.question_id in hq_map else None)
                         for a in sub.answers],
@@ -1198,6 +1290,15 @@ def api_grade_submit(hw_id, sub_id):
     was_graded = sub.status == SubmissionStatusEnum.GRADED  # v5.2：仅首次转 GRADED 触发学习闭环
 
     data = request.get_json(silent=True) or {}
+
+    # v5.15 评分量规：逐维度得分快照（可选，仅记录/建议，不改 total_score/manual_score）
+    if 'rubric_scores' in data:
+        if hw.rubric is None:
+            return jsonify({'message': '本作业未关联量规'}), 400
+        rs, rerr = _normalize_rubric_scores(hw.rubric, data.get('rubric_scores'))
+        if rerr:
+            return jsonify({'message': rerr}), 400
+        sub.rubric_scores_json = rs
 
     # 开放式：无逐题作答行，整体给一个总分（score 缺省则只存评语、保持待批）
     if hw.hw_type == HomeworkTypeEnum.OPEN:
@@ -2256,4 +2357,93 @@ def api_homework_center():
                    for t in trend_src]
     return jsonify({'items': items, 'total': len(items), 'stats': stats,
                     'score_trend': score_trend})
+
+
+# ════════════════════ v5.15 评分量规 Rubric 库（教师可复用） ════════════════════
+
+@homework_bp.route('/homeworks/rubrics', methods=['GET'])
+def api_rubric_list():
+    user, err = require_teacher()
+    if err:
+        return err
+    rows = (HomeworkRubric.query.filter_by(teacher_id=user.id)
+            .order_by(HomeworkRubric.id.desc()).all())
+    items = []
+    for rb in rows:
+        d = rb.to_dict()
+        d['homework_count'] = Homework.query.filter_by(rubric_id=rb.id).count()
+        items.append(d)
+    return jsonify({'items': items, 'total': len(items)})
+
+
+@homework_bp.route('/homeworks/rubrics', methods=['POST'])
+def api_rubric_create():
+    user, err = require_teacher()
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    title = str(data.get('title') or '').strip()
+    if not title:
+        return jsonify({'message': '量规标题不能为空'}), 400
+    dims, derr = _clean_rubric_dimensions(data.get('dimensions'))
+    if derr:
+        return jsonify({'message': derr}), 400
+    rb = HomeworkRubric(teacher_id=user.id, title=title[:200],
+                        description=str(data.get('description') or '')[:2000],
+                        dimensions_json=dims)
+    db.session.add(rb)
+    db.session.commit()
+    return jsonify({'message': '已创建', 'rubric': rb.to_dict()}), 201
+
+
+@homework_bp.route('/homeworks/rubrics/<int:rid>', methods=['GET'])
+def api_rubric_detail(rid):
+    user, err = require_teacher()
+    if err:
+        return err
+    rb = db.session.get(HomeworkRubric, rid)
+    if not rb or rb.teacher_id != user.id:
+        return jsonify({'message': '量规不存在'}), 404
+    return jsonify(rb.to_dict())
+
+
+@homework_bp.route('/homeworks/rubrics/<int:rid>', methods=['PUT'])
+def api_rubric_update(rid):
+    user, err = require_teacher()
+    if err:
+        return err
+    rb = db.session.get(HomeworkRubric, rid)
+    if not rb or rb.teacher_id != user.id:
+        return jsonify({'message': '量规不存在'}), 404
+    data = request.get_json(silent=True) or {}
+    if 'title' in data:
+        title = str(data.get('title') or '').strip()
+        if not title:
+            return jsonify({'message': '量规标题不能为空'}), 400
+        rb.title = title[:200]
+    if 'description' in data:
+        rb.description = str(data.get('description') or '')[:2000]
+    if 'dimensions' in data:
+        dims, derr = _clean_rubric_dimensions(data.get('dimensions'))
+        if derr:
+            return jsonify({'message': derr}), 400
+        rb.dimensions_json = dims
+    db.session.commit()
+    return jsonify({'message': '已保存', 'rubric': rb.to_dict()})
+
+
+@homework_bp.route('/homeworks/rubrics/<int:rid>', methods=['DELETE'])
+def api_rubric_delete(rid):
+    user, err = require_teacher()
+    if err:
+        return err
+    rb = db.session.get(HomeworkRubric, rid)
+    if not rb or rb.teacher_id != user.id:
+        return jsonify({'message': '量规不存在'}), 404
+    # 解除引用：引用该量规的作业 rubric_id 置空（已存子提交 rubric_scores 保留供留档）
+    for hw in Homework.query.filter_by(rubric_id=rb.id).all():
+        hw.rubric_id = None
+    db.session.delete(rb)
+    db.session.commit()
+    return jsonify({'message': '已删除'})
 

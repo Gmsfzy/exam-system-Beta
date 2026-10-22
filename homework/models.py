@@ -68,6 +68,8 @@ class Homework(db.Model):
     # v5.14 多种评分制（仅显示层派生，不改 total_score/积分/错题口径）
     grade_mode = db.Column(db.String(10), nullable=False, default='numeric')  # numeric|level|comment
     grade_scale_json = db.Column(JSONType)    # 自定义等级档位 [{label,min}]；空=内置 优/良/中/差 阈值
+    # v5.15 评分量规 Rubric：关联教师量规库（仅作结构化拆解/建议，不改 manual_score/total_score 推导）
+    rubric_id = db.Column(db.Integer, db.ForeignKey('homework_rubric.id'), nullable=True, index=True)
 
     teacher = db.relationship('User', foreign_keys=[teacher_id], backref='homeworks')
     hw_questions = db.relationship('HomeworkQuestion', backref='homework', lazy=True,
@@ -84,6 +86,7 @@ class Homework(db.Model):
                                    cascade='all, delete-orphan')
     groups = db.relationship('HomeworkGroup', backref='homework', lazy=True,
                              cascade='all, delete-orphan')
+    rubric = db.relationship('HomeworkRubric', foreign_keys=[rubric_id])
     # v5.8 系列关联通过 HomeworkSeries.homeworks 的 backref=series_obj 暴露，避免重复 relationship 冲突
 
     @property
@@ -165,10 +168,12 @@ class Homework(db.Model):
              'peer_review_deadline': iso_local(self.peer_review_deadline)
              if self.peer_review_deadline else None,
              'peer_review_weight': float(self.peer_review_weight or 0.0),
-             'grade_mode': self.grade_mode or 'numeric'}
+             'grade_mode': self.grade_mode or 'numeric',
+             'rubric_id': self.rubric_id}
         if for_teacher:
             d['teacher_name'] = self.teacher.username if self.teacher else ''
             d['grade_scale'] = list(self.grade_scale_json or [])
+            d['rubric_title'] = self.rubric.title if self.rubric else ''
             d['blind_grading'] = bool(self.blind_grading)
             d['shuffle_questions'] = bool(self.shuffle_questions)
             d['shuffle_options'] = bool(self.shuffle_options)
@@ -226,6 +231,8 @@ class HomeworkSubmission(db.Model):
     score_before_penalty = db.Column(db.Float)             # 迟交扣分前总分（None=未扣分）
     assigned_order_json = db.Column(JSONType)  # 该生题序 [question_id...]（乱序时持久化）
     option_map_json = db.Column(JSONType)      # 选项乱序映射 {str(qid): [perm]}
+    # v5.15 评分量规：逐维度得分快照 [{index,label,score}]（仅展示/建议，不改 total_score）
+    rubric_scores_json = db.Column(JSONType)
 
     student = db.relationship('User', foreign_keys=[student_id], backref='homework_submissions')
     grader = db.relationship('User', foreign_keys=[graded_by])
@@ -278,6 +285,7 @@ class HomeworkSubmission(db.Model):
             d['grade_display'] = d.get('total_score')
         if for_teacher and self.student:
             d['username'] = self.student.username
+            d['rubric_scores'] = self.rubric_scores_json or None
         if self.group_id and self.group:
             d['group_id'] = self.group_id
             d['group_name'] = self.group.name
@@ -609,4 +617,47 @@ class HomeworkSeries(db.Model):
                                'published_at': iso_local(h.published_at) if h.published_at else None}
                               for h in sorted(self.homeworks, key=lambda x: x.published_at or x.created_at)]
         return d
+
+
+# ═══════════════════════ v5.15 评分量规 Rubric ═══════════════════════
+
+class HomeworkRubric(db.Model):
+    """评分量规（v5.15）：教师可复用的多维度评分标准库。
+
+    dimensions_json 结构：`[{label, max_score, levels:[{score, desc}]}]`。
+    仅作结构化拆解/建议（教师可按量规合计“填入”整体建议分），
+    **不改 manual_score/total_score 推导**（官方总分单一真值不变）。
+    归属：仅创建教师可见/可改；删除量规时引用它的作业 rubric_id 适性置空。
+    """
+    __tablename__ = 'homework_rubric'
+
+    id = db.Column(db.Integer, primary_key=True)
+    teacher_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False, index=True)
+    title = db.Column(db.String(200), nullable=False)
+    description = db.Column(db.Text, nullable=False, default='')
+    dimensions_json = db.Column(JSONType, nullable=False, default=list)  # [{label,max_score,levels:[{score,desc}]}]
+    created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
+    updated_at = db.Column(UTCDateTime, nullable=False, default=utcnow, onupdate=utcnow)
+
+    teacher = db.relationship('User', foreign_keys=[teacher_id])
+
+    def dimensions(self):
+        return list(self.dimensions_json or [])
+
+    def max_total(self):
+        """各维度 max_score 之和（量规建议满分）。"""
+        total = 0.0
+        for d in self.dimensions():
+            try:
+                total += float(d.get('max_score') or 0)
+            except (TypeError, ValueError):
+                pass
+        return round(total, 2)
+
+    def to_dict(self):
+        return {'id': self.id, 'teacher_id': self.teacher_id,
+                'title': self.title, 'description': self.description or '',
+                'dimensions': self.dimensions(), 'max_total': self.max_total(),
+                'created_at': iso_local(self.created_at),
+                'updated_at': iso_local(self.updated_at)}
 

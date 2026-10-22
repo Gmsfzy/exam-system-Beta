@@ -201,6 +201,13 @@
           </el-select>
           <span class="hint">仅影响成绩展示（不改判分）；等级阈值自定义请前往「评分制」页</span>
         </el-form-item>
+        <el-form-item label="关联量规">
+          <el-select v-model="form.rubric_id" clearable size="small" style="width: 220px"
+                     placeholder="不关联（可选）">
+            <el-option v-for="r in rubrics" :key="r.id" :label="r.title" :value="r.id" />
+          </el-select>
+          <span class="hint">批改时按量规维度拆解建议分（仅辅助，不改官方总分）；量规请前往「评分量规」页新建</span>
+        </el-form-item>
         <el-form-item label="规则">
           <el-checkbox v-model="form.allow_late" :disabled="!form.has_deadline">允许迟交</el-checkbox>
           <el-checkbox v-model="form.allow_resubmit">允许重交</el-checkbox>
@@ -507,6 +514,7 @@ const dialog = ref(false)
 const saving = ref(false)
 const majors = ref([])
 const students = ref([])
+const rubrics = ref([])
 const questionPool = ref([])
 const pickMajor = ref(null)
 const randDifficulty = ref('')
@@ -832,7 +840,7 @@ const form = reactive({
   allow_late: true, allow_resubmit: true, remind_before: 0, pass_score: null, reference: null,
   late_penalty_pct: 0, blind_grading: false, shuffle_questions: false, shuffle_options: false,
   remind_levels: [],
-  grade_mode: 'numeric', grade_scale: [],
+  grade_mode: 'numeric', grade_scale: [], rubric_id: null,
   questions: [], student_ids: [], is_group: false, groups: []
 })
 
@@ -849,9 +857,12 @@ const load = async () => {
 }
 
 const loadMeta = async () => {
-  const [m, s] = await Promise.all([request.get('/api/majors'), request.get('/api/students')])
+  const [m, s, r] = await Promise.all([
+    request.get('/api/majors'), request.get('/api/students'), request.get('/api/homeworks/rubrics')
+  ])
   majors.value = Array.isArray(m.data) ? m.data : (m.data.items || [])
   students.value = Array.isArray(s.data) ? s.data : (s.data.items || [])
+  rubrics.value = r.data.items || []
 }
 
 const loadQuestions = async () => {
@@ -871,7 +882,7 @@ const openCreate = () => {
     allow_late: true, allow_resubmit: true, remind_before: 0, pass_score: null, reference: null,
     late_penalty_pct: 0, blind_grading: false, shuffle_questions: false, shuffle_options: false,
     remind_levels: [],
-    grade_mode: 'numeric', grade_scale: [],
+    grade_mode: 'numeric', grade_scale: [], rubric_id: null,
     questions: [], student_ids: [], is_group: false, groups: []
   })
   pickMajor.value = null
@@ -892,6 +903,7 @@ const openEdit = async (row) => {
     remind_levels: (hw.remind_levels || []).map(l => ({ minutes: l.minutes, label: l.label || '' })),
     grade_mode: hw.grade_mode || 'numeric',
     grade_scale: Array.isArray(hw.grade_scale) ? hw.grade_scale.map(x => ({ label: x.label, min: Number(x.min) })) : [],
+    rubric_id: hw.rubric_id ?? null,
     questions: (hw.questions || []).map(q => ({ question_id: q.question_id, content: q.content, score: q.score })),
     student_ids: hw.student_ids || [],
     is_group: !!hw.is_group,
@@ -932,6 +944,7 @@ const save = async () => {
       late_penalty_pct: form.has_deadline ? (form.late_penalty_pct || 0) : 0,
       grade_mode: form.grade_mode,
       grade_scale: form.grade_mode === 'level' ? (form.grade_scale || []) : null,
+      rubric_id: form.rubric_id || null,
     }
     const rl = (form.remind_levels || []).filter(l => l && Number(l.minutes) > 0)
     payload.remind_levels = rl.length ? rl.map(l => ({ minutes: Number(l.minutes), label: l.label || '' })) : null

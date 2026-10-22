@@ -96,6 +96,30 @@
           </div>
         </div>
 
+        <!-- v5.15 评分量规 Rubric：逐维度打分（仅结构化拆解/建议，不改官方总分） -->
+        <div v-if="grade.rubric" class="rubric-block">
+          <div class="rubric-head">
+            <span class="label" style="margin: 0">评分量规：{{ grade.rubric.title }}</span>
+            <span class="rubric-sum">合计 <b>{{ rubricSum }}</b> / {{ grade.rubric.max_total }}</span>
+            <el-button v-if="grade.homework.hw_type === 'open'" size="small" type="primary" plain
+                       :disabled="!rubricTouched" @click="openScore = rubricSum">按量规合计填入建议分</el-button>
+          </div>
+          <div class="muted small rubric-tip">量规分仅供结构化拆解与建议，不影响官方总分与积分。</div>
+          <div v-for="(dim, i) in grade.rubric.dimensions" :key="i" class="rubric-dim">
+            <div class="rubric-dim-head">
+              <span class="rubric-dim-label">{{ dim.label }}</span>
+              <el-input-number v-model="rubricScores[i]" :min="0" :max="dim.max_score"
+                               :step="1" size="small" controls-position="right" placeholder="0" />
+              <span class="muted small">/ {{ dim.max_score }}</span>
+            </div>
+            <div v-if="dim.levels && dim.levels.length" class="rubric-levels">
+              <span v-for="(lv, li) in dim.levels" :key="li" class="rubric-level">
+                <b>{{ lv.score }}</b> {{ lv.desc }}
+              </span>
+            </div>
+          </div>
+        </div>
+
         <div class="label" style="margin-top: 14px">整体评语</div>
         <el-input v-model="overall" type="textarea" :rows="2" />
 
@@ -348,6 +372,8 @@ const current = ref(null)
 const overall = ref('')
 const openScore = ref(0)
 const openMax = ref(100)
+// v5.15 评分量规：逐维度得分（按维度索引），仅建议/拆解，不改官方总分
+const rubricScores = ref({})
 // v5.3 AI 讲评
 const classDialog = ref(false)
 const classLoading = ref(false)
@@ -381,6 +407,9 @@ const dimsText = (scores) => {
   return Object.entries(scores).map(([k, v]) => `${labels[k] || k} ${v}`).join(' · ')
 }
 const statusTag = (s) => ({ submitted: 'warning', graded: 'success' }[s] || 'info')
+const rubricSum = computed(() => Object.values(rubricScores.value)
+  .reduce((s, v) => s + (Number(v) || 0), 0))
+const rubricTouched = computed(() => Object.values(rubricScores.value).some(v => Number(v) > 0))
 const typeName = (t) => ({ single_choice: '单选', multiple_choice: '多选', true_false: '判断',
   fill_blank: '填空', programming: '编程', short_answer: '简答', essay: '论述' }[t] || t)
 
@@ -410,6 +439,12 @@ const openGrade = async (row) => {
     openScore.value = res.data.submission.total_score || 0
     openMax.value = res.data.submission.max_score || 100
     personalReview.value = res.data.ai_review || null
+    // v5.15 回填量规维度分快照 [{index,label,score}] -> {index:score}
+    const rs = {}
+    ;(res.data.submission.rubric_scores || []).forEach(x => {
+      if (x && x.index != null) rs[x.index] = x.score
+    })
+    rubricScores.value = rs
     // 题面元数据（content/type/answer）在 questions 里，按 question_id 合并到逐题行
     const qmap = {}
     ;(res.data.questions || []).forEach(q => { qmap[q.question_id] = q })
@@ -602,6 +637,11 @@ const submitGrade = async () => {
           .map(r => ({ answer_id: r.id, score: r.manual_score, comment: r.comment }))
       }
     }
+    // v5.15 关联量规时随批改提交逐维度快照（后端仅落库不改总分）
+    if (grade.value.rubric) {
+      payload.rubric_scores = grade.value.rubric.dimensions
+        .map((d, i) => ({ index: i, label: d.label, score: Number(rubricScores.value[i]) || 0 }))
+    }
     const res = await request.post(`/api/homeworks/${hwId}/grade/${current.value.id}`, payload)
     ElMessage.success(res.data.message || '已保存')
     drawer.value = false
@@ -682,4 +722,16 @@ onMounted(load)
 .plag-pair { display: flex; align-items: center; gap: 6px; padding: 4px 0; font-size: 13px; }
 .plag-user { font-weight: 600; color: #303133; min-width: 70px; }
 :deep(.el-table__row) { cursor: pointer; }
+.rubric-block { margin-top: 16px; padding: 12px 14px; border-radius: 10px;
+  border: 1px solid #e0e7ff; background: #f8faff; }
+.rubric-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.rubric-sum { font-size: 13px; color: #4f46e5; }
+.rubric-sum b { font-size: 16px; color: #4338ca; }
+.rubric-tip { margin: 4px 0 10px; }
+.rubric-dim { padding: 8px 0; border-top: 1px dashed #e5e7eb; }
+.rubric-dim-head { display: flex; align-items: center; gap: 10px; }
+.rubric-dim-label { font-weight: 500; color: #374151; min-width: 72px; }
+.rubric-levels { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 6px; padding-left: 4px; }
+.rubric-level { font-size: 12px; color: #6b7280; }
+.rubric-level b { color: #6366f1; margin-right: 4px; }
 </style>

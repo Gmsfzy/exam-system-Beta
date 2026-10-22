@@ -1523,3 +1523,66 @@ def test_homework_grade_mode_http(ctx):
     gv = c.get(f'/api/homeworks/{hw}/grade/{sub["id"]}', headers=_auth(ctx['t1'])).get_json()
     assert gv['submission']['total_score'] == 10.0
 
+
+def test_homework_rubric_http(ctx):
+    """v5.15 评分量规 HTTP 端侧：CRUD/归属、批改写维度分不改总分、删除解引用。"""
+    c = ctx['_client']
+    # 学生无权访问量规库
+    assert c.get('/api/homeworks/rubrics', headers=_auth(ctx['s1'])).status_code == 403
+    # 非法维度（空）→ 400
+    bad = c.post('/api/homeworks/rubrics', json={'title': '空维度', 'dimensions': []},
+                 headers=_auth(ctx['t1']))
+    assert bad.status_code == 400
+    # 创建量规（两维：内容 max 60 / 语言 max 40）
+    cr = c.post('/api/homeworks/rubrics', json={'title': '作文量规E2E', 'description': 'd',
+              'dimensions': [{'label': '内容', 'max_score': 60, 'levels': [{'score': 60, 'desc': '切题'}]},
+                             {'label': '语言', 'max_score': 40}]},
+              headers=_auth(ctx['t1']))
+    assert cr.status_code == 201
+    rid = cr.get_json()['rubric']['id']
+    assert cr.get_json()['rubric']['max_total'] == 100.0
+    # 列表含新量规
+    lst = c.get('/api/homeworks/rubrics', headers=_auth(ctx['t1'])).get_json()['items']
+    assert any(r['id'] == rid for r in lst)
+    # 跨教师归属：t2 取不到
+    assert c.get(f'/api/homeworks/rubrics/{rid}', headers=_auth(ctx['t2'])).status_code == 404
+    # 更新标题
+    up = c.put(f'/api/homeworks/rubrics/{rid}', json={'title': '作文量规改名'},
+               headers=_auth(ctx['t1']))
+    assert up.status_code == 200 and up.get_json()['rubric']['title'] == '作文量规改名'
+
+    # 创建关联量规的题集作业（客观满分 10）
+    hr = c.post('/api/homeworks', json={'title': '量规作业E2E', 'rubric_id': rid,
+             'student_ids': [ctx['s1_id']],
+             'questions': [{'question_id': ctx['question_id'], 'score': 10}]},
+             headers=_auth(ctx['t1']))
+    assert hr.status_code == 201
+    hw = hr.get_json()['homework']['id']
+    assert hr.get_json()['homework']['rubric_id'] == rid
+    c.post(f'/api/homeworks/{hw}/publish', headers=_auth(ctx['t1']))
+    sub = c.post(f'/api/homeworks/{hw}/submit',
+                 json={'answers': {str(ctx['question_id']): 'B'}},
+                 headers=_auth(ctx['s1'])).get_json()['submission']
+    # 批改视图回显量规
+    gv = c.get(f'/api/homeworks/{hw}/grade/{sub["id"]}', headers=_auth(ctx['t1'])).get_json()
+    assert gv['rubric'] and gv['rubric']['id'] == rid
+    # 非法维度分（越界）→ 400
+    bad2 = c.post(f'/api/homeworks/{hw}/grade/{sub["id"]}',
+                  json={'rubric_scores': {'0': 999}}, headers=_auth(ctx['t1']))
+    assert bad2.status_code == 400
+    # 写入合法维度分：不影响 total_score（客观满分 10）
+    ok = c.post(f'/api/homeworks/{hw}/grade/{sub["id"]}',
+                json={'rubric_scores': {'0': 50, '1': 30}}, headers=_auth(ctx['t1']))
+    assert ok.status_code == 200
+    saved = ok.get_json()['submission']
+    assert saved['total_score'] == 10.0   # 量规分不篡改官方总分
+    assert {x['index']: x['score'] for x in saved['rubric_scores']} == {0: 50.0, 1: 30.0}
+
+    # 删除量规 → 引用作业的 rubric_id 解引用置空
+    dl = c.delete(f'/api/homeworks/rubrics/{rid}', headers=_auth(ctx['t1']))
+    assert dl.status_code == 200
+    hwget = c.get(f'/api/homeworks/{hw}', headers=_auth(ctx['t1'])).get_json()
+    assert hwget.get('rubric_id') is None
+    lst2 = c.get('/api/homeworks/rubrics', headers=_auth(ctx['t1'])).get_json()['items']
+    assert not any(r['id'] == rid for r in lst2)
+
