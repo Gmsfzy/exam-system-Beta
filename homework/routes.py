@@ -1066,6 +1066,62 @@ def api_submissions(hw_id):
                     'groups': [g.to_dict() for g in hw.groups]})
 
 
+@homework_bp.route('/homeworks/grading-queue', methods=['GET'])
+@limiter.limit('60/minute')
+def api_grading_queue():
+    """v5.12 批改工作台：跨该教师所有已发布作业聚合待批（SUBMITTED）提交。
+
+    只读不改判分口径；`pending` 为题集式待人工题数（开放式为 0 但 hw_type=open 仍需整体给分）。
+    尊重匿名批改（blind_grading）：批完前隐去真名/student_id。可选按作业过滤 + 分页。
+    """
+    user, err = require_teacher()
+    if err:
+        return err
+    hws = (Homework.query.filter(Homework.teacher_id == user.id,
+                                 Homework.status != HomeworkStatusEnum.DRAFT)
+           .order_by(Homework.id.desc()).all())
+    hw_filter = request.args.get('homework_id', type=int)
+    try:
+        page = max(1, request.args.get('page', 1, type=int))
+        size = min(200, max(1, request.args.get('size', 100, type=int)))
+    except (TypeError, ValueError):
+        page, size = 1, 100
+
+    rows = []            # (submitted_at_key, item_dict)
+    per_hw = []          # 每作业进度
+    graded_total = 0
+    pending_total = 0
+    for hw in hws:
+        submitted = [s for s in hw.submissions if s.status != SubmissionStatusEnum.DRAFT]
+        graded = [s for s in submitted if s.status == SubmissionStatusEnum.GRADED]
+        to_grade = [s for s in submitted if s.status == SubmissionStatusEnum.SUBMITTED]
+        graded_total += len(graded)
+        pending_total += len(to_grade)
+        per_hw.append({'id': hw.id, 'title': hw.title, 'hw_type': str(hw.hw_type),
+                       'submitted': len(submitted), 'graded': len(graded), 'pending': len(to_grade)})
+        if hw_filter and hw.id != hw_filter:
+            continue
+        blind = blind_active(hw)
+        for s in to_grade:
+            pend = sum(1 for a in s.answers if a.needs_manual_grade and a.manual_score is None)
+            item = {'sub_id': s.id, 'homework_id': hw.id, 'homework_title': hw.title,
+                    'hw_type': str(hw.hw_type), 'student_id': (None if blind else s.student_id),
+                    'username': (blind_label(hw, s) if blind else
+                                 (s.student.username if s.student else '')),
+                    'blind': blind,
+                    'submitted_at': iso_local(s.submitted_at) if s.submitted_at else None,
+                    'pending': pend, 'max_score': s.max_score, 'is_late': bool(s.is_late)}
+            rows.append(((s.submitted_at.timestamp() if s.submitted_at else 0), item))
+    rows.sort(key=lambda x: x[0])            # 按提交时间升序（先交先批）
+    items = [it for _, it in rows]
+    total = len(items)
+    start = (page - 1) * size
+    paged = items[start:start + size]
+    return jsonify({'items': paged, 'total': total, 'page': page, 'size': size,
+                    'stats': {'pending_total': pending_total, 'graded_total': graded_total},
+                    'homeworks': per_hw})
+
+
 @homework_bp.route('/homeworks/<int:hw_id>/grade/<int:sub_id>', methods=['GET'])
 def api_grade_view(hw_id, sub_id):
     user, err = require_teacher()

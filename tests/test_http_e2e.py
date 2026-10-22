@@ -1357,3 +1357,66 @@ def test_homework_shuffle_http(ctx):
                        HomeworkAnswer.question_id == qid).first())
         assert row is not None and row.answer == 'C'
 
+
+def test_homework_grading_queue_http(ctx):
+    """v5.12 批改工作台：跨作业聚合待批队列，批改后减一，按作业过滤，教师隔离，学生 403，盲审隐名。"""
+    from database import db
+    from database.models import Question
+    c = ctx['_client']
+
+    def _new_hw(title, blind=False):
+        with ctx['_app'].app_context():
+            q = Question(content=f'简答{title}', answer='分治', type='short_answer',
+                         difficulty='easy', major_id=ctx['major_id'])
+            db.session.add(q)
+            db.session.commit()
+            qid = q.id
+        payload = {'title': title, 'student_ids': [ctx['s1_id'], ctx['s2_id']],
+                   'questions': [{'question_id': qid, 'score': 6}]}
+        if blind:
+            payload['blind_grading'] = True
+        r = c.post('/api/homeworks', json=payload, headers=_auth(ctx['t1']))
+        hw_id = r.get_json()['homework']['id']
+        c.post(f'/api/homeworks/{hw_id}/publish', headers=_auth(ctx['t1']))
+        for tok in (ctx['s1'], ctx['s2']):
+            c.post(f'/api/homeworks/{hw_id}/submit',
+                   json={'answers': {str(qid): '我的答案'}}, headers=_auth(tok))
+        return hw_id, qid
+
+    hw1, _q1 = _new_hw('队列作业一')
+    hw2, _q2 = _new_hw('队列作业二')
+
+    # 学生无权访问教师工作台
+    assert c.get('/api/homeworks/grading-queue', headers=_auth(ctx['s1'])).status_code == 403
+
+    # 队列跨作业聚合：以本测试自建的 hw1/hw2 为准（ctx 为 module 共享，其它测试或有遗留待批，故按 id 界定）
+    body = c.get('/api/homeworks/grading-queue', headers=_auth(ctx['t1'])).get_json()
+    mine = [it for it in body['items'] if it['homework_id'] in (hw1, hw2)]
+    assert len(mine) == 4                      # 两份作业 × 两份未批提交
+    assert set(body['items'][0].keys()) >= {'sub_id', 'homework_id', 'username', 'pending', 'hw_type'}
+    assert all(it['pending'] >= 1 for it in mine)
+    assert {it['homework_id'] for it in mine} == {hw1, hw2}
+
+    # 按作业过滤（filter 后 total 仅计该作业，确定值）
+    one = c.get(f'/api/homeworks/grading-queue?homework_id={hw1}', headers=_auth(ctx['t1'])).get_json()
+    assert one['total'] == 2 and all(it['homework_id'] == hw1 for it in one['items'])
+
+    # 批完 hw1 两份 → hw1 退出队列，hw2 仍在
+    for it in one['items']:
+        c.post(f"/api/homeworks/{hw1}/grade/batch",
+               json={'question_id': _q1, 'score': 5}, headers=_auth(ctx['t1']))
+    after = c.get('/api/homeworks/grading-queue', headers=_auth(ctx['t1'])).get_json()
+    mine_after = [it for it in after['items'] if it['homework_id'] in (hw1, hw2)]
+    assert len(mine_after) == 2 and all(it['homework_id'] == hw2 for it in mine_after)
+
+    # 教师隔离：t2 看不到 t1 的待批
+    t2body = c.get('/api/homeworks/grading-queue', headers=_auth(ctx['t2'])).get_json()
+    assert t2body['total'] == 0
+
+    # 盲审：开启匿名后队列隐去真名/student_id
+    hwb, _qb = _new_hw('盲审队列', blind=True)
+    bb = c.get(f'/api/homeworks/grading-queue?homework_id={hwb}', headers=_auth(ctx['t1'])).get_json()
+    assert bb['total'] == 2
+    assert all(it['blind'] is True and it['student_id'] is None
+               and str(it['username']).startswith('匿名') for it in bb['items'])
+

@@ -94,6 +94,7 @@ const routes = [
 
       // ── 作业练习模块（v5.0）──
       { path: 'homeworks/manage', name: 'HomeworkManage', component: () => import('../views/HomeworkManage.vue'), meta: { module: 'homework', requiresTeacher: true } },
+      { path: 'homeworks/grading-workbench', name: 'HomeworkGradingWorkbench', component: () => import('../views/HomeworkGradingWorkbench.vue'), meta: { module: 'homework', requiresTeacher: true } },
       { path: 'homeworks/:id/grade', name: 'HomeworkGrade', component: () => import('../views/HomeworkGrade.vue'), meta: { module: 'homework', requiresTeacher: true } },
       { path: 'homeworks/my', name: 'HomeworkStudent', component: () => import('../views/HomeworkStudent.vue'), meta: { module: 'homework', requiresStudent: true } },
       { path: 'homeworks/peer-reviews', name: 'PeerReviewCenter', component: () => import('../views/PeerReviewCenter.vue'), meta: { module: 'homework', requiresStudent: true } },
