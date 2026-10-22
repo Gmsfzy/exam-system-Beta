@@ -88,6 +88,18 @@ def _notify_graded(hw, sub, msg):
                             type='success', related_type='homework', related_id=hw.id)
 
 
+def _notify_returned(hw, sub, msg):
+    """v5.17 退回订正通知：个人作业通知本人；小组作业通知全组成员（与批改口径一致）。"""
+    if sub.group_id and sub.group:
+        for m in sub.group.members:
+            create_notification(m.student_id, '作业被退回订正', msg,
+                                type='warning', related_type='homework',
+                                related_id=hw.id, commit=False)
+    else:
+        create_notification(sub.student_id, '作业被退回订正', msg,
+                            type='warning', related_type='homework', related_id=hw.id)
+
+
 def _question_payload(hq, for_teacher):
     """题集式单题序列化：学生剥离 answer/analysis/test_cases（防答案泄露）。"""
     q = hq.question
@@ -139,7 +151,7 @@ def _apply_common_fields(hw, data):
         hw.title = title[:200]
     if 'description' in data:
         hw.description = str(data.get('description') or '')[:20000]
-    for flag in ('allow_late', 'allow_resubmit'):
+    for flag in ('allow_late', 'allow_resubmit', 'allow_revision'):
         if flag in data:
             setattr(hw, flag, bool(data[flag]))
     if 'remind_before' in data:
@@ -793,7 +805,8 @@ def api_export(hw_id):
         return err
     subs = [s for s in hw.submissions if s.status != SubmissionStatusEnum.DRAFT]
     subs.sort(key=lambda s: (s.student.username or '') if s.student else '')
-    label = {SubmissionStatusEnum.SUBMITTED: '待批改', SubmissionStatusEnum.GRADED: '已批改'}
+    label = {SubmissionStatusEnum.SUBMITTED: '待批改', SubmissionStatusEnum.GRADED: '已批改',
+             SubmissionStatusEnum.RETURNED: '待订正'}
     buf = io.StringIO()
     buf.write('\ufeff')   # BOM 让 Excel 正确识别 UTF-8
     w = csv.writer(buf)
@@ -910,9 +923,13 @@ def api_take(hw_id):
     if shuffle:
         assigned, option_map = ensure_submission_paper(hw, sub)
         db.session.commit()
-    payload = {'homework': hw.to_dict(), 'editable': hw.accepts_submission and
-               (sub is None or sub.status == SubmissionStatusEnum.DRAFT or
-                (not hw.is_expired and hw.allow_resubmit and sub.status == SubmissionStatusEnum.SUBMITTED))}
+    editable = hw.accepts_submission and (
+        sub is None or sub.status == SubmissionStatusEnum.DRAFT or
+        (not hw.is_expired and hw.allow_resubmit and sub.status == SubmissionStatusEnum.SUBMITTED))
+    # v5.17 退回订正：教师退回后始终可重交（不受截止/allow_resubmit 限制），仅需作业仍为已发布
+    if sub and sub.status == SubmissionStatusEnum.RETURNED and hw.status == HomeworkStatusEnum.PUBLISHED:
+        editable = True
+    payload = {'homework': hw.to_dict(), 'editable': editable}
     if hw.hw_type == HomeworkTypeEnum.QUESTION_SET:
         hqs = sorted(hw.hw_questions, key=lambda x: (x.order or 0, x.question_id))
         if assigned:   # v5.11 题目乱序：按该生持久题序展示
@@ -949,9 +966,10 @@ def api_save_answers(hw_id):
         return jsonify({'message': '作业不存在或未对你发布'}), 404
     if hw.status != HomeworkStatusEnum.PUBLISHED:
         return jsonify({'message': '作业已关闭'}), 400
-    if not hw.accepts_submission:
-        return jsonify({'message': '已过截止时间'}), 400
     sub = _my_submission(hw, user.id)
+    # v5.17 退回订正：已退回的提交不受截止时间限制可存草稿（教师已显式授权重交）
+    if not hw.accepts_submission and not (sub and sub.status == SubmissionStatusEnum.RETURNED):
+        return jsonify({'message': '已过截止时间'}), 400
     if sub and sub.status == SubmissionStatusEnum.GRADED:
         return jsonify({'message': '已批改完成，不可再修改'}), 400
     if sub is None:
@@ -1029,18 +1047,21 @@ def api_submit(hw_id):
         return jsonify({'message': '作业不存在或未对你发布'}), 404
     if hw.status != HomeworkStatusEnum.PUBLISHED:
         return jsonify({'message': '作业未发布或已关闭'}), 400
-    if hw.is_expired and not hw.allow_late:
-        return jsonify({'message': '已过截止时间且不允许迟交'}), 403
 
     sub = _my_submission(hw, user.id)
     if sub and sub.status == SubmissionStatusEnum.GRADED:
         return jsonify({'message': '已批改完成，不能再提交'}), 400
-    resubmit = bool(sub and sub.status == SubmissionStatusEnum.SUBMITTED)
-    if resubmit:
-        if hw.is_expired:
-            return jsonify({'message': '迟交仅一次，过期后不可重交'}), 403
-        if not hw.allow_resubmit:
-            return jsonify({'message': '本作业不允许重交'}), 403
+    # v5.17 退回订正重交：教师已显式授权，不受截止/allow_resubmit 限制（区别普通重交覆盖）
+    revision = bool(sub and sub.status == SubmissionStatusEnum.RETURNED)
+    resubmit = (not revision) and bool(sub and sub.status == SubmissionStatusEnum.SUBMITTED)
+    if not revision:
+        if hw.is_expired and not hw.allow_late:
+            return jsonify({'message': '已过截止时间且不允许迟交'}), 403
+        if resubmit:
+            if hw.is_expired:
+                return jsonify({'message': '迟交仅一次，过期后不可重交'}), 403
+            if not hw.allow_resubmit:
+                return jsonify({'message': '本作业不允许重交'}), 403
 
     if sub is None:
         sub = HomeworkSubmission(homework_id=hw.id, student_id=user.id,
@@ -1092,12 +1113,15 @@ def api_submit(hw_id):
         return jsonify({'message': '请至少填写内容或上传附件'}), 400
 
     finalize_submission(hw, sub)
-    if resubmit:
+    if resubmit or revision:
         sub.version = (sub.version or 1) + 1
+    if revision:
+        sub.revision_round = (sub.revision_round or 0) + 1
+        sub.is_late = False   # 订正重做视为教师授权的返工，不按迟交处理
     db.session.commit()
     # 师生互动：学生提交/重交 → 实时通知教师去批改（经 ORM 事件自动推送）
     create_notification(
-        hw.teacher_id, '收到作业重交' if resubmit else '收到作业提交',
+        hw.teacher_id, '收到作业订正重交' if revision else ('收到作业重交' if resubmit else '收到作业提交'),
         f'《{hw.title}》学生 {user.username} 已提交（第 {sub.version or 1} 版），待批改。',
         type='info', related_type='homework', related_id=hw.id)
     # v5.2 学习闭环：自动判分部分的错题收录 + 知识点掌握度（非关键路径，不阻塞提交）
@@ -1387,6 +1411,69 @@ def api_grade_submit(hw_id, sub_id):
     return jsonify({'message': '已批改完成' if pending == 0 else f'已保存给分（仍有 {pending} 题待批）',
                     'graded': pending == 0, 'pending_manual': pending,
                     'submission': sub.to_dict(for_teacher=True)})
+
+
+@homework_bp.route('/homeworks/<int:hw_id>/grade/<int:sub_id>/return', methods=['POST'])
+def api_grade_return(hw_id, sub_id):
+    """v5.17 教师将已批改提交退回订正（需作业开启 allow_revision）。
+
+    区别 allow_resubmit（截止前自由覆盖）：本动作发生在批改之后，置 status=returned
+    并落退回意见，通知学生重交。账务护栏：重交重批沿用既有幂等键
+    （homework-submit/homework-grade 不含轮次）天然不二次发分，质量分不补差。"""
+    user, err = require_teacher()
+    if err:
+        return err
+    hw, err = _get_own_homework(user, hw_id)
+    if err:
+        return err
+    if not hw.allow_revision:
+        return jsonify({'message': '本作业未开启订正重做'}), 400
+    sub = db.session.get(HomeworkSubmission, sub_id)
+    if not sub or sub.homework_id != hw.id:
+        return jsonify({'message': '提交不存在'}), 404
+    if sub.status != SubmissionStatusEnum.GRADED:
+        return jsonify({'message': '仅已批改的提交可退回订正'}), 400
+    data = request.get_json(silent=True) or {}
+    reason = str(data.get('reason') or '').strip()[:2000]
+    if reason:
+        sub.comment = reason
+    sub.status = SubmissionStatusEnum.RETURNED
+    db.session.commit()
+    msg = f'《{hw.title}》已被老师退回订正' + (f'：{reason}' if reason else '，请查看反馈后重新提交。')
+    _notify_returned(hw, sub, msg)
+    db.session.commit()
+    return jsonify({'message': '已退回订正', 'submission': sub.to_dict(for_teacher=True)})
+
+
+@homework_bp.route('/homeworks/redo', methods=['GET'])
+def api_homework_redo():
+    """v5.17 学生待订正列表：跨本人相关已发布作业筛 status=returned 的提交，
+    附上次分数/退回意见/订正轮次（小组作业取本组共享提交）。"""
+    user, err = require_login()
+    if err:
+        return err
+    if user.is_teacher():
+        return jsonify({'message': '待订正列表仅对学生开放'}), 403
+    hws = (Homework.query.join(HomeworkStudent, HomeworkStudent.homework_id == Homework.id)
+           .filter(HomeworkStudent.student_id == user.id,
+                   Homework.status == HomeworkStatusEnum.PUBLISHED).all())
+    items = []
+    for hw in hws:
+        sub = _my_submission(hw, user.id)
+        if not sub or sub.status != SubmissionStatusEnum.RETURNED:
+            continue
+        gmode = (getattr(hw, 'grade_mode', 'numeric') or 'numeric')
+        items.append({'homework_id': hw.id, 'title': hw.title, 'hw_type': str(hw.hw_type),
+                      'sub_id': sub.id, 'is_group': bool(hw.is_group),
+                      'deadline': iso_local(hw.deadline) if hw.deadline else None,
+                      'has_deadline': hw.deadline is not None,
+                      'grade_mode': gmode,
+                      'total_score': None if gmode == 'comment' else sub.total_score,
+                      'max_score': sub.max_score, 'comment': sub.comment or '',
+                      'revision_round': sub.revision_round or 0, 'version': sub.version or 1,
+                      'graded_at': iso_local(sub.graded_at) if sub.graded_at else None})
+    items.sort(key=lambda it: it['graded_at'] or '', reverse=True)
+    return jsonify({'items': items, 'count': len(items)})
 
 
 @homework_bp.route('/homeworks/<int:hw_id>/grade/<int:sub_id>/ai_suggest', methods=['POST'])
@@ -2310,6 +2397,8 @@ def api_homework_center():
             status_me = 'unsubmitted'
         elif sub.status == SubmissionStatusEnum.SUBMITTED:
             status_me = 'submitted'
+        elif sub.status == SubmissionStatusEnum.RETURNED:
+            status_me = 'returned'
         else:
             status_me = 'graded'
         days_left = (round((hw.deadline - now).total_seconds() / 86400.0, 2)
@@ -2318,10 +2407,13 @@ def api_homework_center():
         can_submit = (status_me == 'unsubmitted'
                       and (hw.deadline is None or hw.deadline >= now or bool(hw.allow_late))
                       and hw.status == HomeworkStatusEnum.PUBLISHED)
+        # v5.17 退回订正：教师已授权重交，不受截止限制
+        if status_me == 'returned' and hw.status == HomeworkStatusEnum.PUBLISHED:
+            can_submit = True
         # v5.14 多种评分制：显示层派生（不改 total_score 数值口径，仅影响呈现）
         gmode = (getattr(hw, 'grade_mode', 'numeric') or 'numeric')
         gdisp = None
-        if status_me == 'graded' and sub:
+        if status_me in ('graded', 'returned') and sub:
             if gmode == 'level':
                 ratio = (sub.total_score / max_sc) if (max_sc and sub.total_score is not None) else None
                 gdisp = hw.level_for_ratio(ratio) if ratio is not None else None
@@ -2329,8 +2421,8 @@ def api_homework_center():
                 gdisp = sub.comment or ''
             else:
                 gdisp = sub.total_score
-        vis_total = (None if (gmode == 'comment' and status_me == 'graded')
-                     else (sub.total_score if status_me == 'graded' else None))
+        vis_total = (None if (gmode == 'comment' and status_me in ('graded', 'returned'))
+                     else (sub.total_score if status_me in ('graded', 'returned') else None))
         items.append({'id': hw.id, 'title': hw.title, 'hw_type': str(hw.hw_type),
                       'teacher_name': hw.teacher.username if hw.teacher else '',
                       'deadline': iso_local(hw.deadline) if hw.deadline else None,
@@ -2346,9 +2438,10 @@ def api_homework_center():
             trend_src.append({'homework_id': hw.id, 'title': hw.title,
                               'total_score': sub.total_score, 'max_score': max_sc,
                               'graded_at': sub.graded_at})
-    items.sort(key=lambda it: ({'unsubmitted': 0, 'submitted': 1, 'graded': 2}[it['status_of_me']],
+    items.sort(key=lambda it: ({'unsubmitted': 0, 'returned': 1, 'submitted': 2, 'graded': 3}[it['status_of_me']],
                                 it['days_left'] if it['days_left'] is not None else float('inf')))
     stats = {'unsubmitted': sum(1 for it in items if it['status_of_me'] == 'unsubmitted'),
+             'returned': sum(1 for it in items if it['status_of_me'] == 'returned'),
              'submitted': sum(1 for it in items if it['status_of_me'] == 'submitted'),
              'graded': sum(1 for it in items if it['status_of_me'] == 'graded'),
              'due_soon': sum(1 for it in items if it['status_of_me'] == 'unsubmitted'

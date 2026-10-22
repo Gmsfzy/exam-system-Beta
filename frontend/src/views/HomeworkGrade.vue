@@ -35,7 +35,7 @@
       </el-table-column>
       <el-table-column label="得分" width="130" align="center">
         <template #default="{ row }">
-          <span v-if="row.status === 'graded'">{{ row.total_score }} / {{ row.max_score ?? '—' }}</span>
+          <span v-if="row.status === 'graded' || row.status === 'returned'">{{ row.total_score }} / {{ row.max_score ?? '—' }}<span v-if="row.status === 'returned' && row.revision_round" class="muted small">（订正 {{ row.revision_round }}）</span></span>
           <span v-else class="muted">待批改</span>
         </template>
       </el-table-column>
@@ -174,9 +174,23 @@
       </div>
       <template #footer>
         <el-button v-if="grade && grade.homework.hw_type !== 'open'" :loading="aiLoading" @click="askAi">AI 建议</el-button>
+        <el-button v-if="canReturn" :loading="returning" type="warning" plain @click="returnDialog = true">退回订正</el-button>
         <el-button type="primary" :loading="saving" @click="submitGrade">保存批改</el-button>
       </template>
     </el-drawer>
+
+    <!-- v5.17 退回订正 -->
+    <el-dialog v-model="returnDialog" title="退回订正" width="460px">
+      <div class="muted small" style="margin-bottom: 8px">
+        退回后该提交转为「待订正」，学生可见上次得分与本意见，并可重新提交（订正轮次 +1）。基础分/质量积分不重复发放。
+      </div>
+      <el-input v-model="returnReason" type="textarea" :rows="3" :maxlength="2000" show-word-limit
+                placeholder="请填写退回原因 / 订正要求（将展示给学生）" />
+      <template #footer>
+        <el-button @click="returnDialog = false">取消</el-button>
+        <el-button type="warning" :loading="returning" @click="returnRevision">确认退回</el-button>
+      </template>
+    </el-dialog>
 
     <!-- 班级 AI 讲评 -->
     <el-dialog v-model="classDialog" title="班级 AI 讲评" width="780px" top="6vh">
@@ -398,7 +412,7 @@ const plagThreshold = ref(0.7)
 const plagResult = ref({ scanned: 0, pair_count: 0, items: [] })
 
 const fmt = (v) => (v || '').slice(0, 16).replace('T', ' ')
-const statusText = (s) => ({ submitted: '待批改', graded: '已批改' }[s] || s)
+const statusText = (s) => ({ submitted: '待批改', graded: '已批改', returned: '待订正' }[s] || s)
 const auditText = (s) => ({ accepted: '已采纳', rejected: '已驳回' }[s] || '待审核')
 const auditTag = (s) => ({ accepted: 'success', rejected: 'danger' }[s] || 'info')
 const dimsText = (scores) => {
@@ -406,7 +420,13 @@ const dimsText = (scores) => {
   const labels = { accuracy: '准确', completeness: '完整', standard: '规范', innovation: '创造' }
   return Object.entries(scores).map(([k, v]) => `${labels[k] || k} ${v}`).join(' · ')
 }
-const statusTag = (s) => ({ submitted: 'warning', graded: 'success' }[s] || 'info')
+const statusTag = (s) => ({ submitted: 'warning', graded: 'success', returned: 'info' }[s] || 'info')
+// v5.17 退回订正：仅已批改且作业开启订正重做时可退回
+const returnDialog = ref(false)
+const returnReason = ref('')
+const returning = ref(false)
+const canReturn = computed(() => !!grade.value
+  && grade.value.submission?.status === 'graded' && !!hw.value.allow_revision)
 const rubricSum = computed(() => Object.values(rubricScores.value)
   .reduce((s, v) => s + (Number(v) || 0), 0))
 const rubricTouched = computed(() => Object.values(rubricScores.value).some(v => Number(v) > 0))
@@ -620,6 +640,23 @@ const loadPlagiarism = async () => {
     plagResult.value = res.data
   } finally {
     plagLoading.value = false
+  }
+}
+
+// v5.17 退回订正：将当前已批提交退回供学生重做（账务不二次发分）
+const returnRevision = async () => {
+  returning.value = true
+  try {
+    const res = await request.post(
+      `/api/homeworks/${hwId}/grade/${current.value.id}/return`,
+      { reason: returnReason.value || '' })
+    ElMessage.success(res.data.message || '已退回订正')
+    returnDialog.value = false
+    returnReason.value = ''
+    drawer.value = false
+    load()
+  } finally {
+    returning.value = false
   }
 }
 

@@ -30,8 +30,9 @@ class SubmissionStatusEnum:
     DRAFT = 'draft'        # 自动保存草稿（承载逐题作答中间态）
     SUBMITTED = 'submitted'  # 已提交待批改（客观/编程已自动判分）
     GRADED = 'graded'        # 已批改（学生可见总分与评语）
+    RETURNED = 'returned'    # v5.17 教师退回订正（学生可见上次分数与退回意见，可重交）
 
-    ALL = (DRAFT, SUBMITTED, GRADED)
+    ALL = (DRAFT, SUBMITTED, GRADED, RETURNED)
 
 
 class Homework(db.Model):
@@ -72,6 +73,8 @@ class Homework(db.Model):
     rubric_id = db.Column(db.Integer, db.ForeignKey('homework_rubric.id'), nullable=True, index=True)
     # v5.16 作答防作弊监测开关（仅记录事件、不强制交卷，与考试切屏强交卷口径不同）
     enable_monitor = db.Column(db.Boolean, nullable=False, default=False)
+    # v5.17 订正重做闭环：开启后教师可将已批提交退回订正（区别 allow_resubmit：截止前覆盖 vs 批改后退回）
+    allow_revision = db.Column(db.Boolean, nullable=False, default=False)
 
     teacher = db.relationship('User', foreign_keys=[teacher_id], backref='homeworks')
     hw_questions = db.relationship('HomeworkQuestion', backref='homework', lazy=True,
@@ -172,7 +175,8 @@ class Homework(db.Model):
              'peer_review_weight': float(self.peer_review_weight or 0.0),
              'grade_mode': self.grade_mode or 'numeric',
              'rubric_id': self.rubric_id,
-             'enable_monitor': bool(self.enable_monitor)}
+             'enable_monitor': bool(self.enable_monitor),
+             'allow_revision': bool(self.allow_revision)}
         if for_teacher:
             d['teacher_name'] = self.teacher.username if self.teacher else ''
             d['grade_scale'] = list(self.grade_scale_json or [])
@@ -236,6 +240,8 @@ class HomeworkSubmission(db.Model):
     option_map_json = db.Column(JSONType)      # 选项乱序映射 {str(qid): [perm]}
     # v5.15 评分量规：逐维度得分快照 [{index,label,score}]（仅展示/建议，不改 total_score）
     rubric_scores_json = db.Column(JSONType)
+    # v5.17 订正重做：退回订正轮次（每次退回后重交递增；与 version 语义区分——version 计全部重交、revision_round 仅计订正）
+    revision_round = db.Column(db.Integer, nullable=False, default=0)
 
     student = db.relationship('User', foreign_keys=[student_id], backref='homework_submissions')
     grader = db.relationship('User', foreign_keys=[graded_by])
@@ -258,9 +264,10 @@ class HomeworkSubmission(db.Model):
              'is_late': bool(self.is_late),
              'submitted_at': iso_local(self.submitted_at) if self.submitted_at else None,
              'max_score': self.max_score,
+             'revision_round': self.revision_round or 0,
              'graded_at': iso_local(self.graded_at) if self.graded_at else None}
-        # 成绩可见性：批改完成后学生才见分数与评语
-        if for_teacher or self.status == SubmissionStatusEnum.GRADED:
+        # 成绩可见性：批改完成或退回订正后学生才见分数与评语（退回需展示上次分与退回意见）
+        if for_teacher or self.status in (SubmissionStatusEnum.GRADED, SubmissionStatusEnum.RETURNED):
             d['total_score'] = self.total_score
             d['comment'] = self.comment or ''
             # v5.11 迟交扣分透明化：扣分前原始分 / 实扣分 / 扣分率

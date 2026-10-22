@@ -26,6 +26,18 @@
       <el-link type="primary" @click="downloadRef">{{ hw.reference.filename }}</el-link>
     </el-alert>
 
+    <!-- v5.17 退回订正：展示上次得分与退回意见，可重新作答提交 -->
+    <el-alert v-if="submission && submission.status === 'returned'" :closable="false"
+              type="warning" class="desc">
+      <div>
+        老师已将本次作答退回订正<template v-if="submission.revision_round">（第 {{ submission.revision_round }} 轮）</template>，请结合反馈修改后重新提交。
+      </div>
+      <div v-if="submission.total_score != null" style="margin-top: 4px">
+        上次得分：{{ submission.total_score }}<span v-if="submission.max_score"> / {{ submission.max_score }}</span>
+      </div>
+      <div v-if="submission.comment" style="margin-top: 4px">退回意见：{{ submission.comment }}</div>
+    </el-alert>
+
     <!-- 已批改：成绩卡片 -->
     <el-card v-if="submission && submission.status === 'graded'" class="score-card" shadow="never">
       <div class="score-line">

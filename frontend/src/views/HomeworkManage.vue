@@ -237,7 +237,8 @@
           <el-checkbox v-model="form.shuffle_questions" :disabled="form.hw_type !== 'question_set'">题目乱序</el-checkbox>
           <el-checkbox v-model="form.shuffle_options" :disabled="form.hw_type !== 'question_set'">选项乱序</el-checkbox>
           <el-checkbox v-model="form.enable_monitor">防作弊监测</el-checkbox>
-          <span class="hint">匿名=批完前隐藏学生身份；乱序=每生题序/选项随机，判分自动还原；监测=采集切屏/粘贴等异常事件（只记不拦）</span>
+          <el-checkbox v-model="form.allow_revision">允许订正重做</el-checkbox>
+          <span class="hint">匿名=批完前隐藏学生身份；乱序=每生题序/选项随机，判分自动还原；监测=采集切屏/粘贴等异常事件（只记不拦）；订正=批后可将已批提交退回学生重做</span>
         </el-form-item>
         <el-form-item label="参考资料">
           <div v-if="form.reference" class="ref-row">
@@ -842,7 +843,7 @@ const form = reactive({
   late_penalty_pct: 0, blind_grading: false, shuffle_questions: false, shuffle_options: false,
   remind_levels: [],
   grade_mode: 'numeric', grade_scale: [], rubric_id: null,
-  enable_monitor: false,
+  enable_monitor: false, allow_revision: false,
   questions: [], student_ids: [], is_group: false, groups: []
 })
 
@@ -885,7 +886,7 @@ const openCreate = () => {
     late_penalty_pct: 0, blind_grading: false, shuffle_questions: false, shuffle_options: false,
     remind_levels: [],
     grade_mode: 'numeric', grade_scale: [], rubric_id: null,
-    enable_monitor: false,
+    enable_monitor: false, allow_revision: false,
     questions: [], student_ids: [], is_group: false, groups: []
   })
   pickMajor.value = null
@@ -904,6 +905,7 @@ const openEdit = async (row) => {
     late_penalty_pct: hw.late_penalty_pct || 0, blind_grading: !!hw.blind_grading,
     shuffle_questions: !!hw.shuffle_questions, shuffle_options: !!hw.shuffle_options,
     enable_monitor: !!hw.enable_monitor,
+    allow_revision: !!hw.allow_revision,
     remind_levels: (hw.remind_levels || []).map(l => ({ minutes: l.minutes, label: l.label || '' })),
     grade_mode: hw.grade_mode || 'numeric',
     grade_scale: Array.isArray(hw.grade_scale) ? hw.grade_scale.map(x => ({ label: x.label, min: Number(x.min) })) : [],
@@ -946,6 +948,7 @@ const save = async () => {
       shuffle_questions: form.hw_type === 'question_set' ? !!form.shuffle_questions : false,
       shuffle_options: form.hw_type === 'question_set' ? !!form.shuffle_options : false,
       enable_monitor: !!form.enable_monitor,
+      allow_revision: !!form.allow_revision,
       late_penalty_pct: form.has_deadline ? (form.late_penalty_pct || 0) : 0,
       grade_mode: form.grade_mode,
       grade_scale: form.grade_mode === 'level' ? (form.grade_scale || []) : null,

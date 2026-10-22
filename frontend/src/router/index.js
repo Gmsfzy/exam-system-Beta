@@ -101,6 +101,7 @@ const routes = [
       { path: 'homeworks/:id/grade', name: 'HomeworkGrade', component: () => import('../views/HomeworkGrade.vue'), meta: { module: 'homework', requiresTeacher: true } },
       { path: 'homeworks/my', name: 'HomeworkStudent', component: () => import('../views/HomeworkStudent.vue'), meta: { module: 'homework', requiresStudent: true } },
       { path: 'homeworks/dashboard', name: 'HomeworkDashboard', component: () => import('../views/HomeworkDashboard.vue'), meta: { module: 'homework', requiresStudent: true } },
+      { path: 'homeworks/redo', name: 'HomeworkRedo', component: () => import('../views/HomeworkRedo.vue'), meta: { module: 'homework', requiresStudent: true } },
       { path: 'homeworks/peer-reviews', name: 'PeerReviewCenter', component: () => import('../views/PeerReviewCenter.vue'), meta: { module: 'homework', requiresStudent: true } },
       { path: 'homeworks/:id/take', name: 'HomeworkTake', component: () => import('../views/HomeworkTake.vue'), meta: { module: 'homework', requiresStudent: true } },
     ]

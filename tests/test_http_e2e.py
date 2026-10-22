@@ -1646,3 +1646,97 @@ def test_homework_proctor_http(ctx):
                 headers=_auth(ctx['t1'])).get_json()
     assert gv['graded'] is True and gv['submission']['total_score'] == 10.0
 
+
+def test_homework_revision_http(ctx):
+    """v5.17 订正重做闭环 HTTP 全链：退回鉴权/开关、returned 态可见上次分、
+    重交递增 revision_round、重批账务仅一次（LedgerTxn 不新增）、与 allow_resubmit 语义区别。"""
+    from database import db
+    from ledger.models import LedgerTxn
+    from homework.models import HomeworkSubmission, SubmissionStatusEnum
+    c = ctx['_client']
+
+    # 未开启订正的作业：批改后退回 → 400
+    off = c.post('/api/homeworks', json={'title': '禁订正', 'student_ids': [ctx['s1_id']],
+              'questions': [{'question_id': ctx['question_id'], 'score': 10}]},
+              headers=_auth(ctx['t1'])).get_json()['homework']['id']
+    assert c.get(f'/api/homeworks/{off}', headers=_auth(ctx['t1'])
+                 ).get_json()['allow_revision'] is False
+    c.post(f'/api/homeworks/{off}/publish', headers=_auth(ctx['t1']))
+    sub_off = c.post(f'/api/homeworks/{off}/submit',
+                     json={'answers': {str(ctx['question_id']): 'B'}},
+                     headers=_auth(ctx['s1'])).get_json()['submission']
+    c.post(f'/api/homeworks/{off}/grade/{sub_off["id"]}', json={'answers': []},
+           headers=_auth(ctx['t1']))
+    assert c.post(f'/api/homeworks/{off}/grade/{sub_off["id"]}/return',
+                  json={'reason': 'x'}, headers=_auth(ctx['t1'])).status_code == 400
+
+    # 开启订正的作业
+    hw = c.post('/api/homeworks', json={'title': '可订正', 'allow_revision': True,
+             'student_ids': [ctx['s1_id']],
+             'questions': [{'question_id': ctx['question_id'], 'score': 10}]},
+             headers=_auth(ctx['t1'])).get_json()['homework']['id']
+    c.post(f'/api/homeworks/{hw}/publish', headers=_auth(ctx['t1']))
+    sub = c.post(f'/api/homeworks/{hw}/submit',
+                 json={'answers': {str(ctx['question_id']): 'B'}},
+                 headers=_auth(ctx['s1'])).get_json()['submission']
+    sub_id = sub['id']
+    assert sub['status'] == 'submitted' and sub['revision_round'] == 0
+
+    # 未批改不可退回 → 400
+    assert c.post(f'/api/homeworks/{hw}/grade/{sub_id}/return',
+                  json={'reason': '早'}, headers=_auth(ctx['t1'])).status_code == 400
+    # 批改（客观满分 10）
+    gv = c.post(f'/api/homeworks/{hw}/grade/{sub_id}', json={'answers': []},
+                headers=_auth(ctx['t1'])).get_json()
+    assert gv['graded'] is True and gv['submission']['total_score'] == 10.0
+
+    # 跨教师退回 → 403
+    assert c.post(f'/api/homeworks/{hw}/grade/{sub_id}/return',
+                  json={'reason': 'x'}, headers=_auth(ctx['t2'])).status_code == 403
+    # 教师退回订正（带意见）
+    rt = c.post(f'/api/homeworks/{hw}/grade/{sub_id}/return',
+                json={'reason': '请补充过程'}, headers=_auth(ctx['t1']))
+    assert rt.status_code == 200 and rt.get_json()['submission']['status'] == 'returned'
+
+    # 学生侧：退回后仍可见上次分与退回意见；进入作答页可编辑重交
+    res = c.get(f'/api/homeworks/{hw}/result', headers=_auth(ctx['s1'])).get_json()
+    assert res['submission']['status'] == 'returned'
+    assert res['submission']['total_score'] == 10.0
+    assert res['submission']['comment'] == '请补充过程'
+    assert c.get(f'/api/homeworks/{hw}/take', headers=_auth(ctx['s1'])
+                 ).get_json()['editable'] is True
+
+    # 待订正列表含本作业；作业中心 status_of_me=returned 且 can_submit
+    redo = c.get('/api/homeworks/redo', headers=_auth(ctx['s1'])).get_json()
+    hit = next((it for it in redo['items'] if it['homework_id'] == hw), None)
+    assert hit and hit['comment'] == '请补充过程' and hit['revision_round'] == 0
+    ctr = {it['id']: it for it in c.get('/api/homeworks/center',
+           headers=_auth(ctx['s1'])).get_json()['items']}
+    assert ctr[hw]['status_of_me'] == 'returned' and ctr[hw]['can_submit'] is True
+    # 教师不可用学生待订正列表
+    assert c.get('/api/homeworks/redo', headers=_auth(ctx['t1'])).status_code == 403
+
+    # 重交：returned → submitted，revision_round+1、version+1
+    rs = c.post(f'/api/homeworks/{hw}/submit',
+                json={'answers': {str(ctx['question_id']): 'B'}},
+                headers=_auth(ctx['s1'])).get_json()['submission']
+    assert rs['status'] == 'submitted' and rs['revision_round'] == 1 and rs['version'] == 2
+    # 重交后不再在待订正列表
+    redo2 = c.get('/api/homeworks/redo', headers=_auth(ctx['s1'])).get_json()
+    assert not any(it['homework_id'] == hw for it in redo2['items'])
+
+    # 重批（客观满分 10）
+    c.post(f'/api/homeworks/{hw}/grade/{sub_id}', json={'answers': []},
+           headers=_auth(ctx['t1']))
+    # 账务护栏：重交重批 LedgerTxn 仍为 2（submit+grade 各一），不二次发分
+    with ctx['_app'].app_context():
+        rows = (LedgerTxn.query.filter_by(ref_type='homework', ref_id=hw)
+                .order_by(LedgerTxn.id).all())
+        # 本作业仅 s1 一人，全链只应产生 提交/质量 两笔流水（重交重批不新增）
+        assert LedgerTxn.query.filter_by(ref_type='homework', ref_id=hw).count() == 2
+        keys = [r.idempotency_key for r in rows]
+        assert f'homework-submit:{hw}:{ctx["s1_id"]}' in keys
+        assert f'homework-grade:{hw}:{ctx["s1_id"]}' in keys
+        subm = db.session.get(HomeworkSubmission, sub_id)
+        assert subm.status == SubmissionStatusEnum.GRADED and subm.revision_round == 1
+
