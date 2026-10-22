@@ -18,6 +18,7 @@
 
     <div class="summary">
       名单 {{ studentCount }} 人 · 已提交 {{ items.length }} 份
+      <el-tag v-if="blindGrade" size="small" type="info" effect="plain" style="margin-left: 8px">匿名批改中</el-tag>
       <span v-if="notSubmitted.length" class="not-sub">· 未提交：{{ notSubmitted.map(n => n.username).join('、') }}</span>
     </div>
 
@@ -55,6 +56,9 @@
     <el-drawer v-model="drawer" :title="`批改：${current?.username || ''}`" size="660px">
       <div v-if="loading" class="center">加载中…</div>
       <div v-else-if="grade">
+        <div v-if="grade.blind" class="muted small" style="margin-bottom: 8px">
+          匿名批改中：学生身份已隐藏，全部批完后自动恢复
+        </div>
         <!-- 开放式：正文 + 附件 + 整体给分 -->
         <template v-if="grade.homework.hw_type === 'open'">
           <div class="label">学生提交内容</div>
@@ -86,6 +90,8 @@
               <el-input-number v-model="row.manual_score" :min="0" :max="row.max_score" size="small"
                                controls-position="right" placeholder="人工分" />
               <el-input v-model="row.comment" size="small" placeholder="评语" style="flex: 1" />
+              <el-button v-if="row.needs_manual" size="small" :loading="batchLoading"
+                         @click="batchGrade(row)">批量给该题</el-button>
             </div>
           </div>
         </div>
@@ -334,6 +340,8 @@ const drawer = ref(false)
 const loading = ref(false)
 const saving = ref(false)
 const aiLoading = ref(false)
+const batchLoading = ref(false)
+const blindGrade = ref(false)
 const grade = ref(null)
 const rows = ref([])          // 题集式：答案与题面合并视图
 const current = ref(null)
@@ -385,6 +393,7 @@ const load = async () => {
   items.value = subs.data.items || []
   notSubmitted.value = subs.data.not_submitted || []
   studentCount.value = subs.data.student_count || 0
+  blindGrade.value = !!subs.data.blind
 }
 
 const openGrade = async (row) => {
@@ -431,6 +440,28 @@ const askAi = async () => {
     ElMessage.success(sg.length ? `AI 已给出 ${sg.length} 题建议` : '无待批题目')
   } finally {
     aiLoading.value = false
+  }
+}
+
+const batchGrade = async (row) => {
+  if (row.manual_score == null || row.manual_score === '') {
+    return ElMessage.warning('请先给该题填写分数')
+  }
+  try {
+    await ElMessageBox.confirm(
+      `把该题 ${row.manual_score} 分${row.comment ? '及评语' : ''}批量套用到本作业所有待批此题的提交？`,
+      '同题批量给分', { type: 'warning' })
+  } catch { return }
+  batchLoading.value = true
+  try {
+    const body = { question_id: row.question_id, score: row.manual_score }
+    if (row.comment) body.comment = row.comment
+    const res = await request.post(`/api/homeworks/${hwId}/grade/batch`, body)
+    ElMessage.success(res.data.message || '批量给分完成')
+    drawer.value = false
+    load()
+  } finally {
+    batchLoading.value = false
   }
 }
 

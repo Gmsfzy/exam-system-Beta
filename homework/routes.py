@@ -33,6 +33,7 @@ from homework.models import (
 )
 from homework.services import (
     finalize_submission, recompute_total, notify_homework_students, ai_suggest_grading,
+    apply_late_penalty, blind_active, blind_label, ensure_submission_paper,
     build_class_review, build_submission_review, upsert_ai_review,
     distribute_peer_reviews, peer_review_summary, peer_review_received,
     compute_peer_final_score, _clean_dimension_scores, peer_review_dimensions,
@@ -98,6 +99,27 @@ def _question_payload(hq, for_teacher):
     return d
 
 
+def _take_question_payload(hq, perm):
+    """v5.11 乱序作答专用：学生视角题目，若有选项乱序映射则重排选项（仅显示，不泄露答案）。"""
+    d = _question_payload(hq, False)
+    if perm:
+        from api.exam_engine import display_options
+        d['options'] = display_options(hq.question, perm)
+    return d
+
+
+def _canonical_choice_answer(hq_map, option_map, qid, text):
+    """v5.11 选项乱序：把学生提交的显示位字母反归为原始位字母后存答（仅选择题且有映射时）。"""
+    perm = option_map.get(str(qid)) if option_map else None
+    if not perm:
+        return text
+    hq = hq_map.get(qid)
+    if not hq or not hq.question or hq.question.type not in ('single_choice', 'multiple_choice'):
+        return text
+    from api.exam_engine import map_letters
+    return map_letters(str(text or ''), perm, reverse=False)
+
+
 def _parse_deadline(value):
     if not value:
         return None
@@ -138,6 +160,32 @@ def _apply_common_fields(hw, data):
             hw.pass_score = round(ps, 2)
     if 'is_group' in data:
         hw.is_group = bool(data['is_group'])
+    # v5.11 迟交扣分 / 匿名批改 / 乱序开关 / 分级提醒
+    if 'late_penalty_pct' in data:
+        try:
+            hw.late_penalty_pct = min(max(float(data['late_penalty_pct']), 0.0), 100.0)
+        except (TypeError, ValueError):
+            return 'late_penalty_pct 须为 0~100 的数字'
+    for flag in ('blind_grading', 'shuffle_questions', 'shuffle_options'):
+        if flag in data:
+            setattr(hw, flag, bool(data[flag]))
+    if 'remind_levels' in data:
+        levels = data.get('remind_levels')
+        if levels in (None, ''):
+            hw.remind_levels_json = None
+        elif not isinstance(levels, list):
+            return 'remind_levels 须为列表或留空'
+        else:
+            cleaned = []
+            for lv in levels:
+                if not isinstance(lv, dict):
+                    return 'remind_levels 元素须为 {minutes, label}'
+                try:
+                    m = min(max(int(lv.get('minutes')), 0), 7 * 24 * 60)
+                except (TypeError, ValueError):
+                    return 'remind_levels.minutes 须为 0~10080 分钟'
+                cleaned.append({'minutes': m, 'label': str(lv.get('label') or '')[:20]})
+            hw.remind_levels_json = cleaned
     return None
 
 
@@ -661,7 +709,10 @@ def api_copy(hw_id):
                    hw_type=hw.hw_type, teacher_id=user.id, status=HomeworkStatusEnum.DRAFT,
                    deadline=hw.deadline, allow_late=hw.allow_late,
                    allow_resubmit=hw.allow_resubmit, remind_before=hw.remind_before or 0,
-                   pass_score=hw.pass_score)
+                   pass_score=hw.pass_score,
+                   late_penalty_pct=hw.late_penalty_pct or 0.0, blind_grading=hw.blind_grading,
+                   shuffle_questions=hw.shuffle_questions, shuffle_options=hw.shuffle_options,
+                   remind_levels_json=hw.remind_levels_json)
     # 参考资料：复制一份物理文件并换 stored_name，避免两个作业共享同一文件互相删毁
     if hw.reference_json and hw.reference_json.get('stored_name'):
         src = hw.reference_json['stored_name']
@@ -725,13 +776,39 @@ def api_take(hw_id):
     if hw.status != HomeworkStatusEnum.PUBLISHED:
         return jsonify({'message': '作业已关闭，无法进入作答'}), 400
     sub = _my_submission(hw, user.id)
+    assigned = option_map = None
+    shuffle = hw.hw_type == HomeworkTypeEnum.QUESTION_SET and (hw.shuffle_questions or hw.shuffle_options)
+    if shuffle and sub is None:
+        # v5.11 乱序需持久化个人映射：首次进入建 DRAFT 提交承载题序/选项映射（不进批改列表）
+        sub = HomeworkSubmission(homework_id=hw.id, student_id=user.id,
+                                 status=SubmissionStatusEnum.DRAFT)
+        if hw.is_group:
+            grp = get_student_group(hw, user.id)
+            if grp:
+                sub.group_id = grp.id
+        db.session.add(sub)
+        db.session.flush()
+    if shuffle:
+        assigned, option_map = ensure_submission_paper(hw, sub)
+        db.session.commit()
     payload = {'homework': hw.to_dict(), 'editable': hw.accepts_submission and
                (sub is None or sub.status == SubmissionStatusEnum.DRAFT or
                 (not hw.is_expired and hw.allow_resubmit and sub.status == SubmissionStatusEnum.SUBMITTED))}
     if hw.hw_type == HomeworkTypeEnum.QUESTION_SET:
-        payload['questions'] = [_question_payload(hq, False) for hq in
-                                sorted(hw.hw_questions, key=lambda x: (x.order or 0, x.question_id))]
-        payload['answers'] = ({str(a.question_id): a.answer for a in sub.answers} if sub else {})
+        hqs = sorted(hw.hw_questions, key=lambda x: (x.order or 0, x.question_id))
+        if assigned:   # v5.11 题目乱序：按该生持久题序展示
+            rank = {qid: i for i, qid in enumerate(assigned)}
+            hqs = sorted(hqs, key=lambda x: rank.get(x.question_id, 1 << 30))
+        payload['questions'] = [_take_question_payload(hq, (option_map or {}).get(str(hq.question_id)))
+                                for hq in hqs]
+        raw = {str(a.question_id): a.answer for a in sub.answers} if sub else {}
+        if option_map:   # v5.11 存的是规范化字母，回显映射回该生显示位
+            from api.exam_engine import map_letters
+            for k, v in raw.items():
+                perm = option_map.get(k)
+                if perm:
+                    raw[k] = map_letters(v or '', perm, reverse=True)
+        payload['answers'] = raw
     else:
         payload['content'] = (sub.content if sub else '')
         payload['attachment'] = sub.attachment_meta() if sub else None
@@ -771,6 +848,7 @@ def api_save_answers(hw_id):
         sub.student_id = user.id
     data = request.get_json(silent=True) or {}
     hq_map = {hq.question_id: hq for hq in hw.hw_questions}
+    _, option_map = ensure_submission_paper(hw, sub)   # v5.11 乱序：复用/生成个人映射
     saved = 0
     for qid, text in (data.get('answers') or {}).items():
         try:
@@ -784,7 +862,8 @@ def api_save_answers(hw_id):
             a = HomeworkAnswer(submission_id=sub.id, question_id=qid)
             db.session.add(a)
             sub.answers.append(a)
-        a.answer = str(text if text is not None else '')[:50000]
+        val = _canonical_choice_answer(hq_map, option_map, qid, text) if option_map else text
+        a.answer = str(val if val is not None else '')[:50000]
         saved += 1
     if hw.hw_type == HomeworkTypeEnum.OPEN and 'content' in data:
         sub.content = str(data.get('content') or '')[:50000]
@@ -870,6 +949,8 @@ def api_submit(hw_id):
                 return jsonify({'message': emsg}), 400
     else:
         data = request.get_json(silent=True) or {}
+        _, option_map = ensure_submission_paper(hw, sub)   # v5.11 乱序：存答前反归
+        hq_map = {hq.question_id: hq for hq in hw.hw_questions}
         for qid, text in (data.get('answers') or {}).items():
             try:
                 qid = int(qid)
@@ -882,7 +963,8 @@ def api_submit(hw_id):
                 a = HomeworkAnswer(submission_id=sub.id, question_id=qid)
                 db.session.add(a)
                 sub.answers.append(a)
-            a.answer = str(text if text is not None else '')[:50000]
+            val = _canonical_choice_answer(hq_map, option_map, qid, text) if option_map else text
+            a.answer = str(val if val is not None else '')[:50000]
         if hw.hw_type == HomeworkTypeEnum.OPEN and 'content' in data:
             sub.content = str(data.get('content') or '')[:50000]
 
@@ -969,8 +1051,17 @@ def api_submissions(hw_id):
     not_submitted = [{'student_id': hs.student_id,
                       'username': hs.student.username if hs.student else ''}
                      for hs in hw.hw_students if hs.student_id not in submitted_ids]
-    return jsonify({'items': [s.to_dict(for_teacher=True) for s in subs],
+    blind = blind_active(hw)
+    items = [s.to_dict(for_teacher=True) for s in subs]
+    if blind:   # v5.11 匿名批改：批完前隐藏身份（不泄露真名/student_id）
+        for s, d in zip(subs, items):
+            d['username'] = blind_label(hw, s)
+            d['student_id'] = None
+            d['blind'] = True
+        not_submitted = [{'student_id': None, 'username': '未提交'}] * len(not_submitted)
+    return jsonify({'items': items,
                     'not_submitted': not_submitted,
+                    'blind': blind,
                     'student_count': len(hw.hw_students),
                     'groups': [g.to_dict() for g in hw.groups]})
 
@@ -993,8 +1084,15 @@ def _grade_payload(hw, sub):
     hq_map = {hq.question_id: hq for hq in hw.hw_questions}
     rec = HomeworkAiReview.query.filter_by(
         homework_id=hw.id, scope_key=f'sub:{sub.id}').first()
+    sub_d = sub.to_dict(for_teacher=True)
+    blind = blind_active(hw)
+    if blind:   # v5.11 匿名批改：批改视图同样隐去真名，批改仍走 sub_id
+        sub_d['username'] = blind_label(hw, sub)
+        sub_d['student_id'] = None
+        sub_d['blind'] = True
     return {'homework': hw.to_dict(for_teacher=True),
-            'submission': sub.to_dict(for_teacher=True),
+            'submission': sub_d,
+            'blind': blind,
             'answers': [a.to_dict(for_teacher=True,
                                   max_score=hq_map[a.question_id].score if a.question_id in hq_map else None)
                         for a in sub.answers],
@@ -1048,6 +1146,7 @@ def api_grade_submit(hw_id, sub_id):
         sub.status = SubmissionStatusEnum.GRADED
         sub.graded_by = user.id
         sub.graded_at = utcnow()
+        apply_late_penalty(hw, sub)   # v5.11 迟交扣分（转 GRADED 收口）
         msg = f'《{hw.title}》成绩已公布：{sub.total_score} 分（满分 {sub.max_score}）。'
         _notify_graded(hw, sub, msg)
         db.session.commit()
@@ -1082,6 +1181,8 @@ def api_grade_submit(hw_id, sub_id):
 
     earned, max_total, pending = recompute_total(sub)
     if pending == 0:
+        apply_late_penalty(hw, sub)   # v5.11 迟交扣分（转 GRADED 收口，先扣后播报）
+        earned = sub.total_score
         sub.status = SubmissionStatusEnum.GRADED
         sub.graded_by = user.id
         sub.graded_at = utcnow()
@@ -1120,6 +1221,87 @@ def api_grade_ai(hw_id, sub_id):
     except Exception:
         return jsonify({'message': 'AI 服务暂不可用，请稍后重试或人工批改'}), 503
     return jsonify(result)
+
+
+@homework_bp.route('/homeworks/<int:hw_id>/grade/batch', methods=['POST'])
+@limiter.limit('30/minute')
+def api_grade_batch(hw_id):
+    """v5.11 同题批量给分：把某题统一分数/评语应用到多份提交（缺省=所有非草稿提交）。
+
+    逐份重算总分，pending 归零则转 GRADED（首次转态才触发学习闭环与质量积分，批量内逐份幂等）。
+    """
+    user, err = require_teacher()
+    if err:
+        return err
+    hw, err = _get_own_homework(user, hw_id)
+    if err:
+        return err
+    if hw.hw_type != HomeworkTypeEnum.QUESTION_SET:
+        return jsonify({'message': '仅题集式作业支持逐题批量给分'}), 400
+    data = request.get_json(silent=True) or {}
+    try:
+        qid = int(data.get('question_id'))
+    except (TypeError, ValueError):
+        return jsonify({'message': 'question_id 须为数字'}), 400
+    hq = next((x for x in hw.hw_questions if x.question_id == qid), None)
+    if not hq:
+        return jsonify({'message': '题目不在本作业'}), 404
+    score = data.get('score')
+    if score is None or score == '':
+        return jsonify({'message': 'score 必填'}), 400
+    try:
+        score = float(score)
+    except (TypeError, ValueError):
+        return jsonify({'message': '分数须为数字'}), 400
+    full = hq.score or 100.0
+    if not (0 <= score <= full):
+        return jsonify({'message': f'分数须在 0~{full} 之间'}), 400
+    comment = str(data.get('comment') or '')[:2000] if data.get('comment') is not None else None
+
+    subs = [s for s in hw.submissions if s.status != SubmissionStatusEnum.DRAFT]
+    sids = data.get('submission_ids')
+    if sids:
+        want = {int(x) for x in sids if str(x).isdigit()}
+        subs = [s for s in subs if s.id in want]
+    applied = still_pending = 0
+    newly = []
+    for sub in subs:
+        a = next((x for x in sub.answers if x.question_id == qid), None)
+        if a is None:
+            continue
+        was_graded = sub.status == SubmissionStatusEnum.GRADED
+        a.manual_score = round(score, 2)
+        if comment is not None:
+            a.comment = comment
+        _earned, _max, pending = recompute_total(sub)
+        applied += 1
+        if pending == 0:
+            apply_late_penalty(hw, sub)   # 重算后重新扣（recompute 已回写原始分，幂等）
+            if not was_graded:
+                sub.status = SubmissionStatusEnum.GRADED
+                sub.graded_by = user.id
+                sub.graded_at = utcnow()
+                newly.append(sub)
+        else:
+            still_pending += 1
+    db.session.commit()
+    # 首次转 GRADED：逐份补做学习闭环 + 通知 + 质量积分（失败不阻断，与单份一致）
+    from homework.services import sync_learning_effects, award_homework_grade_bonus
+    for sub in newly:
+        msg = (f'《{hw.title}》成绩已公布：{sub.total_score} 分'
+               + (f'（满分 {sub.max_score}）' if sub.max_score else '') + '。')
+        _notify_graded(hw, sub, msg)
+        try:
+            sync_learning_effects(hw, sub, scope='final')
+        except Exception:
+            logger.exception('[homework] 批量批改学习闭环失败 hw=%s sub=%s', hw.id, sub.id)
+        try:
+            award_homework_grade_bonus(hw, sub)
+        except Exception:
+            logger.exception('[homework] 批量批改积分入账失败 hw=%s sub=%s', hw.id, sub.id)
+    db.session.commit()
+    return jsonify({'message': f'已批量给分 {applied} 份（新批完 {len(newly)}，待批 {still_pending}）',
+                    'applied': applied, 'graded': len(newly), 'still_pending': still_pending})
 
 
 # ═══════════════════════ v5.3 AI 讲评：单份讲评 ═══════════════════════

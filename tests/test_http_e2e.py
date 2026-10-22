@@ -1252,3 +1252,108 @@ def test_homework_social_chain(ctx):
             homework_id=hw_id, status='submitted').count() == 2
         assert db.session.get(Homework, hw_id).status == 'published'
 
+
+# ═══════════════ v5.11 作业批改提效与防抄 HTTP 链 ═══════════════
+
+def test_homework_batch_grading_http(ctx):
+    """v5.11 同题批量给分：一道主观题统一分数套到多份提交，批量转 GRADED。"""
+    from database import db
+    from database.models import Question
+    from homework.models import HomeworkSubmission
+    c = ctx['_client']
+    with ctx['_app'].app_context():
+        qs = Question(content='简答批量', answer='分治', type='short_answer',
+                      difficulty='easy', major_id=ctx['major_id'])
+        db.session.add(qs)
+        db.session.commit()
+        sid = qs.id
+    r = c.post('/api/homeworks', json={
+        'title': '批量作业', 'student_ids': [ctx['s1_id'], ctx['s2_id']],
+        'questions': [{'question_id': sid, 'score': 6}]}, headers=_auth(ctx['t1']))
+    hw_id = r.get_json()['homework']['id']
+    assert c.post(f'/api/homeworks/{hw_id}/publish', headers=_auth(ctx['t1'])).status_code == 200
+    for tok in (ctx['s1'], ctx['s2']):
+        assert c.post(f'/api/homeworks/{hw_id}/submit',
+                      json={'answers': {str(sid): '我的分治答案'}},
+                      headers=_auth(tok)).status_code == 201
+    r = c.post(f'/api/homeworks/{hw_id}/grade/batch',
+               json={'question_id': sid, 'score': 5, 'comment': '一致给分'},
+               headers=_auth(ctx['t1']))
+    body = r.get_json()
+    assert body['applied'] == 2 and body['graded'] == 2 and body['still_pending'] == 0
+    # 非本人教师 → 403
+    assert c.post(f'/api/homeworks/{hw_id}/grade/batch',
+                  json={'question_id': sid, 'score': 5},
+                  headers=_auth(ctx['t2'])).status_code == 403
+    with ctx['_app'].app_context():
+        subs = HomeworkSubmission.query.filter_by(homework_id=hw_id).all()
+        assert len(subs) == 2 and all(s.status == 'graded' and s.total_score == 5.0 for s in subs)
+
+
+def test_homework_late_penalty_http(ctx):
+    """v5.11 迟交扣分：过截止迟交，批改完成按比例扣分并保留原始分。"""
+    from utils.timeutil import utcnow, iso_local
+    from homework.models import Homework
+    from database import db
+    c = ctx['_client']
+    future = iso_local(utcnow() + timedelta(hours=1))
+    r = c.post('/api/homeworks', json={
+        'title': '迟交扣分', 'deadline': future, 'allow_late': True, 'late_penalty_pct': 20,
+        'student_ids': [ctx['s1_id']],
+        'questions': [{'question_id': ctx['question_id'], 'score': 10}]},
+        headers=_auth(ctx['t1']))
+    hw_id = r.get_json()['homework']['id']
+    assert c.post(f'/api/homeworks/{hw_id}/publish', headers=_auth(ctx['t1'])).status_code == 200
+    # 发布后将截止改到过去，触发迟交通道
+    with ctx['_app'].app_context():
+        h = db.session.get(Homework, hw_id)
+        h.deadline = utcnow() - timedelta(hours=1)
+        db.session.commit()
+    r = c.post(f'/api/homeworks/{hw_id}/submit',
+               json={'answers': {str(ctx['question_id']): 'B'}}, headers=_auth(ctx['s1']))
+    assert r.status_code == 201 and r.get_json()['submission']['is_late'] is True
+    sub_id = r.get_json()['submission']['id']
+    # 纯客观：批改 POST 空给分单触发 recompute → pending 0 → 转 GRADED 并扣分
+    body = c.post(f'/api/homeworks/{hw_id}/grade/{sub_id}', json={'answers': []},
+                  headers=_auth(ctx['t1'])).get_json()
+    assert body['graded'] is True
+    assert body['submission']['total_score'] == 8.0
+    assert body['submission']['score_before_penalty'] == 10.0
+    assert body['submission']['late_deducted'] == 2.0
+
+
+def test_homework_shuffle_http(ctx):
+    """v5.11 选项乱序全链：学生按显示位选正确项 → 反归存原始位 → 自动判满分。"""
+    from database import db
+    from database.models import Question
+    c = ctx['_client']
+    with ctx['_app'].app_context():
+        q = Question(content='乱序单选', answer='C', type='single_choice', difficulty='easy',
+                     major_id=ctx['major_id'], options=['A. 甲', 'B. 乙', 'C. 丙', 'D. 丁'])
+        db.session.add(q)
+        db.session.commit()
+        qid = q.id
+    r = c.post('/api/homeworks', json={
+        'title': '乱序作业', 'student_ids': [ctx['s1_id']], 'shuffle_options': True,
+        'questions': [{'question_id': qid, 'score': 5}]}, headers=_auth(ctx['t1']))
+    hw_id = r.get_json()['homework']['id']
+    assert c.post(f'/api/homeworks/{hw_id}/publish', headers=_auth(ctx['t1'])).status_code == 200
+    # take：拿到（可能乱序后的）展示选项，定位正确项“丙”对应的显示字母
+    opts = c.get(f'/api/homeworks/{hw_id}/take', headers=_auth(ctx['s1'])).get_json()['questions'][0]['options']
+    disp = next(o for o in opts if '丙' in str(o))[0]   # 'X. ...' 首字母即显示位
+    r = c.post(f'/api/homeworks/{hw_id}/submit',
+               json={'answers': {str(qid): disp}}, headers=_auth(ctx['s1']))
+    assert r.status_code == 201
+    sub_id = r.get_json()['submission']['id']
+    # 教师批改视图：存的是规范化字母 C（反归成功），得分满分
+    body = c.post(f'/api/homeworks/{hw_id}/grade/{sub_id}', json={'answers': []},
+                  headers=_auth(ctx['t1'])).get_json()
+    assert body['graded'] is True and body['submission']['total_score'] == 5.0
+    # 存储已反归为原始位字母 C（自动判满分的根因）
+    from homework.models import HomeworkAnswer, HomeworkSubmission
+    with ctx['_app'].app_context():
+        row = (HomeworkAnswer.query.join(HomeworkSubmission)
+               .filter(HomeworkSubmission.homework_id == hw_id,
+                       HomeworkAnswer.question_id == qid).first())
+        assert row is not None and row.answer == 'C'
+

@@ -58,6 +58,13 @@ class Homework(db.Model):
     peer_review_deadline = db.Column(UTCDateTime)
     peer_review_weight = db.Column(db.Float, nullable=False, default=0.0)
     peer_review_reminded_at = db.Column(UTCDateTime)
+    # v5.11 批改提效与防抄
+    late_penalty_pct = db.Column(db.Float, nullable=False, default=0.0)  # 迟交扣分百分比（0-100，0=不扣）
+    blind_grading = db.Column(db.Boolean, nullable=False, default=False)  # 匿名批改：批完前隐藏学生身份
+    shuffle_questions = db.Column(db.Boolean, nullable=False, default=False)  # 题目乱序（每生固定题序）
+    shuffle_options = db.Column(db.Boolean, nullable=False, default=False)    # 选择题选项乱序
+    remind_levels_json = db.Column(JSONType)  # 分级提醒档位 [{minutes,label}]；空=沿用 remind_before 单档
+    reminded_json = db.Column(JSONType)       # 各档已发标记 {str(minutes): ISO}
 
     teacher = db.relationship('User', foreign_keys=[teacher_id], backref='homeworks')
     hw_questions = db.relationship('HomeworkQuestion', backref='homework', lazy=True,
@@ -101,6 +108,15 @@ class Homework(db.Model):
         return {'filename': ref.get('filename'), 'size': ref.get('size') or 0,
                 'ext': ref.get('ext')}
 
+    def remind_levels(self):
+        """分级提醒档位列表；为空时回落到 remind_before 单档（保持旧行为）。"""
+        levels = self.remind_levels_json
+        if isinstance(levels, list) and levels:
+            return levels
+        if self.remind_before and self.remind_before > 0:
+            return [{'minutes': int(self.remind_before), 'label': ''}]
+        return []
+
     def to_dict(self, for_teacher=False, stats=None):
         d = {'id': self.id, 'title': self.title, 'description': self.description or '',
              'hw_type': self.hw_type, 'teacher_id': self.teacher_id, 'status': self.status,
@@ -109,6 +125,7 @@ class Homework(db.Model):
              'allow_late': bool(self.allow_late),
              'allow_resubmit': bool(self.allow_resubmit), 'remind_before': self.remind_before or 0,
              'pass_score': self.pass_score,
+             'late_penalty_pct': float(self.late_penalty_pct or 0.0),
              'reference': self.reference_meta(),
              'is_expired': self.is_expired,
              'created_at': iso_local(self.created_at),
@@ -122,6 +139,10 @@ class Homework(db.Model):
              'peer_review_weight': float(self.peer_review_weight or 0.0)}
         if for_teacher:
             d['teacher_name'] = self.teacher.username if self.teacher else ''
+            d['blind_grading'] = bool(self.blind_grading)
+            d['shuffle_questions'] = bool(self.shuffle_questions)
+            d['shuffle_options'] = bool(self.shuffle_options)
+            d['remind_levels'] = list(self.remind_levels_json or [])
             if stats:
                 d.update(stats)
         return d
@@ -171,6 +192,10 @@ class HomeworkSubmission(db.Model):
     comment = db.Column(db.Text)                                        # 教师总评
     graded_by = db.Column(db.Integer, db.ForeignKey('user.id'))
     graded_at = db.Column(UTCDateTime)
+    # v5.11 批改提效与防抄
+    score_before_penalty = db.Column(db.Float)             # 迟交扣分前总分（None=未扣分）
+    assigned_order_json = db.Column(JSONType)  # 该生题序 [question_id...]（乱序时持久化）
+    option_map_json = db.Column(JSONType)      # 选项乱序映射 {str(qid): [perm]}
 
     student = db.relationship('User', foreign_keys=[student_id], backref='homework_submissions')
     grader = db.relationship('User', foreign_keys=[graded_by])
@@ -198,6 +223,11 @@ class HomeworkSubmission(db.Model):
         if for_teacher or self.status == SubmissionStatusEnum.GRADED:
             d['total_score'] = self.total_score
             d['comment'] = self.comment or ''
+            # v5.11 迟交扣分透明化：扣分前原始分 / 实扣分 / 扣分率
+            if self.score_before_penalty is not None:
+                d['score_before_penalty'] = self.score_before_penalty
+                d['late_deducted'] = round(self.score_before_penalty - (self.total_score or 0.0), 2)
+                d['late_penalty_pct'] = float(self.homework.late_penalty_pct or 0.0) if self.homework else 0.0
         else:
             d['total_score'] = None
             d['comment'] = ''

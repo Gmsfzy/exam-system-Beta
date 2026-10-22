@@ -8,6 +8,7 @@
 作业不进 ledger：此处只落 HomeworkSubmission/HomeworkAnswer，无任何积分/钱包写入。
 """
 import json
+import random
 
 from database import db
 from database.models import Question, QuestionTypeEnum, User
@@ -104,6 +105,104 @@ def recompute_total(sub):
     return earned, max_total, len(pending)
 
 
+def blind_active(hw):
+    """v5.11 匿名批改是否生效：开启盲审且仍有未批改（SUBMITTED）提交。
+
+    全部批完或作业关闭（无 SUBMITTED）后自动解除，教师恢复看到真名。"""
+    if not hw.blind_grading:
+        return False
+    return any(s.status == SubmissionStatusEnum.SUBMITTED for s in hw.submissions)
+
+
+def blind_label(hw, sub):
+    """稳定的匿名标签：按提交 id 升序排名生成「匿名#N」，列表与批改视图一致。"""
+    subs = sorted((s for s in hw.submissions if s.status != SubmissionStatusEnum.DRAFT),
+                  key=lambda s: s.id)
+    rank = next((i + 1 for i, s in enumerate(subs) if s.id == sub.id), None)
+    return f'匿名#{rank}' if rank else '匿名考生'
+
+
+def ensure_submission_paper(hw, sub):
+    """v5.11 题集式乱序：为该提交生成/复用个人题序 + 选项乱序映射并持久化到 sub。
+
+    返回 (assigned_ids: list[int] | None, option_map: dict[str, list[int]])；
+    未开启乱序 / 开放式返回 (None, {})。已有映射则复用（稳定不刷新），乱序仅影响显示：
+    题目乱序按 question_id 存答不影响判分；选项乱序由调用方在存答时反归为原始字母。
+    """
+    if hw.hw_type != HomeworkTypeEnum.QUESTION_SET:
+        return None, {}
+    if not (hw.shuffle_questions or hw.shuffle_options):
+        return None, {}
+    base_ids = [hq.question_id for hq in
+                sorted(hw.hw_questions, key=lambda x: (x.order or 0, x.question_id))]
+
+    def _load(raw):
+        if isinstance(raw, str):
+            try:
+                return json.loads(raw)
+            except (ValueError, TypeError):
+                return None
+        return raw
+
+    assigned = _load(sub.assigned_order_json)
+    option_map = _load(sub.option_map_json)
+    option_map = option_map if isinstance(option_map, dict) else {}
+
+    # 题目乱序（仅显示顺序，作答按 question_id 存储，判分零风险）
+    if hw.shuffle_questions:
+        base_set = set(base_ids)
+        have = [qid for qid in (assigned or []) if qid in base_set]
+        if set(have) != base_set:   # 首次或题单变更：保留旧序、新题随机插入
+            news = [qid for qid in base_ids if qid not in set(have)]
+            random.shuffle(news)
+            for qid in news:
+                have.insert(random.randint(0, len(have)), qid)
+            assigned = news and have or have
+            sub.assigned_order_json = assigned
+        assigned = have or base_ids[:]
+
+    # 选项乱序（仅选择题；存储规范化字母，显示层映射）
+    if hw.shuffle_options:
+        from database.models import Question
+        need = [qid for qid in base_ids if str(qid) not in option_map]
+        if need:
+            qmap = {q.id: q for q in Question.query.filter(Question.id.in_(need)).all()}
+            dirty = False
+            for qid in need:
+                q = qmap.get(qid)
+                if not q or q.type not in ('single_choice', 'multiple_choice'):
+                    continue
+                opts = q.options if isinstance(q.options, list) else []
+                if len(opts) < 2:
+                    continue
+                perm = list(range(len(opts)))
+                random.shuffle(perm)
+                if perm != list(range(len(opts))):
+                    option_map[str(qid)] = perm
+                    dirty = True
+            if dirty:
+                sub.option_map_json = option_map
+
+    return assigned, option_map
+
+
+def apply_late_penalty(hw, sub):
+    """v5.11 迟交扣分收口（转 GRADED 时调用，幂等）。
+
+    仅当提交为迟交且设了扣分百分比时，把当前（扣分前）总分快照到
+    score_before_penalty，再按 total*(1-pct/100) 扣分（floor 0）。
+    非迟交 / pct=0 / 总分为空则清除快照保持原值。质量积分仍按扣分前比率补发，
+    避免「迟交 + 低质量」双重惩罚。
+    """
+    pct = float(hw.late_penalty_pct or 0.0)
+    if not sub.is_late or pct <= 0 or sub.total_score is None:
+        sub.score_before_penalty = None
+        return
+    raw = float(sub.total_score)
+    sub.score_before_penalty = round(raw, 2)
+    sub.total_score = max(0.0, round(raw * (1 - pct / 100.0), 2))
+
+
 def finalize_submission(hw, sub):
     """提交/重交落状态：题集式走自动判分，开放式整体待批。"""
     if hw.hw_type == HomeworkTypeEnum.QUESTION_SET:
@@ -156,9 +255,10 @@ def homework_expiry_tick():
         except Exception:
             db.session.rollback()
             logger.error(f'[homework] 到期关闭失败 hw={hw.id}', exc_info=True)
-    # 2) 截止前提醒
+    # 2) 截止前提醒（单档 legacy：remind_before + reminded_at CAS；设了多档时交给 2b）
     to_remind = Homework.query.filter(Homework.status == HomeworkStatusEnum.PUBLISHED,
                                       Homework.remind_before > 0,
+                                      Homework.remind_levels_json.is_(None),
                                       Homework.reminded_at.is_(None)).all()
     for hw in to_remind:
         try:
@@ -185,6 +285,44 @@ def homework_expiry_tick():
         except Exception:
             db.session.rollback()
             logger.error(f'[homework] 截止提醒失败 hw={hw.id}', exc_info=True)
+
+    # 2b) v5.11 分级多次提醒：remind_levels_json 存档位，逐档命中且未发则催交
+    from datetime import timedelta
+    for hw in Homework.query.filter(Homework.status == HomeworkStatusEnum.PUBLISHED,
+                                    Homework.remind_levels_json.isnot(None)).all():
+        try:
+            if hw.deadline is None:
+                continue
+            fired = dict(hw.reminded_json or {})
+            changed = False
+            for lv in (hw.remind_levels_json or []):
+                try:
+                    minutes = int(lv.get('minutes') or 0)
+                except (TypeError, ValueError, AttributeError):
+                    continue
+                key = str(minutes)
+                if minutes <= 0 or key in fired:
+                    continue
+                remind_at = hw.deadline - timedelta(minutes=minutes)
+                if not (remind_at <= now <= hw.deadline):
+                    continue
+                label = lv.get('label') or f'{minutes} 分钟'
+                notify_homework_students(
+                    hw, '作业即将截止',
+                    f'《{hw.title}》将于 {iso_local(hw.deadline)} 截止'
+                    f'（距截止约 {label}），请尽快提交。',
+                    only_unsubmitted=True)
+                fired[key] = iso_local(now)
+                changed = True
+            if changed:
+                hw.reminded_json = fired
+                db.session.commit()
+                logger.info(f'[homework] 作业 {hw.id} 分级提醒已发送')
+            else:
+                db.session.rollback()
+        except Exception:
+            db.session.rollback()
+            logger.error(f'[homework] 分级提醒失败 hw={hw.id}', exc_info=True)
 
 
 # v5.2 错题收录判错阈值：得分率（effective_score/满分）低于该值才入错题本；
@@ -295,7 +433,8 @@ def award_homework_grade_bonus(hw, sub):
     """批改完成后按得分率补发 0–20 分（独立幂等键，重批不重复）。返回实发总额。"""
     if not sub.max_score or sub.max_score <= 0 or sub.total_score is None:
         return 0
-    ratio = max(0.0, min(1.0, float(sub.total_score) / float(sub.max_score)))
+    base = sub.score_before_penalty if sub.score_before_penalty is not None else sub.total_score
+    ratio = max(0.0, min(1.0, float(base) / float(sub.max_score)))
     bonus = int(round(HOMEWORK_GRADE_BONUS_MAX * ratio))
     awarded = 0
     for uid in learning_recipients(hw, sub):

@@ -197,6 +197,32 @@
           <el-checkbox v-model="form.allow_late" :disabled="!form.has_deadline">允许迟交</el-checkbox>
           <el-checkbox v-model="form.allow_resubmit">允许重交</el-checkbox>
         </el-form-item>
+        <el-form-item v-if="form.has_deadline" label="迟交扣分">
+          <el-input-number v-model="form.late_penalty_pct" :min="0" :max="100" :step="5" />
+          <span class="hint">%（0=不扣，允许迟交时按此比例从总分扣分）</span>
+        </el-form-item>
+        <el-form-item v-if="form.has_deadline" label="分级提醒">
+          <div>
+            <div v-for="(lv, i) in form.remind_levels" :key="i" style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+              <el-select v-model="lv.minutes" style="width: 140px">
+                <el-option :value="4320" label="3 天前" />
+                <el-option :value="1440" label="1 天前" />
+                <el-option :value="720" label="12 小时前" />
+                <el-option :value="60" label="1 小时前" />
+                <el-option :value="30" label="30 分钟前" />
+              </el-select>
+              <el-button size="small" text type="danger" @click="form.remind_levels.splice(i, 1)">删除</el-button>
+            </div>
+            <el-button size="small" @click="addRemindLevel">+ 添加提醒档</el-button>
+            <span class="hint">设了多档则优先于上方“提前提醒”单档；未交学生每档各提醒一次</span>
+          </div>
+        </el-form-item>
+        <el-form-item label="批改与防抄">
+          <el-checkbox v-model="form.blind_grading">匿名批改</el-checkbox>
+          <el-checkbox v-model="form.shuffle_questions" :disabled="form.hw_type !== 'question_set'">题目乱序</el-checkbox>
+          <el-checkbox v-model="form.shuffle_options" :disabled="form.hw_type !== 'question_set'">选项乱序</el-checkbox>
+          <span class="hint">匿名=批完前隐藏学生身份；乱序=每生题序/选项随机，判分自动还原</span>
+        </el-form-item>
         <el-form-item label="参考资料">
           <div v-if="form.reference" class="ref-row">
             <el-link type="primary" @click="downloadRef">{{ form.reference.filename }}</el-link>
@@ -796,6 +822,8 @@ watch(viewKeyword, () => { page.value = 1 })
 const form = reactive({
   id: null, title: '', description: '', hw_type: 'question_set', deadline: '', has_deadline: true,
   allow_late: true, allow_resubmit: true, remind_before: 0, pass_score: null, reference: null,
+  late_penalty_pct: 0, blind_grading: false, shuffle_questions: false, shuffle_options: false,
+  remind_levels: [],
   questions: [], student_ids: [], is_group: false, groups: []
 })
 
@@ -823,10 +851,17 @@ const loadQuestions = async () => {
   questionPool.value = Array.isArray(res.data) ? res.data : []
 }
 
+const addRemindLevel = () => {
+  if (!form.remind_levels) form.remind_levels = []
+  form.remind_levels.push({ minutes: 1440, label: '1天' })
+}
+
 const openCreate = () => {
   Object.assign(form, {
     id: null, title: '', description: '', hw_type: 'question_set', deadline: '', has_deadline: true,
     allow_late: true, allow_resubmit: true, remind_before: 0, pass_score: null, reference: null,
+    late_penalty_pct: 0, blind_grading: false, shuffle_questions: false, shuffle_options: false,
+    remind_levels: [],
     questions: [], student_ids: [], is_group: false, groups: []
   })
   pickMajor.value = null
@@ -842,6 +877,9 @@ const openEdit = async (row) => {
     deadline: hw.deadline || '', has_deadline: !!hw.has_deadline,
     allow_late: hw.allow_late, allow_resubmit: hw.allow_resubmit,
     remind_before: hw.remind_before || 0, pass_score: hw.pass_score ?? null, reference: hw.reference || null,
+    late_penalty_pct: hw.late_penalty_pct || 0, blind_grading: !!hw.blind_grading,
+    shuffle_questions: !!hw.shuffle_questions, shuffle_options: !!hw.shuffle_options,
+    remind_levels: (hw.remind_levels || []).map(l => ({ minutes: l.minutes, label: l.label || '' })),
     questions: (hw.questions || []).map(q => ({ question_id: q.question_id, content: q.content, score: q.score })),
     student_ids: hw.student_ids || [],
     is_group: !!hw.is_group,
@@ -875,8 +913,14 @@ const save = async () => {
       title: form.title, description: form.description, hw_type: form.hw_type,
       deadline: form.has_deadline ? form.deadline : '', allow_late: form.allow_late,
       allow_resubmit: form.allow_resubmit, remind_before: form.has_deadline ? form.remind_before : 0,
-      pass_score: form.pass_score, is_group: form.is_group
+      pass_score: form.pass_score, is_group: form.is_group,
+      blind_grading: form.blind_grading,
+      shuffle_questions: form.hw_type === 'question_set' ? !!form.shuffle_questions : false,
+      shuffle_options: form.hw_type === 'question_set' ? !!form.shuffle_options : false,
+      late_penalty_pct: form.has_deadline ? (form.late_penalty_pct || 0) : 0,
     }
+    const rl = (form.remind_levels || []).filter(l => l && Number(l.minutes) > 0)
+    payload.remind_levels = rl.length ? rl.map(l => ({ minutes: Number(l.minutes), label: l.label || '' })) : null
     if (form.is_group) {
       payload.groups = form.groups.map(g => ({ name: g.name, student_ids: g.student_ids }))
     } else {
