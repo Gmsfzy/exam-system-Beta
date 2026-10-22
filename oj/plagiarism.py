@@ -138,3 +138,68 @@ def find_similar_pairs(exam_id, question_id=None, threshold=0.7,
     results.sort(key=lambda r: max(p['similarity'] for p in r['pairs']),
                  reverse=True)
     return results
+
+
+# ═══════════════════════ 文本相似度（开放式作业 / 中文文本） ═══════════════════════
+# 中文无空格分词，采用字符 n-gram shingle + Jaccard，与代码路径同口径，
+# 但 token=单字符（含中英文/数字），去空白。
+_TEXT_NORMALIZE_RE = re.compile(r'\s+')
+
+
+def _char_shingles(text, k):
+    """文本 → 字符 k-gram 指纹集合；过短退化为整体。"""
+    if not text:
+        return set()
+    s = _TEXT_NORMALIZE_RE.sub('', text)
+    if len(s) < k:
+        return {s} if s else set()
+    return {s[i:i + k] for i in range(len(s) - k + 1)}
+
+
+def text_similarity(text_a, text_b, k=4):
+    """两段文本的 Jaccard 相似度 ∈ [0,1]（字符 k-gram）。"""
+    sa = _char_shingles(text_a, k)
+    sb = _char_shingles(text_b, k)
+    if not sa or not sb:
+        return 0.0
+    inter = len(sa & sb)
+    union = len(sa | sb)
+    return inter / union if union else 0.0
+
+
+def compare_text_submissions(submissions, threshold=0.7, min_chars=20, k=4):
+    """开放式文本作答两两比对，返回相似度 ≥ threshold 的高相似对。
+
+    submissions: [{'student_id', 'username', 'text'}, ...]
+    与 compare_submissions 同形，便于复用 UI。
+    """
+    enriched = []
+    for s in submissions:
+        text = s.get('text') or ''
+        if len(_TEXT_NORMALIZE_RE.sub('', text)) < min_chars:
+            continue
+        enriched.append({
+            'student_id': s['student_id'],
+            'username': s['username'],
+            'shingles': _char_shingles(text, k),
+            'chars': len(_TEXT_NORMALIZE_RE.sub('', text)),
+        })
+
+    pairs = []
+    n = len(enriched)
+    for i in range(n):
+        for j in range(i + 1, n):
+            a, b = enriched[i], enriched[j]
+            union = len(a['shingles'] | b['shingles'])
+            if not union:
+                continue
+            sim = len(a['shingles'] & b['shingles']) / union
+            if sim >= threshold:
+                pairs.append({
+                    'a': {'student_id': a['student_id'], 'username': a['username']},
+                    'b': {'student_id': b['student_id'], 'username': b['username']},
+                    'similarity': round(sim, 4),
+                    'tokens': min(a['chars'], b['chars']),
+                })
+    pairs.sort(key=lambda p: p['similarity'], reverse=True)
+    return pairs

@@ -22,7 +22,7 @@ from database.models import (
     Question, Major, Course, Chapter, User,
     WrongAnswerRecord, PracticeSession, PracticeAnswer,
     StudyPlan, StudyPlanTask, StudyLog,
-    Exam, ExamSession, Answer, Result,
+    Exam, ExamSession, ExamStudent, ExamStatusEnum, Answer, Result,
     KnowledgePoint, KnowledgeEdge,
     LearningPath, LearningPathNode,
     UserPathEnrollment, UserNodeProgress, LearningResource,
@@ -34,9 +34,10 @@ from database.models import (
     question_knowledge_point,
 )
 from utils.security import limiter, RateLimitConfig, verify_token
-from utils.uploads import save_upload, ALLOWED_EXTENSIONS as _UPLOAD_EXTS
+from utils.uploads import save_upload, UPLOAD_DIR, ALLOWED_EXTENSIONS as _UPLOAD_EXTS
 from utils.timeutil import utcnow, iso_local, parse_dt
 from utils.logger import logger
+from utils.notify import create_notification
 from api import learning_engine as eng
 from utils.permissions import require_teacher
 from ai_service.gate import (check_ai_quota, charge_ai_quota, log_ai_usage,
@@ -75,11 +76,27 @@ def api_wrong_list():
     records = q.order_by(WrongAnswerRecord.last_wrong_at.desc()) \
         .offset((page - 1) * per_page).limit(per_page).all()
 
+    # v5.2 答案门控：按来源逐类判定一次（缓存防 N+1），仍可重答的来源暂隐答案
+    gate_cache = {}
+    # v5.9 作业来源回链：批量取作业标题，错题本可跳回作业结果页
+    hw_ids = {r.source_id for r in records if r.source_type == 'homework' and r.source_id}
+    hw_titles = {}
+    if hw_ids:
+        from homework.models import Homework
+        hw_titles = {h.id: h.title for h in Homework.query.filter(Homework.id.in_(hw_ids)).all()}
+    items = []
+    for r in records:
+        key = (r.source_type, r.source_id)
+        if key not in gate_cache:
+            gate_cache[key] = _source_still_reanswerable(user.id, r.source_type, r.source_id)
+        items.append(_wrong_record_to_dict(r, hide_answer=gate_cache[key],
+                                           source_title=hw_titles.get(r.source_id)))
+
     return jsonify({
         'total': total,
         'page': page,
         'per_page': per_page,
-        'items': [_wrong_record_to_dict(r) for r in records]
+        'items': items
     })
 
 
@@ -1179,7 +1196,41 @@ def sync_wrong_from_exam(user_id, exam_id, session_id=None):
 
 # ── 工具函数 ──────────────────────────────────────────────────────
 
-def _wrong_record_to_dict(r):
+def _source_still_reanswerable(user_id, source_type, source_id):
+    """答案门控（v5.2）：该错题来源当前是否仍可重答。
+
+    仍可重答时错题本暂隐正确答案/AI 归因，防「看答案再重交」：
+    - homework：作业仍接收提交且本人提交未批改完成（GRADED 后禁止再交，门控解除）
+    - exam：考试发布中未截止且剩余作答次数未用完
+    其余来源（practice/competition 等无重答刷分通道）不门控。异常时保守不门控。
+    """
+    try:
+        if source_type == 'homework':
+            from homework.models import Homework, HomeworkSubmission, SubmissionStatusEnum
+            hw = db.session.get(Homework, source_id)
+            if not hw or not hw.accepts_submission:
+                return False
+            sub = HomeworkSubmission.query.filter_by(
+                homework_id=hw.id, student_id=user_id).first()
+            return sub is None or sub.status != SubmissionStatusEnum.GRADED
+        if source_type == 'exam':
+            exam = db.session.get(Exam, source_id)
+            if not exam or exam.status != ExamStatusEnum.PUBLISHED:
+                return False
+            if exam.end_time and utcnow() > exam.end_time:
+                return False
+            es = ExamStudent.query.filter_by(exam_id=exam.id, student_id=user_id).first()
+            max_allowed = (exam.max_attempts or 1) + (es.extra_attempts if es else 0)
+            used = ExamSession.query.filter_by(exam_id=exam.id, student_id=user_id) \
+                .filter(ExamSession.status.in_(['in_progress', 'submitted'])).count()
+            return used < max_allowed
+    except Exception:
+        logger.warning('[learning] 答案门控判定异常 source=%s/%s', source_type, source_id,
+                       exc_info=True)
+    return False
+
+
+def _wrong_record_to_dict(r, hide_answer=False, source_title=None):
     q = r.question
     return {
         'id': r.id, 'question_id': r.question_id,
@@ -1187,12 +1238,15 @@ def _wrong_record_to_dict(r):
         'question_type': q.type if q else None,
         'knowledge': q.knowledge if q else None,
         'options': q.options if q else None,
-        'correct_answer': r.correct_answer,
+        # v5.2 答案门控：来源仍可重答时不下发正确答案/AI 归因，前端据 answer_hidden 提示
+        'correct_answer': None if hide_answer else r.correct_answer,
+        'answer_hidden': bool(hide_answer),
         'wrong_answer': r.wrong_answer,
         'is_mastered': r.is_mastered,
         'wrong_count': r.wrong_count,
         'source_type': r.source_type, 'source_id': r.source_id,
-        'ai_analysis': r.ai_analysis,
+        'source_title': source_title,   # v5.9 作业来源标题，用于回链
+        'ai_analysis': None if hide_answer else r.ai_analysis,
         'ai_analyzed_at': iso_local(r.ai_analyzed_at) if r.ai_analyzed_at else None,
         'last_wrong_at': iso_local(r.last_wrong_at),
         'mastered_at': iso_local(r.mastered_at) if r.mastered_at else None,
@@ -2832,7 +2886,6 @@ def _issue_certificate(user, path_id, final_score):
     db.session.add(cert)
     db.session.flush()
     try:
-        from api.notification_routes import create_notification
         create_notification(user.id, f'恭喜获得结业证书：{path.title}',
                            f'您已完成学习路径「{path.title}」并通过结业测评（{round((final_score or 0)*100)}%）。',
                            type='success', related_type='certificate', related_id=cert.id, commit=False)
@@ -3172,6 +3225,10 @@ def api_wrong_analyze(wr_id):
     rec = db.session.get(WrongAnswerRecord, wr_id)
     if not rec or rec.user_id != user.id:
         return jsonify({'message': '错题记录不存在'}), 404
+    # v5.2 答案门控：来源仍可重答时归因可能泄露答案，暂不提供
+    if _source_still_reanswerable(user.id, rec.source_type, rec.source_id):
+        return jsonify({'message': '当前来源仍可重答，AI 归因在作答截止/批改完成后开放',
+                        'answer_hidden': True}), 403
     question = rec.question
     if not question:
         return jsonify({'message': '关联题目已不存在，无法分析'}), 400
@@ -3582,7 +3639,7 @@ def api_explain_to_note(eid):
 
 # ── 学习附件上传（v4.6 统一白名单：文档/表格/压缩包/图片/视频/代码）────
 
-_UPLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'uploads')
+_UPLOAD_DIR = UPLOAD_DIR  # 与竞赛/悬/作业共用 utils/uploads 公共落盘目录
 
 # 笔记配图内嵌仍限图片、≤5MB（统一白名单的子集）
 _NOTE_IMAGE_EXTS = {'.png', '.jpg', '.jpeg', '.gif', '.webp'}
@@ -4073,7 +4130,6 @@ def api_material_report_list():
 @limiter.limit(RateLimitConfig.DATA_WRITE)
 def api_material_report_handle(rid):
     """教师处理举报：remove 下架资料并通知作者；reject 驳回"""
-    from api.notification_routes import create_notification
     user, err = require_teacher(deny_msg='无权访问', unauth_msg='未登录')
     if err:
         return err
@@ -4159,7 +4215,6 @@ def api_follow_toggle(uid):
     db.session.add(UserFollow(follower_id=user.id, followee_id=uid))
     db.session.commit()
     # 互动通知：被关注→通知本人（取关不发；经 ORM 事件实时推送）
-    from api.notification_routes import create_notification
     create_notification(target.id, '有人关注了你',
                         f'{user.username} 关注了你，可去对方主页看看。',
                         type='info', related_type='user', related_id=user.id)

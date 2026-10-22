@@ -601,7 +601,7 @@ def test_ds_competition_chain(ctx):
 # ─────────────────────────── 作业链（v5.0） ───────────────────────────
 
 def test_homework_full_chain(ctx):
-    """发布→通知→作答脱敏→自动判分→重交→人工批改→成绩→账本零流水→时效边界。"""
+    """发布→通知→作答脱敏→自动判分→重交→人工批改→成绩→积分入账（提交 10 + 质量补发）→时效边界。"""
     from datetime import timedelta
     from database import db
     from database.models import Question, Notification
@@ -713,9 +713,16 @@ def test_homework_full_chain(ctx):
     assert c.post(f'/api/homeworks/{hw_id}/submit', json={'answers': answers},
                   headers=_auth(ctx['s1'])).status_code == 400
 
-    # 账本零增量：作业不进 ledger
+    # v5.10 作业入账：两次最终提交只发 1 次基础分，批改完成再按得分率补发质量分
     with ctx['_app'].app_context():
-        assert LedgerTxn.query.filter_by(user_id=ctx['s1_id']).count() == ledger_base
+        rows = (LedgerTxn.query.filter_by(user_id=ctx['s1_id'], ref_type='homework',
+                                          ref_id=hw_id)
+                .order_by(LedgerTxn.id).all())
+        assert len(rows) == 2 and LedgerTxn.query.filter_by(user_id=ctx['s1_id']).count() == ledger_base + 2
+        assert rows[0].currency == 'points' and rows[0].delta == 10    # 提交基础分
+        assert rows[1].delta == 18                                     # 19/21 × 20 ≈ 18
+        assert rows[0].idempotency_key == f'homework-submit:{hw_id}:{ctx["s1_id"]}'
+        assert rows[1].idempotency_key == f'homework-grade:{hw_id}:{ctx["s1_id"]}'
 
     # 时效边界：先正常发布，再直改库把截止拨到过去模拟过期（publish 有未过期护栏）
     future = iso_local(utcnow() + timedelta(hours=6))
@@ -897,6 +904,143 @@ def test_homework_v51_features(ctx):
         assert db.session.get(Homework, uh).deadline is None
 
 
+def test_homework_learning_sync_chain(ctx):
+    """v5.2 作业→学习闭环全链：答错自动收错题本（<60% 阈值）→ 未批改门控隐藏答案
+    → AI 归因 403 → 批改 GRADED 后门控解除、答案与归因可见。"""
+    from datetime import timedelta
+    from database import db
+    from database.models import WrongAnswerRecord
+    from utils.timeutil import utcnow, iso_local
+    c = ctx['_client']
+
+    # 布置纯客观作业（单选 10 分）→ 学生答错提交
+    deadline = iso_local(utcnow() + timedelta(hours=6))
+    r = c.post('/api/homeworks', json={
+        'title': 'E2E 学习闭环', 'deadline': deadline, 'student_ids': [ctx['s1_id']],
+        'questions': [{'question_id': ctx['question_id'], 'score': 10}]},
+        headers=_auth(ctx['t1']))
+    assert r.status_code == 201, r.get_json()
+    hw_id = r.get_json()['homework']['id']
+    assert c.post(f'/api/homeworks/{hw_id}/publish', headers=_auth(ctx['t1'])).status_code == 200
+    r = c.post(f'/api/homeworks/{hw_id}/submit',
+               json={'answers': {str(ctx['question_id']): 'A'}},  # 正确答案 B
+               headers=_auth(ctx['s1']))
+    assert r.status_code == 201, r.get_json()
+    sub_id = r.get_json()['submission']['id']
+
+    # 错题本：source_type=homework 收录（得分率 0 < 0.6）
+    r = c.get('/api/learning/wrong-records?source_type=homework', headers=_auth(ctx['s1']))
+    assert r.status_code == 200
+    items = [i for i in r.get_json()['items'] if i['source_id'] == hw_id]
+    assert len(items) == 1
+    rec = items[0]
+    assert rec['question_id'] == ctx['question_id'] and rec['wrong_count'] == 1
+    # 门控：作业仍可重交（未批改）→ 答案/归因隐藏
+    assert rec['answer_hidden'] is True and rec['correct_answer'] is None
+    # 门控期间 AI 归因 → 403（防借归因泄露答案）
+    r = c.post(f"/api/learning/wrong-records/{rec['id']}/analyze", headers=_auth(ctx['s1']))
+    assert r.status_code == 403 and r.get_json()['answer_hidden'] is True
+
+    # 教师批改（纯客观无需给分，空保存即转 GRADED）→ 门控解除
+    r = c.post(f'/api/homeworks/{hw_id}/grade/{sub_id}', json={'answers': []},
+               headers=_auth(ctx['t1']))
+    assert r.status_code == 200 and r.get_json()['graded'] is True
+    r = c.get('/api/learning/wrong-records?source_type=homework', headers=_auth(ctx['s1']))
+    rec = next(i for i in r.get_json()['items'] if i['source_id'] == hw_id)
+    assert rec['answer_hidden'] is False and rec['correct_answer'] == 'B'
+    # 错题仍单条（GRADED 触发 final scope 为空集，不双计）
+    with ctx['_app'].app_context():
+        assert WrongAnswerRecord.query.filter_by(
+            user_id=ctx['s1_id'], source_type='homework', source_id=hw_id).count() == 1
+
+
+def test_homework_ai_review_chain(ctx, monkeypatch):
+    """v5.3 AI 讲评 HTTP 全链：班级分析生成/幂等/发布门控 + 单份讲评 + 权限。"""
+    from datetime import timedelta
+    from database import db
+    from homework.models import HomeworkAiReview
+    from utils.timeutil import utcnow, iso_local
+    from ai_service.services import ai_client
+
+    c = ctx['_client']
+    monkeypatch.setattr(ai_client, 'generate_json', lambda *a, **kw: __import__(
+        'json').dumps({
+            'summary': 'E2E 班级讲评', 'common_mistakes': [
+                {'question': '1+1=?', 'mistake': '粗心', 'advice': '课堂重讲'}],
+            'weak_points': ['加法'], 'teaching_suggestions': ['变式练习'],
+            'strengths': ['基础扎实'], 'improvements': [
+                {'point': '进位加法', 'advice': '多练'}], 'next_steps': ['重做错题'],
+        }, ensure_ascii=False))
+
+    # 建纯客观作业（单选 10 分）→ 发布 → 学生答错提交 → 教师空保存转 graded
+    deadline = iso_local(utcnow() + timedelta(hours=6))
+    r = c.post('/api/homeworks', json={
+        'title': 'E2E AI讲评', 'deadline': deadline, 'student_ids': [ctx['s1_id']],
+        'questions': [{'question_id': ctx['question_id'], 'score': 10}]},
+        headers=_auth(ctx['t1']))
+    assert r.status_code == 201, r.get_json()
+    hw_id = r.get_json()['homework']['id']
+    assert c.post(f'/api/homeworks/{hw_id}/publish',
+                  headers=_auth(ctx['t1'])).status_code == 200
+    r = c.post(f'/api/homeworks/{hw_id}/submit',
+               json={'answers': {str(ctx['question_id']): 'A'}}, headers=_auth(ctx['s1']))
+    sub_id = r.get_json()['submission']['id']
+    assert c.post(f'/api/homeworks/{hw_id}/grade/{sub_id}', json={'answers': []},
+                  headers=_auth(ctx['t1'])).status_code == 200
+
+    # 未生成前：GET → exists False；学生无权生成 → 403
+    body = c.get(f'/api/homeworks/{hw_id}/ai_review', headers=_auth(ctx['t1'])).get_json()
+    assert body['exists'] is False and body['review'] is None
+    assert c.post(f'/api/homeworks/{hw_id}/ai_review',
+                  headers=_auth(ctx['s1'])).status_code == 403
+
+    # 生成班级讲评：统计完整 + AI 内容 + 默认未发布
+    r = c.post(f'/api/homeworks/{hw_id}/ai_review', headers=_auth(ctx['t1']))
+    assert r.status_code == 200, r.get_json()
+    rev = r.get_json()['review']
+    assert r.get_json()['degraded'] is False
+    assert rev['content']['summary'] == 'E2E 班级讲评'
+    assert rev['stats']['submitted'] == 1 and rev['stats']['weak_questions'][0]['avg_ratio'] == 0.0
+    assert rev['published'] is False
+
+    # 重复生成 → 覆盖同一行，不新增
+    assert c.post(f'/api/homeworks/{hw_id}/ai_review',
+                  headers=_auth(ctx['t1'])).status_code == 200
+    with ctx['_app'].app_context():
+        assert HomeworkAiReview.query.filter_by(
+            homework_id=hw_id, scope_key='class').count() == 1
+
+    # 未发布：学生 result 看不到班级讲评
+    body = c.get(f'/api/homeworks/{hw_id}/result', headers=_auth(ctx['s1'])).get_json()
+    assert body['class_review'] is None
+
+    # 发布 → 学生可见
+    r = c.post(f'/api/homeworks/{hw_id}/ai_review/publish',
+               json={'published': True}, headers=_auth(ctx['t1']))
+    assert r.status_code == 200 and r.get_json()['review']['published'] is True
+    body = c.get(f'/api/homeworks/{hw_id}/result', headers=_auth(ctx['s1'])).get_json()
+    assert body['class_review']['content']['summary'] == 'E2E 班级讲评'
+
+    # 单份讲评：生成 → 学生 result 可见；未批改提交 → 400
+    r = c.post(f'/api/homeworks/{hw_id}/grade/{sub_id}/ai_review',
+               headers=_auth(ctx['t1']))
+    assert r.status_code == 200 and r.get_json()['degraded'] is False
+    body = c.get(f'/api/homeworks/{hw_id}/result', headers=_auth(ctx['s1'])).get_json()
+    assert body['ai_review']['content']['summary'] == 'E2E 班级讲评'
+    assert body['ai_review']['stats']['questions'][0]['correct_answer'] == 'B'
+
+    # 非创建教师/非名单学生不可见批改视图
+    assert c.get(f'/api/homeworks/{hw_id}/grade/{sub_id}/ai_review',
+                 headers=_auth(ctx['s2'])).status_code == 403
+
+    # 撤回发布 → 学生重新不可见
+    assert c.post(f'/api/homeworks/{hw_id}/ai_review/publish',
+                  json={'published': False},
+                  headers=_auth(ctx['t1'])).status_code == 200
+    body = c.get(f'/api/homeworks/{hw_id}/result', headers=_auth(ctx['s1'])).get_json()
+    assert body['class_review'] is None
+
+
 def test_notification_realtime_push(ctx, monkeypatch):
     """全局通知实时推送（ORM 事件层）：任何模块通知 commit 后自动推 new_notification，
     覆盖 commit=True 单发与 commit=False 批量；回滚不推（防幽灵推送）。
@@ -965,4 +1109,146 @@ def test_follow_notification(ctx):
     with ctx['_app'].app_context():
         assert Notification.query.filter_by(
             user_id=fbu['id'], related_type='user', title='有人关注了你').count() == 1
+
+
+def test_homework_social_chain(ctx):
+    """v5.4 讨论区 + v5.5 生生互评 HTTP 全链：
+    发帖/回复/通知/软删权限 → 教师分配互评 → 匿名详情 → 提交/重复提交拦截
+    → 汇总完成率 → 批改后学生匿名可见互评结果。"""
+    from datetime import timedelta
+    from database import db
+    from database.models import Notification
+    from homework.models import Homework, HomeworkPeerReview
+    from utils.timeutil import utcnow, iso_local
+
+    c = ctx['_client']
+    deadline = iso_local(utcnow() + timedelta(hours=6))
+    r = c.post('/api/homeworks', json={
+        'title': 'E2E 社交作业', 'deadline': deadline,
+        'student_ids': [ctx['s1_id'], ctx['s2_id']],
+        'questions': [{'question_id': ctx['question_id'], 'score': 10}]},
+        headers=_auth(ctx['t1']))
+    assert r.status_code == 201, r.get_json()
+    hw_id = r.get_json()['homework']['id']
+    assert c.post(f'/api/homeworks/{hw_id}/publish',
+                  headers=_auth(ctx['t1'])).status_code == 200
+
+    r = c.post(f'/api/homeworks/{hw_id}/submit',
+               json={'answers': {str(ctx['question_id']): 'B'}}, headers=_auth(ctx['s1']))
+    sub1_id = r.get_json()['submission']['id']
+    assert c.post(f'/api/homeworks/{hw_id}/submit',
+                  json={'answers': {str(ctx['question_id']): 'A'}},
+                  headers=_auth(ctx['s2'])).status_code == 201
+
+    # ── 讨论区：学生发主楼 → 学生回复 → 教师回复 ──
+    r = c.post(f'/api/homeworks/{hw_id}/comments',
+               json={'content': '这道题为什么选 B？'}, headers=_auth(ctx['s1']))
+    assert r.status_code == 201, r.get_json()
+    c1 = r.get_json()
+    assert c1['parent_id'] is None and c1['is_teacher'] is False and c1['mine'] is True
+
+    r = c.post(f'/api/homeworks/{hw_id}/comments',
+               json={'content': '因为 B 是正确答案', 'parent_id': c1['id']},
+               headers=_auth(ctx['s2']))
+    assert r.status_code == 201
+    reply_s2 = r.get_json()
+
+    r = c.post(f'/api/homeworks/{hw_id}/comments',
+               json={'content': '可以看一下运算过程', 'parent_id': c1['id']},
+               headers=_auth(ctx['t1']))
+    assert r.status_code == 201 and r.get_json()['is_teacher'] is True
+    reply_teacher = r.get_json()
+
+    # 列表：主楼 1 条 + 回复 2 条（按时间升序）
+    body = c.get(f'/api/homeworks/{hw_id}/comments', headers=_auth(ctx['s1'])).get_json()
+    assert body['total'] == 1 and body['can_moderate'] is False
+    assert [x['id'] for x in body['items'][0]['replies']] == [reply_s2['id'], reply_teacher['id']]
+
+    # 通知：教师收新提问，s1 收两次回复
+    with ctx['_app'].app_context():
+        assert Notification.query.filter_by(
+            user_id=ctx['t1_id'], related_type='homework', related_id=hw_id,
+            title='作业讨论有新提问').count() == 1
+        assert Notification.query.filter_by(
+            user_id=ctx['s1_id'], related_type='homework', related_id=hw_id,
+            title='作业讨论有新回复').count() == 2
+
+    # 权限：非创建教师不可见；学生删教师回复 403；教师可删
+    assert c.get(f'/api/homeworks/{hw_id}/comments',
+                 headers=_auth(ctx['t2'])).status_code == 404
+    assert c.delete(f'/api/homeworks/{hw_id}/comments/{reply_teacher["id"]}',
+                    headers=_auth(ctx['s2'])).status_code == 403
+    assert c.delete(f'/api/homeworks/{hw_id}/comments/{reply_s2["id"]}',
+                    headers=_auth(ctx['t1'])).status_code == 200
+    body = c.get(f'/api/homeworks/{hw_id}/comments', headers=_auth(ctx['s1'])).get_json()
+    deleted = next(x for x in body['items'][0]['replies'] if x['id'] == reply_s2['id'])
+    assert deleted['deleted'] is True and deleted['content'] == '该评论已删除'
+
+    # ── 互评：学生不可分配；教师分配 2 份（每人 1 份）──
+    assert c.post(f'/api/homeworks/{hw_id}/peer_reviews/distribute',
+                  json={'per_submission': 2}, headers=_auth(ctx['s1'])).status_code == 403
+    r = c.post(f'/api/homeworks/{hw_id}/peer_reviews/distribute',
+               json={'per_submission': 2}, headers=_auth(ctx['t1']))
+    assert r.status_code == 200, r.get_json()
+    assert r.get_json()['created'] == 2
+    assert r.get_json()['summary']['total'] == 2
+
+    mine1 = c.get('/api/homeworks/peer_reviews/mine', headers=_auth(ctx['s1'])).get_json()
+    mine2 = c.get('/api/homeworks/peer_reviews/mine', headers=_auth(ctx['s2'])).get_json()
+    assert mine1['pending_count'] == 1 and mine2['pending_count'] == 1
+    rev1 = mine1['items'][0]['review']
+    rev2 = mine2['items'][0]['review']
+    assert rev1['reviewer_id'] == ctx['s1_id'] and rev1['submission_id'] != sub1_id
+
+    # 匿名详情：无作者字段、无正确答案/解析，仅含被评作答
+    detail = c.get(f'/api/homeworks/{hw_id}/peer_reviews/{rev1["id"]}',
+                   headers=_auth(ctx['s1'])).get_json()
+    assert 'username' not in detail['submission']
+    assert detail['questions'][0]['peer_answer'] == 'A'
+    assert 'answer' not in detail['questions'][0] and 'analysis' not in detail['questions'][0]
+    # 非该任务评审人不可查看
+    assert c.get(f'/api/homeworks/{hw_id}/peer_reviews/{rev1["id"]}',
+                 headers=_auth(ctx['s2'])).status_code == 403
+
+    # s1 评 s2：75 分；重复提交拦截；s2 评 s1：90 分
+    r = c.post(f'/api/homeworks/{hw_id}/peer_reviews/{rev1["id"]}',
+               json={'score': 75, 'comment': '步骤可再展开'}, headers=_auth(ctx['s1']))
+    assert r.status_code == 200 and r.get_json()['status'] == 'submitted'
+    assert c.post(f'/api/homeworks/{hw_id}/peer_reviews/{rev1["id"]}',
+                  json={'score': 60}, headers=_auth(ctx['s1'])).status_code == 400
+    assert c.post(f'/api/homeworks/{hw_id}/peer_reviews/{rev2["id"]}',
+                  json={'score': 90, 'comment': '思路清晰'}, headers=_auth(ctx['s2'])).status_code == 200
+    # 边界：越界分数（已提交后仍先被状态拦下 → 400）
+    assert c.post(f'/api/homeworks/{hw_id}/peer_reviews/{rev1["id"]}',
+                  json={'score': 101}, headers=_auth(ctx['s1'])).status_code == 400
+
+    # 教师汇总：完成率 100%，每份均分可见，评审人进度完整
+    summary = c.get(f'/api/homeworks/{hw_id}/peer_reviews',
+                    headers=_auth(ctx['t1'])).get_json()
+    assert summary['total'] == 2 and summary['submitted'] == 2
+    assert summary['completion_rate'] == 100.0
+    row1 = next(x for x in summary['per_submission'] if x['submission_id'] == sub1_id)
+    assert row1['avg_score'] == 90.0 and row1['submitted_count'] == 1
+    assert len(summary['reviewers']) == 2
+
+    # 未批改：学生 result 不披露互评；批改后匿名可见
+    body = c.get(f'/api/homeworks/{hw_id}/result', headers=_auth(ctx['s1'])).get_json()
+    assert body['peer_review'] is None
+    assert c.post(f'/api/homeworks/{hw_id}/grade/{sub1_id}', json={'answers': []},
+                  headers=_auth(ctx['t1'])).status_code == 200
+    body = c.get(f'/api/homeworks/{hw_id}/result', headers=_auth(ctx['s1'])).get_json()
+    assert body['peer_review']['count'] == 1
+    assert body['peer_review']['avg_score'] == 90.0
+    assert body['peer_review']['comments'][0]['comment'] == '思路清晰'
+    assert 'reviewer_id' not in body['peer_review']['comments'][0]
+
+    # 非创建教师不能看互评汇总
+    assert c.get(f'/api/homeworks/{hw_id}/peer_reviews',
+                 headers=_auth(ctx['t2'])).status_code == 403
+
+    # 数据落库核对：2 条互评且均 submitted
+    with ctx['_app'].app_context():
+        assert HomeworkPeerReview.query.filter_by(
+            homework_id=hw_id, status='submitted').count() == 2
+        assert db.session.get(Homework, hw_id).status == 'published'
 

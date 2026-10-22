@@ -747,13 +747,15 @@ class DailyTask(db.Model):
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     day = db.Column(db.Date, nullable=False)
     title = db.Column(db.String(200), nullable=False)
-    source = db.Column(db.String(10), nullable=False, default='manual')  # manual=自建 ai=AI建议
+    # manual=自建 ai=AI建议 peer_review=互评任务（v5.9）
+    source = db.Column(db.String(20), nullable=False, default='manual')
     status = db.Column(db.String(10), nullable=False, default='pending')  # pending/done
     done_at = db.Column(UTCDateTime)
     created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
 
     __table_args__ = (
-        db.CheckConstraint("source IN ('manual', 'ai')", name='_daily_source_ck'),
+        db.CheckConstraint("source IN ('manual', 'ai', 'peer_review')",
+                           name='_daily_source_ck'),
         db.CheckConstraint("status IN ('pending', 'done')", name='_daily_status_ck'),
         db.Index('ix_daily_task_user_day', 'user_id', 'day'),
     )

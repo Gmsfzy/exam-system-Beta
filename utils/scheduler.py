@@ -23,7 +23,9 @@ def _run(app):
         from competition.reminder import send_competition_reminders
         from api.learning_engine import learning_daily_tick
         from bounty.engine import bounty_expiry_tick
-        from homework.services import homework_expiry_tick
+        from homework.services import (
+            homework_expiry_tick, homework_series_tick, peer_review_deadline_tick,
+        )
         from utils.backup import database_backup_tick
 
         while not _stop_event.is_set():
@@ -36,6 +38,8 @@ def _run(app):
                 ('learning_daily_tick', learning_daily_tick),
                 ('bounty_expiry_tick', bounty_expiry_tick),
                 ('homework_expiry_tick', homework_expiry_tick),
+                ('homework_series_tick', homework_series_tick),
+                ('peer_review_deadline_tick', peer_review_deadline_tick),
                 ('database_backup_tick', database_backup_tick),
             ):
                 try:

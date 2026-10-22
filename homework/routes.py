@@ -17,16 +17,30 @@ from flask import Blueprint, Response, jsonify, request, send_from_directory
 
 from database import db
 from database.models import Question, User
+from utils.logger import logger
 from utils.permissions import require_teacher, require_login
 from utils.security import limiter
 from utils.timeutil import utcnow, iso_local, parse_dt
-from competition.routes import _UPLOAD_DIR, _save_upload
+from utils.notify import create_notification
+from utils.uploads import UPLOAD_DIR as _UPLOAD_DIR, save_upload as _save_upload
 from homework.models import (
     Homework, HomeworkQuestion, HomeworkStudent, HomeworkSubmission, HomeworkAnswer,
+    HomeworkAiReview, HomeworkComment, HomeworkPeerReview,
+    HomeworkGroup, HomeworkGroupMember,
+    HomeworkTemplate, HomeworkSeries, HomeworkSeriesStatusEnum,
     HomeworkStatusEnum, HomeworkTypeEnum, SubmissionStatusEnum,
+    PeerReviewStatusEnum, PeerReviewAuditEnum,
 )
 from homework.services import (
     finalize_submission, recompute_total, notify_homework_students, ai_suggest_grading,
+    build_class_review, build_submission_review, upsert_ai_review,
+    distribute_peer_reviews, peer_review_summary, peer_review_received,
+    compute_peer_final_score, _clean_dimension_scores, peer_review_dimensions,
+    audit_peer_review, complete_peer_review_daily_task,
+    homework_plagiarism_check, get_student_group, get_group_submission,
+    sync_roster_from_groups,
+    generate_homework_from_template, complete_homework_daily_task,
+    preview_template_questions,
 )
 
 homework_bp = Blueprint('homework', __name__)
@@ -46,11 +60,30 @@ def _get_own_homework(user, hw_id):
 
 
 def _in_roster(hw, user_id):
+    """是否在发布名单：小组作业自动把小组成员同步进名单，故统一查 HomeworkStudent。"""
     return HomeworkStudent.query.filter_by(homework_id=hw.id, student_id=user_id).first()
 
 
 def _my_submission(hw, user_id):
+    """取本人（或本人小组）的提交。小组作业每组一份，组员共享。"""
+    if hw.is_group:
+        group = get_student_group(hw, user_id)
+        if group:
+            return get_group_submission(hw, group.id)
+        return None
     return HomeworkSubmission.query.filter_by(homework_id=hw.id, student_id=user_id).first()
+
+
+def _notify_graded(hw, sub, msg):
+    """批改完成通知：个人作业通知本人；小组作业通知全组成员。"""
+    if sub.group_id and sub.group:
+        for m in sub.group.members:
+            create_notification(m.student_id, '作业已批改', msg,
+                                type='success', related_type='homework',
+                                related_id=hw.id, commit=False)
+    else:
+        create_notification(sub.student_id, '作业已批改', msg,
+                            type='success', related_type='homework', related_id=hw.id)
 
 
 def _question_payload(hq, for_teacher):
@@ -103,6 +136,52 @@ def _apply_common_fields(hw, data):
             if ps < 0:
                 return 'pass_score 不能为负'
             hw.pass_score = round(ps, 2)
+    if 'is_group' in data:
+        hw.is_group = bool(data['is_group'])
+    return None
+
+
+def _apply_groups(hw, groups):
+    """整体替换小组名单（仅小组作业）；返回错误串或 None。
+
+    groups: [{'name': str, 'student_ids': [int]}]
+    同一名学生只能在一个小组内；自动同步到 HomeworkStudent。
+    """
+    if hw.status != HomeworkStatusEnum.DRAFT:
+        return '已发布作业不可再调整小组'
+    if not isinstance(groups, list) or not groups:
+        return '小组作业至少需要 1 个小组'
+    # 收集所有学生 id
+    all_ids = []
+    for g in groups:
+        name = str(g.get('name') or '').strip()[:100] or '未命名小组'
+        sids = g.get('student_ids') or []
+        for sid in sids:
+            try:
+                all_ids.append(int(sid))
+            except (TypeError, ValueError):
+                return 'student_ids 须为整数列表'
+    if not all_ids:
+        return '每个小组至少需要 1 名学生'
+    if len(all_ids) != len(set(all_ids)):
+        return '同一名学生不能重复加入多个小组'
+    valid = {u.id for u in User.query.filter(
+        User.id.in_(all_ids), User.role == 'student').all()}
+    missing = [i for i in all_ids if i not in valid]
+    if missing:
+        return f'学生不存在：{missing}'
+
+    # 重建小组
+    hw.groups.clear()
+    db.session.flush()
+    for g in groups:
+        name = str(g.get('name') or '').strip()[:100] or '未命名小组'
+        grp = HomeworkGroup(name=name)
+        for sid in g.get('student_ids') or []:
+            grp.members.append(HomeworkGroupMember(student_id=int(sid)))
+        hw.groups.append(grp)
+    db.session.flush()
+    sync_roster_from_groups(hw)
     return None
 
 
@@ -192,6 +271,7 @@ def api_detail(hw_id):
         d['questions'] = [_question_payload(hq, True) for hq in
                           sorted(hw.hw_questions, key=lambda x: (x.order or 0, x.question_id))]
         d['student_ids'] = [hs.student_id for hs in hw.hw_students]
+        d['groups'] = [g.to_dict() for g in hw.groups]
         return jsonify(d)
     if hw.status == HomeworkStatusEnum.DRAFT or not _in_roster(hw, user.id):
         return jsonify({'message': '作业不存在或未对你开放'}), 404
@@ -201,6 +281,9 @@ def api_detail(hw_id):
                           sorted(hw.hw_questions, key=lambda x: (x.order or 0, x.question_id))]
     sub = _my_submission(hw, user.id)
     d['my_submission'] = sub.to_dict() if sub else None
+    if hw.is_group:
+        grp = get_student_group(hw, user.id)
+        d['my_group'] = grp.to_dict() if grp else None
     return jsonify(d)
 
 
@@ -238,6 +321,11 @@ def api_create():
             return jsonify({'message': msg}), 400
     if data.get('student_ids') is not None:
         msg = _apply_roster(hw, data.get('student_ids'))
+        if msg:
+            db.session.rollback()
+            return jsonify({'message': msg}), 400
+    if hw.is_group and data.get('groups') is not None:
+        msg = _apply_groups(hw, data.get('groups'))
         if msg:
             db.session.rollback()
             return jsonify({'message': msg}), 400
@@ -310,9 +398,17 @@ def api_update(hw_id):
             if msg:
                 return jsonify({'message': msg}), 400
         if data.get('student_ids') is not None:
-            msg = _apply_roster(hw, data['student_ids'])
+            msg = _apply_roster(hw, data.get('student_ids'))
             if msg:
                 return jsonify({'message': msg}), 400
+        if hw.is_group and data.get('groups') is not None:
+            msg = _apply_groups(hw, data.get('groups'))
+            if msg:
+                return jsonify({'message': msg}), 400
+        if not hw.is_group:
+            # 切回非小组：清空小组与提交的 group_id 关联
+            for g in list(hw.groups):
+                db.session.delete(g)
     else:
         # 已发布/已关闭：题目清单锁定，仅名单可调
         if data.get('student_ids') is not None:
@@ -363,6 +459,8 @@ def api_publish(hw_id):
         return jsonify({'message': '截止时间已过，请先修改截止时间'}), 400
     if not hw.hw_students:
         return jsonify({'message': '发布名单为空'}), 400
+    if hw.is_group and not hw.groups:
+        return jsonify({'message': '小组作业须先创建小组'}), 400
 
     hw.status = HomeworkStatusEnum.PUBLISHED
     hw.published_at = utcnow()
@@ -372,6 +470,14 @@ def api_publish(hw_id):
     content = f'老师发布了作业《{hw.title}》，{due_txt}，请及时完成。'
     n = notify_homework_students(hw, title, content)
     db.session.commit()
+    # v5.8：发布时为名单学生创建当日 DailyTask（非关键路径）
+    try:
+        from homework.services import _create_daily_tasks_for_homework
+        _create_daily_tasks_for_homework(hw)
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+        logger.debug('[homework] 发布时创建每日任务失败（非关键）', exc_info=True)
     return jsonify({'message': f'已发布并通知 {n} 名学生',
                     'homework': hw.to_dict(for_teacher=True)})
 
@@ -432,8 +538,66 @@ def api_stats(hw_id):
     return jsonify({'homework': hw.to_dict(for_teacher=True), 'stats': _compute_stats(hw)})
 
 
+# ═══════════════════════ v5.3 AI 讲评：班级共性分析 ═══════════════════════
+
+def _get_class_review(hw):
+    return HomeworkAiReview.query.filter_by(homework_id=hw.id, scope_key='class').first()
+
+
+@homework_bp.route('/homeworks/<int:hw_id>/ai_review', methods=['GET'])
+def api_class_review_get(hw_id):
+    user, err = require_teacher()
+    if err:
+        return err
+    hw, err = _get_own_homework(user, hw_id)
+    if err:
+        return err
+    rec = _get_class_review(hw)
+    return jsonify({'exists': bool(rec), 'review': rec.to_dict() if rec else None})
+
+
+@homework_bp.route('/homeworks/<int:hw_id>/ai_review', methods=['POST'])
+@limiter.limit('6/minute')
+def api_class_review_generate(hw_id):
+    """生成/刷新班级共性分析（统计始终可用，AI 失败降级规则讲评）。"""
+    user, err = require_teacher()
+    if err:
+        return err
+    hw, err = _get_own_homework(user, hw_id)
+    if err:
+        return err
+    result = build_class_review(hw)
+    rec = upsert_ai_review(hw, 'class', result, user.id)
+    message = ('AI 服务暂不可用，已生成规则版讲评（统计数据完整）'
+               if rec.degraded else '班级 AI 讲评已生成')
+    if not result['stats']['submitted']:
+        message = '暂无学生提交，已生成提交情况提醒'
+    return jsonify({'message': message, 'degraded': bool(rec.degraded),
+                    'review': rec.to_dict()})
+
+
+@homework_bp.route('/homeworks/<int:hw_id>/ai_review/publish', methods=['POST'])
+def api_class_review_publish(hw_id):
+    """班级讲评发布/撤回：发布后学生端 result 才可见。"""
+    user, err = require_teacher()
+    if err:
+        return err
+    hw, err = _get_own_homework(user, hw_id)
+    if err:
+        return err
+    rec = _get_class_review(hw)
+    if not rec:
+        return jsonify({'message': '请先生成班级 AI 讲评'}), 404
+    data = request.get_json(silent=True) or {}
+    published = bool(data.get('published', True))
+    rec.published_at = utcnow() if published else None
+    db.session.commit()
+    return jsonify({'message': '已发布给学生' if published else '已撤回，学生不可见',
+                    'review': rec.to_dict()})
+
+
 @homework_bp.route('/homeworks/<int:hw_id>/urge', methods=['POST'])
-@limiter.limit('30/min')
+@limiter.limit('30/minute')
 def api_urge(hw_id):
     user, err = require_teacher()
     if err:
@@ -573,6 +737,9 @@ def api_take(hw_id):
         payload['attachment'] = sub.attachment_meta() if sub else None
     if sub:
         payload['submission'] = sub.to_dict()
+    if hw.is_group:
+        grp = get_student_group(hw, user.id)
+        payload['my_group'] = grp.to_dict() if grp else None
     return jsonify(payload)
 
 
@@ -594,8 +761,14 @@ def api_save_answers(hw_id):
     if sub is None:
         sub = HomeworkSubmission(homework_id=hw.id, student_id=user.id,
                                  status=SubmissionStatusEnum.DRAFT)
+        if hw.is_group:
+            grp = get_student_group(hw, user.id)
+            if grp:
+                sub.group_id = grp.id
         db.session.add(sub)
         db.session.flush()
+    elif hw.is_group:
+        sub.student_id = user.id
     data = request.get_json(silent=True) or {}
     hq_map = {hq.question_id: hq for hq in hw.hw_questions}
     saved = 0
@@ -638,8 +811,17 @@ def _save_attachment_to(sub, file):
     return None
 
 
+def _award_grade_bonus_safe(hw, sub):
+    """批改完成按得分率补发质量积分（非关键路径，失败不阻断批改响应）。"""
+    try:
+        from homework.services import award_homework_grade_bonus
+        award_homework_grade_bonus(hw, sub)
+    except Exception:
+        logger.exception('[homework] 批改积分入账失败（非关键）hw=%s sub=%s', hw.id, sub.id)
+
+
 @homework_bp.route('/homeworks/<int:hw_id>/submit', methods=['POST'])
-@limiter.limit('20/min')
+@limiter.limit('20/minute')
 def api_submit(hw_id):
     user, err = require_login()
     if err:
@@ -665,8 +847,15 @@ def api_submit(hw_id):
     if sub is None:
         sub = HomeworkSubmission(homework_id=hw.id, student_id=user.id,
                                  status=SubmissionStatusEnum.DRAFT)
+        if hw.is_group:
+            grp = get_student_group(hw, user.id)
+            if grp:
+                sub.group_id = grp.id
         db.session.add(sub)
         db.session.flush()
+    elif hw.is_group:
+        # 小组作业：任一成员提交均更新同一组提交的「提交人」为当前操作人
+        sub.student_id = user.id
 
     # 开放式：multipart（file=附件）或 JSON content；题集式：取已存草稿作答
     if request.content_type and 'multipart/form-data' in request.content_type:
@@ -706,11 +895,27 @@ def api_submit(hw_id):
         sub.version = (sub.version or 1) + 1
     db.session.commit()
     # 师生互动：学生提交/重交 → 实时通知教师去批改（经 ORM 事件自动推送）
-    from api.notification_routes import create_notification
     create_notification(
         hw.teacher_id, '收到作业重交' if resubmit else '收到作业提交',
         f'《{hw.title}》学生 {user.username} 已提交（第 {sub.version or 1} 版），待批改。',
         type='info', related_type='homework', related_id=hw.id)
+    # v5.2 学习闭环：自动判分部分的错题收录 + 知识点掌握度（非关键路径，不阻塞提交）
+    try:
+        from homework.services import sync_learning_effects
+        sync_learning_effects(hw, sub, scope='auto')
+    except Exception:
+        logger.exception('[homework] 学习闭环联动失败（非关键）hw=%s sub=%s', hw.id, sub.id)
+    # v5.8 系列作业：提交即完成当日对应的 DailyTask
+    try:
+        complete_homework_daily_task(hw, user.id)
+    except Exception:
+        logger.debug('[homework] 每日任务标记失败（非关键）', exc_info=True)
+    # v5.10 作业入账：最终提交发放基础积分（重交幂等，不重复计分）
+    try:
+        from homework.services import award_homework_submit_points
+        award_homework_submit_points(hw, sub)
+    except Exception:
+        logger.exception('[homework] 提交积分入账失败（非关键）hw=%s sub=%s', hw.id, sub.id)
     return jsonify({'message': '提交成功' + ('（迟交已标记）' if sub.is_late else ''),
                     'submission': sub.to_dict()}), 201
 
@@ -732,6 +937,19 @@ def api_result(hw_id):
                'answers': [a.to_dict(for_teacher=False,
                                      max_score=hq_map[a.question_id].score if a.question_id in hq_map else None)
                            for a in sub.answers]}
+    # v5.3 AI 讲评：班级讲评仅发布后可见；单份讲评批改完成后可见
+    class_rec = _get_class_review(hw)
+    payload['class_review'] = (class_rec.to_dict(for_student=True)
+                               if class_rec and class_rec.published_at else None)
+    if sub.status == SubmissionStatusEnum.GRADED:
+        own_rec = HomeworkAiReview.query.filter_by(
+            homework_id=hw.id, scope_key=f'sub:{sub.id}').first()
+        payload['ai_review'] = own_rec.to_dict(for_student=True) if own_rec else None
+        # v5.5 互评结果：批改完成后才对本人披露（匿名）
+        payload['peer_review'] = peer_review_received(sub)
+    else:
+        payload['ai_review'] = None
+        payload['peer_review'] = None
     return jsonify(payload)
 
 
@@ -753,7 +971,8 @@ def api_submissions(hw_id):
                      for hs in hw.hw_students if hs.student_id not in submitted_ids]
     return jsonify({'items': [s.to_dict(for_teacher=True) for s in subs],
                     'not_submitted': not_submitted,
-                    'student_count': len(hw.hw_students)})
+                    'student_count': len(hw.hw_students),
+                    'groups': [g.to_dict() for g in hw.groups]})
 
 
 @homework_bp.route('/homeworks/<int:hw_id>/grade/<int:sub_id>', methods=['GET'])
@@ -772,13 +991,17 @@ def api_grade_view(hw_id, sub_id):
 
 def _grade_payload(hw, sub):
     hq_map = {hq.question_id: hq for hq in hw.hw_questions}
+    rec = HomeworkAiReview.query.filter_by(
+        homework_id=hw.id, scope_key=f'sub:{sub.id}').first()
     return {'homework': hw.to_dict(for_teacher=True),
             'submission': sub.to_dict(for_teacher=True),
             'answers': [a.to_dict(for_teacher=True,
                                   max_score=hq_map[a.question_id].score if a.question_id in hq_map else None)
                         for a in sub.answers],
             'questions': [_question_payload(hq, True) for hq in
-                          sorted(hw.hw_questions, key=lambda x: (x.order or 0, x.question_id))]}
+                          sorted(hw.hw_questions, key=lambda x: (x.order or 0, x.question_id))],
+            'ai_review': rec.to_dict() if rec else None,
+            'peer_review': peer_review_received(sub)}
 
 
 @homework_bp.route('/homeworks/<int:hw_id>/grade/<int:sub_id>', methods=['POST'])
@@ -794,6 +1017,7 @@ def api_grade_submit(hw_id, sub_id):
         return jsonify({'message': '提交不存在'}), 404
     if sub.status == SubmissionStatusEnum.DRAFT:
         return jsonify({'message': '学生尚未提交'}), 400
+    was_graded = sub.status == SubmissionStatusEnum.GRADED  # v5.2：仅首次转 GRADED 触发学习闭环
 
     data = request.get_json(silent=True) or {}
 
@@ -824,11 +1048,11 @@ def api_grade_submit(hw_id, sub_id):
         sub.status = SubmissionStatusEnum.GRADED
         sub.graded_by = user.id
         sub.graded_at = utcnow()
-        from api.notification_routes import create_notification
-        create_notification(sub.student_id, '作业已批改',
-                            f'《{hw.title}》成绩已公布：{sub.total_score} 分（满分 {sub.max_score}）。',
-                            type='success', related_type='homework', related_id=hw.id)
+        msg = f'《{hw.title}》成绩已公布：{sub.total_score} 分（满分 {sub.max_score}）。'
+        _notify_graded(hw, sub, msg)
         db.session.commit()
+        if not was_graded:
+            _award_grade_bonus_safe(hw, sub)
         return jsonify({'message': '已批改完成', 'graded': True, 'pending_manual': 0,
                         'submission': sub.to_dict(for_teacher=True)})
 
@@ -861,19 +1085,26 @@ def api_grade_submit(hw_id, sub_id):
         sub.status = SubmissionStatusEnum.GRADED
         sub.graded_by = user.id
         sub.graded_at = utcnow()
-        from api.notification_routes import create_notification
-        create_notification(sub.student_id, '作业已批改',
-                            f'《{hw.title}》成绩已公布：{earned} 分'
-                            + (f'（满分 {max_total}）' if max_total else '') + '。',
-                            type='success', related_type='homework', related_id=hw.id)
+        msg = (f'《{hw.title}》成绩已公布：{earned} 分'
+               + (f'（满分 {max_total}）' if max_total else '') + '。')
+        _notify_graded(hw, sub, msg)
     db.session.commit()
+    if pending == 0 and not was_graded:
+        # v5.2 学习闭环：人工判分部分错题收录 + 掌握度（首次转 GRADED 才触发，防重复收录）
+        try:
+            from homework.services import sync_learning_effects
+            sync_learning_effects(hw, sub, scope='final')
+        except Exception:
+            logger.exception('[homework] 学习闭环联动失败（非关键）hw=%s sub=%s', hw.id, sub.id)
+        # v5.10 批改完成：按得分率补发作业质量积分（独立幂等键）
+        _award_grade_bonus_safe(hw, sub)
     return jsonify({'message': '已批改完成' if pending == 0 else f'已保存给分（仍有 {pending} 题待批）',
                     'graded': pending == 0, 'pending_manual': pending,
                     'submission': sub.to_dict(for_teacher=True)})
 
 
 @homework_bp.route('/homeworks/<int:hw_id>/grade/<int:sub_id>/ai_suggest', methods=['POST'])
-@limiter.limit('10/min')
+@limiter.limit('10/minute')
 def api_grade_ai(hw_id, sub_id):
     user, err = require_teacher()
     if err:
@@ -891,6 +1122,46 @@ def api_grade_ai(hw_id, sub_id):
     return jsonify(result)
 
 
+# ═══════════════════════ v5.3 AI 讲评：单份讲评 ═══════════════════════
+
+@homework_bp.route('/homeworks/<int:hw_id>/grade/<int:sub_id>/ai_review', methods=['GET'])
+def api_submission_review_get(hw_id, sub_id):
+    user, err = require_teacher()
+    if err:
+        return err
+    hw, err = _get_own_homework(user, hw_id)
+    if err:
+        return err
+    sub = db.session.get(HomeworkSubmission, sub_id)
+    if not sub or sub.homework_id != hw.id:
+        return jsonify({'message': '提交不存在'}), 404
+    rec = HomeworkAiReview.query.filter_by(
+        homework_id=hw.id, scope_key=f'sub:{sub.id}').first()
+    return jsonify({'exists': bool(rec), 'review': rec.to_dict() if rec else None})
+
+
+@homework_bp.route('/homeworks/<int:hw_id>/grade/<int:sub_id>/ai_review', methods=['POST'])
+@limiter.limit('10/minute')
+def api_submission_review_generate(hw_id, sub_id):
+    """生成单份 AI 讲评（须已批改；未批改分数不完整，拒绝生成）。"""
+    user, err = require_teacher()
+    if err:
+        return err
+    hw, err = _get_own_homework(user, hw_id)
+    if err:
+        return err
+    sub = db.session.get(HomeworkSubmission, sub_id)
+    if not sub or sub.homework_id != hw.id:
+        return jsonify({'message': '提交不存在'}), 404
+    if sub.status != SubmissionStatusEnum.GRADED:
+        return jsonify({'message': '批改完成后才能生成单份 AI 讲评'}), 400
+    result = build_submission_review(hw, sub)
+    rec = upsert_ai_review(hw, 'submission', result, user.id, submission_id=sub.id)
+    return jsonify({'message': 'AI 服务暂不可用，已生成规则版讲评'
+                    if rec.degraded else '单份 AI 讲评已生成',
+                    'degraded': bool(rec.degraded), 'review': rec.to_dict()})
+
+
 # ═══════════════════════ 附件下载（鉴权：本人 / 创建教师）═══════════════════════
 
 @homework_bp.route('/homeworks/<int:hw_id>/attachment', methods=['GET'])
@@ -905,7 +1176,11 @@ def api_attachment(hw_id):
     sub = db.session.get(HomeworkSubmission, sub_id) if sub_id else _my_submission(hw, user.id)
     if not sub or sub.homework_id != hw.id:
         return jsonify({'message': '提交不存在'}), 404
-    if not (user.is_teacher() and hw.teacher_id == user.id) and sub.student_id != user.id:
+    # v5.5：互评人可下载被评提交的附件（匿名评审所需）
+    is_reviewer = HomeworkPeerReview.query.filter_by(
+        submission_id=sub.id, reviewer_id=user.id).first() is not None
+    if not (user.is_teacher() and hw.teacher_id == user.id) \
+            and sub.student_id != user.id and not is_reviewer:
         return jsonify({'message': '无权下载该附件'}), 403
     att = sub.attachment_json or {}
     if not att.get('stored_name'):
@@ -978,3 +1253,666 @@ def api_reference_download(hw_id):
         return jsonify({'message': '无参考资料'}), 404
     return send_from_directory(_UPLOAD_DIR, ref['stored_name'], as_attachment=True,
                                download_name=ref.get('filename'))
+
+
+# ═══════════════════════ v5.4 作业讨论区 ═══════════════════════
+
+def _can_access_discussion(hw, user):
+    """讨论区参与者：创建教师 + 发布名单学生。"""
+    return (user.is_teacher() and hw.teacher_id == user.id) or bool(_in_roster(hw, user.id))
+
+
+def _discuss_homework(user, hw_id):
+    """取作业并校验讨论区访问权；返回 (hw, is_owner_teacher, error_response)。"""
+    hw = db.session.get(Homework, hw_id)
+    if not hw:
+        return None, False, (jsonify({'message': '作业不存在'}), 404)
+    owner_teacher = bool(user.is_teacher() and hw.teacher_id == user.id)
+    if not owner_teacher:
+        if hw.status == HomeworkStatusEnum.DRAFT or not _in_roster(hw, user.id):
+            return None, False, (jsonify({'message': '作业不存在或未对你开放'}), 404)
+    if not _can_access_discussion(hw, user):
+        return None, False, (jsonify({'message': '无权参与该作业讨论'}), 403)
+    return hw, owner_teacher, None
+
+
+@homework_bp.route('/homeworks/<int:hw_id>/comments', methods=['GET'])
+def api_comments(hw_id):
+    user, err = require_login()
+    if err:
+        return err
+    hw, owner_teacher, err = _discuss_homework(user, hw_id)
+    if err:
+        return err
+    question_id = request.args.get('question_id', type=int)
+    page = max(request.args.get('page', 1, type=int) or 1, 1)
+    page_size = min(max(request.args.get('page_size', 20, type=int) or 20, 1), 50)
+    q = HomeworkComment.query.filter_by(homework_id=hw.id, parent_id=None)
+    if question_id:
+        q = q.filter_by(question_id=question_id)
+    total = q.count()
+    tops = (q.order_by(HomeworkComment.created_at.desc(), HomeworkComment.id.desc())
+            .offset((page - 1) * page_size).limit(page_size).all())
+    ids = [c.id for c in tops]
+    replies = (HomeworkComment.query
+               .filter(HomeworkComment.parent_id.in_(ids))
+               .order_by(HomeworkComment.created_at.asc(), HomeworkComment.id.asc()).all()
+               ) if ids else []
+    reply_map = {}
+    for r in replies:
+        reply_map.setdefault(r.parent_id, []).append(r)
+    items = []
+    for c in tops:
+        d = c.to_dict(current_user_id=user.id, for_teacher=owner_teacher)
+        d['replies'] = [r.to_dict(current_user_id=user.id, for_teacher=owner_teacher)
+                        for r in reply_map.get(c.id, [])]
+        items.append(d)
+    return jsonify({'items': items, 'total': total, 'page': page, 'page_size': page_size,
+                    'can_moderate': owner_teacher, 'is_teacher': owner_teacher})
+
+
+@homework_bp.route('/homeworks/<int:hw_id>/comments', methods=['POST'])
+def api_comment_create(hw_id):
+
+    user, err = require_login()
+    if err:
+        return err
+    hw, owner_teacher, err = _discuss_homework(user, hw_id)
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    content = str(data.get('content') or '').strip()
+    if not content:
+        return jsonify({'message': '评论内容不能为空'}), 400
+    if len(content) > 2000:
+        return jsonify({'message': '评论内容不能超过 2000 字'}), 400
+
+    question_id = data.get('question_id')
+    if question_id not in (None, ''):
+        try:
+            question_id = int(question_id)
+        except (TypeError, ValueError):
+            return jsonify({'message': 'question_id 须为整数'}), 400
+        if question_id not in {hq.question_id for hq in hw.hw_questions}:
+            return jsonify({'message': '该题目不属于本次作业'}), 400
+    else:
+        question_id = None
+
+    parent = None
+    parent_id = data.get('parent_id')
+    if parent_id not in (None, ''):
+        try:
+            parent_id = int(parent_id)
+        except (TypeError, ValueError):
+            return jsonify({'message': 'parent_id 须为整数'}), 400
+        parent = db.session.get(HomeworkComment, parent_id)
+        if not parent or parent.homework_id != hw.id:
+            return jsonify({'message': '回复的评论不存在'}), 404
+        if parent.deleted_at:
+            return jsonify({'message': '该评论已删除，无法回复'}), 400
+        if parent.parent_id:   # 二层以上扁平化到主楼
+            parent = db.session.get(HomeworkComment, parent.parent_id)
+        parent_id = parent.id
+        question_id = parent.question_id
+
+    c = HomeworkComment(homework_id=hw.id, question_id=question_id,
+                        parent_id=parent_id, user_id=user.id, content=content,
+                        is_teacher=owner_teacher)
+    db.session.add(c)
+    db.session.flush()
+
+    if parent and parent.user_id != user.id:
+        create_notification(parent.user_id, '作业讨论有新回复',
+                            f'《{hw.title}》{user.username} 回复了你：{content[:60]}',
+                            related_type='homework', related_id=hw.id, commit=False)
+    elif parent is None and not owner_teacher:
+        create_notification(hw.teacher_id, '作业讨论有新提问',
+                            f'《{hw.title}》{user.username}：{content[:60]}',
+                            related_type='homework', related_id=hw.id, commit=False)
+    db.session.commit()
+    return jsonify(c.to_dict(current_user_id=user.id, for_teacher=owner_teacher)), 201
+
+
+@homework_bp.route('/homeworks/<int:hw_id>/comments/<int:cid>', methods=['DELETE'])
+def api_comment_delete(hw_id, cid):
+    user, err = require_login()
+    if err:
+        return err
+    hw, owner_teacher, err = _discuss_homework(user, hw_id)
+    if err:
+        return err
+    c = db.session.get(HomeworkComment, cid)
+    if not c or c.homework_id != hw.id:
+        return jsonify({'message': '评论不存在'}), 404
+    if c.user_id != user.id and not owner_teacher:
+        return jsonify({'message': '只能删除自己的评论'}), 403
+    if not c.deleted_at:
+        c.deleted_at = utcnow()
+        db.session.commit()
+    return jsonify({'message': '已删除'})
+
+
+# ═══════════════════════ v5.5 生生互评 ═══════════════════════
+
+@homework_bp.route('/homeworks/<int:hw_id>/peer_reviews/distribute', methods=['POST'])
+def api_peer_distribute(hw_id):
+
+    user, err = require_teacher()
+    if err:
+        return err
+    hw, err = _get_own_homework(user, hw_id)
+    if err:
+        return err
+    if hw.status == HomeworkStatusEnum.DRAFT:
+        return jsonify({'message': '请先发布作业再发起互评'}), 400
+    data = request.get_json(silent=True) or {}
+    result = distribute_peer_reviews(hw, data.get('per_submission', 2))
+    if result.get('error'):
+        db.session.rollback()
+        return jsonify({'message': result['error']}), 400
+    for reviewer_id, count in result['reviewers'].items():
+        create_notification(reviewer_id, '作业互评任务',
+                            f'《{hw.title}》你收到 {count} 份同学作业待互评，请客观打分并给出建议。',
+                            related_type='homework', related_id=hw.id, commit=False)
+    db.session.commit()
+    return jsonify({'message': f'已分配 {result["created"]} 份互评任务',
+                    'created': result['created'],
+                    'submitted_kept': result['submitted_kept'],
+                    'summary': peer_review_summary(hw)})
+
+
+@homework_bp.route('/homeworks/<int:hw_id>/peer_reviews', methods=['GET'])
+def api_peer_summary(hw_id):
+    user, err = require_teacher()
+    if err:
+        return err
+    hw, err = _get_own_homework(user, hw_id)
+    if err:
+        return err
+    return jsonify(peer_review_summary(hw))
+
+
+@homework_bp.route('/homeworks/peer_reviews/mine', methods=['GET'])
+def api_peer_mine():
+    user, err = require_login()
+    if err:
+        return err
+    rows = (HomeworkPeerReview.query.filter_by(reviewer_id=user.id)
+            .order_by(HomeworkPeerReview.id.desc()).all())
+    items = []
+    for r in rows:
+        hw = r.homework
+        if not hw or hw.status == HomeworkStatusEnum.DRAFT:
+            continue
+        items.append({'review': r.to_dict(),
+                      'homework': {'id': hw.id, 'title': hw.title, 'hw_type': hw.hw_type,
+                                   'teacher_name': hw.teacher.username if hw.teacher else '',
+                                   'peer_review_deadline': iso_local(hw.peer_review_deadline)
+                                   if hw.peer_review_deadline else None,
+                                   'peer_review_weight': float(hw.peer_review_weight or 0.0)}})
+    pending = sum(1 for i in items if i['review']['status'] == PeerReviewStatusEnum.PENDING)
+    submitted = sum(1 for i in items if i['review']['status'] == PeerReviewStatusEnum.SUBMITTED)
+    return jsonify({'items': items, 'pending_count': pending, 'submitted_count': submitted,
+                    'dimensions': peer_review_dimensions()})
+
+
+def _get_my_review(user, hw_id, review_id):
+    review = db.session.get(HomeworkPeerReview, review_id)
+    if not review or review.homework_id != hw_id:
+        return None, (jsonify({'message': '互评任务不存在'}), 404)
+    if review.reviewer_id != user.id:
+        return None, (jsonify({'message': '无权查看该互评任务'}), 403)
+    return review, None
+
+
+@homework_bp.route('/homeworks/<int:hw_id>/peer_reviews/<int:review_id>', methods=['GET'])
+def api_peer_detail(hw_id, review_id):
+    user, err = require_login()
+    if err:
+        return err
+    review, err = _get_my_review(user, hw_id, review_id)
+    if err:
+        return err
+    hw = review.homework
+    sub = review.submission
+    if not hw or not sub:
+        return jsonify({'message': '互评任务数据不完整'}), 404
+    sub_payload = {'id': sub.id, 'version': sub.version, 'is_late': bool(sub.is_late),
+                   'submitted_at': iso_local(sub.submitted_at) if sub.submitted_at else None,
+                   'content': sub.content or '', 'attachment': sub.attachment_meta()}
+    questions = []
+    if hw.hw_type == HomeworkTypeEnum.QUESTION_SET:
+        amap = {a.question_id: a for a in sub.answers}
+        for hq in sorted(hw.hw_questions, key=lambda x: (x.order or 0, x.question_id)):
+            qd = _question_payload(hq, False)
+            a = amap.get(hq.question_id)
+            qd['peer_answer'] = (a.answer or '') if a else ''
+            questions.append(qd)
+    return jsonify({'review': review.to_dict(), 'homework': hw.to_dict(),
+                    'submission': sub_payload, 'questions': questions,
+                    'dimensions': peer_review_dimensions()})
+
+
+@homework_bp.route('/homeworks/<int:hw_id>/peer_reviews/<int:review_id>', methods=['POST'])
+def api_peer_submit(hw_id, review_id):
+
+    user, err = require_login()
+    if err:
+        return err
+    review, err = _get_my_review(user, hw_id, review_id)
+    if err:
+        return err
+    hw = review.homework
+    if not hw or hw.status == HomeworkStatusEnum.DRAFT:
+        return jsonify({'message': '作业未开放'}), 404
+    if review.status != PeerReviewStatusEnum.PENDING:
+        return jsonify({'message': '该互评已提交，不可重复提交'}), 400
+    if hw.peer_review_deadline and utcnow() > hw.peer_review_deadline:
+        return jsonify({'message': '互评已截止，无法提交'}), 400
+    data = request.get_json(silent=True) or {}
+    # v5.9 多维度评分：传 scores 则按维度权重折算；兼容旧的单一 score
+    dim_scores = _clean_dimension_scores(data.get('scores'))
+    final_score = compute_peer_final_score(dim_scores)
+    if final_score is None:
+        try:
+            final_score = float(data.get('score'))
+        except (TypeError, ValueError):
+            return jsonify({'message': '请至少为 1 个维度打分（0~100）'}), 400
+        if final_score < 0 or final_score > 100:
+            return jsonify({'message': '评分须在 0~100 之间'}), 400
+        final_score = round(final_score, 2)
+        dim_scores = {}
+    comment = str(data.get('comment') or '').strip()
+    if len(comment) > 2000:
+        return jsonify({'message': '评语不能超过 2000 字'}), 400
+    review.score = final_score
+    review.scores_json = dim_scores or None
+    review.comment = comment
+    review.status = PeerReviewStatusEnum.SUBMITTED
+    review.submitted_at = utcnow()
+    complete_peer_review_daily_task(hw, user.id)
+    create_notification(hw.teacher_id, '作业互评已提交',
+                        f'《{hw.title}》{user.username} 完成 1 份同学互评。',
+                        related_type='homework', related_id=hw.id, commit=False)
+    db.session.commit()
+    return jsonify(review.to_dict())
+
+
+@homework_bp.route('/homeworks/<int:hw_id>/peer_reviews/settings', methods=['PUT'])
+def api_peer_settings(hw_id):
+    """教师设置互评截止时间与互评分权重（0~1，0=不计入总分视图）。"""
+    user, err = require_teacher()
+    if err:
+        return err
+    hw, err = _get_own_homework(user, hw_id)
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    if 'deadline' in data:
+        deadline = parse_dt(data.get('deadline'))
+        hw.peer_review_deadline = deadline
+        hw.peer_review_reminded_at = None  # 修改截止时间后允许重新催办
+    if 'weight' in data:
+        try:
+            weight = float(data.get('weight') or 0)
+        except (TypeError, ValueError):
+            return jsonify({'message': '权重须为 0~1 的数字'}), 400
+        if not 0.0 <= weight <= 1.0:
+            return jsonify({'message': '权重须在 0~1 之间'}), 400
+        hw.peer_review_weight = round(weight, 4)
+    db.session.commit()
+    return jsonify({'message': '互评设置已保存',
+                    'homework': hw.to_dict(for_teacher=True),
+                    'summary': peer_review_summary(hw)})
+
+
+@homework_bp.route('/homeworks/<int:hw_id>/peer_reviews/<int:review_id>/audit',
+                   methods=['POST'])
+def api_peer_audit(hw_id, review_id):
+    """教师审核互评：采纳（计入加权分）/ 驳回。"""
+
+    user, err = require_teacher()
+    if err:
+        return err
+    hw, err = _get_own_homework(user, hw_id)
+    if err:
+        return err
+    review = db.session.get(HomeworkPeerReview, review_id)
+    if not review or review.homework_id != hw.id:
+        return jsonify({'message': '互评记录不存在'}), 404
+    data = request.get_json(silent=True) or {}
+    result = audit_peer_review(review, str(data.get('action') or ''),
+                               comment=data.get('comment') or '', teacher_id=user.id)
+    if result.get('error'):
+        db.session.rollback()
+        return jsonify({'message': result['error']}), 400
+    accepted = review.audit_status == PeerReviewAuditEnum.ACCEPTED
+    create_notification(review.reviewer_id,
+                        '互评审核结果',
+                        f'《{hw.title}》你的互评已被教师{"采纳" if accepted else "驳回"}。'
+                        + (f'教师意见：{review.teacher_comment}' if review.teacher_comment else ''),
+                        type='info', related_type='homework', related_id=hw.id,
+                        commit=False)
+    db.session.commit()
+    return jsonify({'message': '已采纳' if accepted else '已驳回',
+                    'review': review.to_dict(for_teacher=True),
+                    'summary': peer_review_summary(hw)})
+
+
+# ═══════════════════════ v5.6 作业反抄袭 ═══════════════════════
+
+@homework_bp.route('/homeworks/<int:hw_id>/plagiarism', methods=['GET'])
+@limiter.limit('20/minute')
+def api_homework_plagiarism(hw_id):
+    """作业级查重：题集式编程题复用 oj.plagiarism，开放式文字走字符 n-gram。
+
+    query: threshold 相似度阈值（默认 0.7）。仅作复核线索。
+    """
+    user, err = require_teacher()
+    if err:
+        return err
+    hw, err = _get_own_homework(user, hw_id)
+    if err:
+        return err
+    try:
+        threshold = float(request.args.get('threshold', 0.7))
+    except (TypeError, ValueError):
+        return jsonify({'message': 'threshold 须为 0~1 的数值'}), 400
+    if not 0.0 <= threshold <= 1.0:
+        return jsonify({'message': 'threshold 须为 0~1 的数值'}), 400
+    result = homework_plagiarism_check(hw, threshold=threshold)
+    return jsonify({'homework_id': hw.id, 'threshold': threshold, **result})
+
+
+# ═══════════════════════ v5.8 作业模板与系列化 ═══════════════════════
+
+def _get_own_template(user, tid):
+    t = db.session.get(HomeworkTemplate, tid)
+    if not t or t.teacher_id != user.id:
+        return None, (jsonify({'message': '模板不存在'}), 404)
+    return t, None
+
+
+@homework_bp.route('/homeworks/templates', methods=['GET'])
+def api_template_list():
+    user, err = require_teacher()
+    if err:
+        return err
+    items = HomeworkTemplate.query.filter_by(teacher_id=user.id) \
+        .order_by(HomeworkTemplate.updated_at.desc()).all()
+    return jsonify({'items': [t.to_dict() for t in items]})
+
+
+@homework_bp.route('/homeworks/templates/preview', methods=['POST'])
+@limiter.limit('20/minute')
+def api_template_preview():
+    """抽题预览：按当前配置试抽一次，返回题目、难度分布与题库可用量。"""
+    user, err = require_teacher()
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    config = data.get('config') or {}
+    filters = config.get('filters') or {}
+    if not filters.get('major_id'):
+        return jsonify({'message': '请先选择专业'}), 400
+    try:
+        config['count'] = max(1, min(int(config.get('count') or 5), 50))
+    except (TypeError, ValueError):
+        return jsonify({'message': '抽题数量须为 1~50 的整数'}), 400
+    distribution = config.get('distribution')
+    if distribution:
+        if not isinstance(distribution, list):
+            return jsonify({'message': '难度分布格式不正确'}), 400
+        for slot in distribution:
+            try:
+                if int(slot.get('count', 0)) < 0:
+                    raise ValueError
+            except (TypeError, ValueError):
+                return jsonify({'message': '难度分布数量须为非负整数'}), 400
+    result = preview_template_questions(config)
+    if not result['pool_total']:
+        return jsonify({'message': '当前条件下题库没有匹配题目', **result}), 200
+    return jsonify(result)
+
+
+@homework_bp.route('/homeworks/templates', methods=['POST'])
+@limiter.limit('6/minute')
+def api_template_create():
+    user, err = require_teacher()
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    title = (data.get('title') or '').strip()
+    if not title:
+        return jsonify({'message': '模板标题不能为空'}), 400
+    t = HomeworkTemplate(teacher_id=user.id, title=title[:200],
+                         description=(data.get('description') or '')[:2000],
+                         config_json=data.get('config') or {},
+                         settings_json=data.get('settings') or {},
+                         roster_json=data.get('roster') or [])
+    db.session.add(t)
+    db.session.commit()
+    return jsonify({'message': '模板已创建', 'template': t.to_dict()}), 201
+
+
+@homework_bp.route('/homeworks/templates/<int:tid>', methods=['GET'])
+def api_template_detail(tid):
+    user, err = require_teacher()
+    if err:
+        return err
+    t, err = _get_own_template(user, tid)
+    if err:
+        return err
+    return jsonify({'template': t.to_dict()})
+
+
+@homework_bp.route('/homeworks/templates/<int:tid>', methods=['PUT'])
+def api_template_update(tid):
+    user, err = require_teacher()
+    if err:
+        return err
+    t, err = _get_own_template(user, tid)
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    if 'title' in data:
+        t.title = (data.get('title') or t.title).strip()[:200]
+    if 'description' in data:
+        t.description = (data.get('description') or '')[:2000]
+    if 'config' in data:
+        t.config_json = data.get('config') or {}
+    if 'settings' in data:
+        t.settings_json = data.get('settings') or {}
+    if 'roster' in data:
+        t.roster_json = data.get('roster') or []
+    db.session.commit()
+    return jsonify({'message': '已更新', 'template': t.to_dict()})
+
+
+@homework_bp.route('/homeworks/templates/<int:tid>', methods=['DELETE'])
+def api_template_delete(tid):
+    user, err = require_teacher()
+    if err:
+        return err
+    t, err = _get_own_template(user, tid)
+    if err:
+        return err
+    # 若有系列在用，拒绝删除
+    if HomeworkSeries.query.filter_by(template_id=t.id).first():
+        return jsonify({'message': '该模板被作业系列引用，无法删除'}), 400
+    db.session.delete(t)
+    db.session.commit()
+    return jsonify({'message': '已删除'})
+
+
+@homework_bp.route('/homeworks/templates/<int:tid>/generate', methods=['POST'])
+def api_template_generate(tid):
+    """从模板立即生成一份作业草稿（手动，不关联系列）。"""
+    user, err = require_teacher()
+    if err:
+        return err
+    t, err = _get_own_template(user, tid)
+    if err:
+        return err
+    hw, err = generate_homework_from_template(t, user.id, publish=False)
+    if err:
+        return jsonify({'message': err}), 400
+    return jsonify({'message': '已生成作业草稿', 'homework': hw.to_dict(for_teacher=True)}), 201
+
+
+# ── 作业系列 ──
+
+def _get_own_series(user, sid):
+    s = db.session.get(HomeworkSeries, sid)
+    if not s or s.teacher_id != user.id:
+        return None, (jsonify({'message': '系列不存在'}), 404)
+    return s, None
+
+
+@homework_bp.route('/homeworks/series', methods=['GET'])
+def api_series_list():
+    user, err = require_teacher()
+    if err:
+        return err
+    items = HomeworkSeries.query.filter_by(teacher_id=user.id) \
+        .order_by(HomeworkSeries.created_at.desc()).all()
+    return jsonify({'items': [s.to_dict() for s in items]})
+
+
+@homework_bp.route('/homeworks/series', methods=['POST'])
+@limiter.limit('3/minute')
+def api_series_create():
+    user, err = require_teacher()
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    template_id = data.get('template_id')
+    t = db.session.get(HomeworkTemplate, template_id)
+    if not t or t.teacher_id != user.id:
+        return jsonify({'message': '模板不存在'}), 404
+    title = (data.get('title') or t.title).strip()[:200]
+    start_at = parse_dt(data.get('start_at'))
+    if not start_at:
+        return jsonify({'message': '请指定首次发布时间'}), 400
+    try:
+        count = max(1, min(int(data.get('count', 5)), 30))
+    except (TypeError, ValueError):
+        count = 5
+    try:
+        interval_hours = max(1, int(data.get('interval_hours', 24)))
+    except (TypeError, ValueError):
+        interval_hours = 24
+    s = HomeworkSeries(teacher_id=user.id, template_id=t.id, title=title,
+                       description=(data.get('description') or '')[:2000],
+                       start_at=start_at, interval_hours=interval_hours, count=count)
+    db.session.add(s)
+    db.session.commit()
+    return jsonify({'message': '系列已创建（达到首次发布时间后自动生成作业）',
+                    'series': s.to_dict()}), 201
+
+
+@homework_bp.route('/homeworks/series/<int:sid>', methods=['GET'])
+def api_series_detail(sid):
+    user, err = require_teacher()
+    if err:
+        return err
+    s, err = _get_own_series(user, sid)
+    if err:
+        return err
+    return jsonify({'series': s.to_dict(include_homeworks=True)})
+
+
+@homework_bp.route('/homeworks/series/<int:sid>', methods=['DELETE'])
+def api_series_delete(sid):
+    user, err = require_teacher()
+    if err:
+        return err
+    s, err = _get_own_series(user, sid)
+    if err:
+        return err
+    # 停止生成，已生成的作业保留
+    s.status = HomeworkSeriesStatusEnum.PAUSED
+    db.session.commit()
+    return jsonify({'message': '系列已停止（已生成的作业保留）'})
+
+
+@homework_bp.route('/homeworks/series/<int:sid>/start', methods=['POST'])
+def api_series_start(sid):
+    """手动启动系列（草稿→进行中），到达计划时间后由调度器生成。"""
+    user, err = require_teacher()
+    if err:
+        return err
+    s, err = _get_own_series(user, sid)
+    if err:
+        return err
+    if s.status not in (HomeworkSeriesStatusEnum.DRAFT, HomeworkSeriesStatusEnum.PAUSED):
+        return jsonify({'message': f'当前状态 {s.status} 不可启动'}), 400
+    s.status = HomeworkSeriesStatusEnum.ACTIVE
+    db.session.commit()
+    return jsonify({'message': '系列已启动', 'series': s.to_dict()})
+
+
+@homework_bp.route('/homeworks/series/<int:sid>/generate_now', methods=['POST'])
+def api_series_generate_now(sid):
+    """手动立即生成下一份作业（不等待计划时间）。"""
+    user, err = require_teacher()
+    if err:
+        return err
+    s, err = _get_own_series(user, sid)
+    if err:
+        return err
+    if s.generated_count >= s.count:
+        return jsonify({'message': '该系列已全部生成完毕'}), 400
+    idx = s.generated_count
+    hw, err = generate_homework_from_template(
+        s.template, s.teacher_id, index=idx, publish=True, series_id=s.id)
+    if err:
+        return jsonify({'message': err}), 400
+    s.generated_count += 1
+    if s.generated_count >= s.count:
+        s.status = HomeworkSeriesStatusEnum.COMPLETED
+    db.session.commit()
+    return jsonify({'message': f'第 {idx + 1}/{s.count} 份已生成',
+                    'homework': hw.to_dict(for_teacher=True)}), 201
+
+
+# ── 学生：本周作业清单 ──
+
+@homework_bp.route('/homeworks/weekly', methods=['GET'])
+def api_weekly_homeworks():
+    """学生本周作业清单：按发布时间聚合，供「我的本周作业」视图。"""
+    user, err = require_login()
+    if err:
+        return err
+    from datetime import datetime, timedelta
+    # week_start：本周一 00:00（本地）
+    now = utcnow()
+    weekday = now.weekday()  # 周一=0
+    week_start = (now - timedelta(days=weekday)).replace(hour=0, minute=0, second=0, microsecond=0)
+    week_end = week_start + timedelta(days=7)
+    # 取本周内发布的、在名单中的作业
+    hws = Homework.query.join(HomeworkStudent, HomeworkStudent.homework_id == Homework.id) \
+        .filter(HomeworkStudent.student_id == user.id,
+                Homework.status == HomeworkStatusEnum.PUBLISHED,
+                Homework.published_at >= week_start,
+                Homework.published_at < week_end).all()
+    items = []
+    for hw in hws:
+        sub = _my_submission(hw, user.id)
+        items.append({
+            'id': hw.id, 'title': hw.title, 'hw_type': hw.hw_type,
+            'teacher_name': hw.teacher.username if hw.teacher else '',
+            'has_deadline': hw.deadline is not None,
+            'published_at': iso_local(hw.published_at),
+            'deadline': iso_local(hw.deadline) if hw.deadline else None,
+            'is_expired': hw.is_expired,
+            'submitted': sub is not None and sub.status in (
+                SubmissionStatusEnum.SUBMITTED, SubmissionStatusEnum.GRADED),
+            'graded': sub is not None and sub.status == SubmissionStatusEnum.GRADED,
+            'total_score': sub.total_score if sub and sub.status == SubmissionStatusEnum.GRADED else None,
+            'series_id': hw.series_id,
+        })
+    return jsonify({'week_start': iso_local(week_start),
+                    'week_end': iso_local(week_end),
+                    'items': items})
+
