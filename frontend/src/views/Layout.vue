@@ -465,6 +465,7 @@ const moduleMenus = {
       { path: '/homeworks/grading-scheme', label: '评分制', icon: iconMap.Medal },
       { path: '/homeworks/rubrics', label: '评分量规', icon: iconMap.Memo },
       { path: '/homeworks/monitor', label: '防作弊监测', icon: iconMap.Warning },
+      { path: '/homeworks/analytics', label: '学情分析', icon: iconMap.TrendCharts },
     ],
     student: [
       { path: '/homeworks/my', label: '我的作业', icon: iconMap.Notebook },

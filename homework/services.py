@@ -598,6 +598,104 @@ def _class_stats(hw):
     return stats
 
 
+def _question_discrimination(hw):
+    """v5.18 逐题区分度（27% 高低分组：高分组平均得分率 − 低分组平均得分率），与考试 item_analysis 同口径。
+
+    仅题集式、且已判分人数足以分出高低组（n > 2×组容量）时有效，否则该题 None。
+    纯读聚合，不改任何分数。返回 {question_id: D|None}。
+    """
+    graded = [s for s in hw.submissions
+              if s.status == SubmissionStatusEnum.GRADED and s.total_score is not None]
+    n = len(graded)
+    out = {}
+    if n < 2:
+        return out
+    g = max(1, round(n * 0.27))
+    if n <= 2 * g:            # 样本过小，高低组会重叠 → 区分度不可信
+        return out
+    ordered = sorted(graded, key=lambda s: -s.total_score)
+    hi_ids = {s.id for s in ordered[:g]}
+    lo_ids = {s.id for s in ordered[-g:]}
+
+    def _ratio(a, full):
+        return min(1.0, (a.effective_score or 0.0) / full) if full else (1.0 if a.is_correct else 0.0)
+
+    for hq in hw.hw_questions:
+        full = hq.score or 0.0
+        hi, lo = [], []
+        for s in graded:
+            a = next((x for x in s.answers if x.question_id == hq.question_id), None)
+            if a is None:
+                continue
+            r = _ratio(a, full)
+            if s.id in hi_ids:
+                hi.append(r)
+            if s.id in lo_ids:
+                lo.append(r)
+        d = (sum(hi) / len(hi) - sum(lo) / len(lo)) if hi and lo else None
+        out[hq.question_id] = round(d, 4) if d is not None else None
+    return out
+
+
+def build_class_analytics(hws):
+    """v5.18 跨作业学情分析看板（教师侧，纯读聚合，不改判分与账本口径）。
+
+    复用 `_class_stats` 的单份指标（完成率/得分率/逐题得分率/知识点），叠加 27% 区分度。
+    返回 {summary, trend, knowledge_heat, weak_questions}：
+    - trend：逐作业按发布时间升序（完成率/平均分/得分率/及格率），供得分趋势折线；
+    - knowledge_heat：跨作业按知识点聚合的薄弱热力（得分率升序，最弱在前）；
+    - weak_questions：跨作业每题得分率升序 + 区分度（同时识别难题与低区分度问题题）。
+    """
+    trend, q_rows = [], []
+    kp_bucket = {}
+    for hw in hws:
+        st = _class_stats(hw)
+        trend.append({
+            'homework_id': st['homework_id'], 'title': st['title'], 'hw_type': st['hw_type'],
+            'published_at': iso_local(hw.published_at) if hw.published_at else None,
+            'total_students': st['total_students'], 'submitted': st['submitted'],
+            'submitted_rate': st['submitted_rate'], 'graded': st['graded'],
+            'avg_score': st['avg_score'], 'avg_ratio': st['avg_ratio'], 'pass_rate': st['pass_rate'],
+        })
+        for k in st['knowledge_points']:
+            b = kp_bucket.setdefault(k['id'], {'id': k['id'], 'name': k['name'],
+                                               'ratios': [], 'question_count': 0, 'hw_ids': set()})
+            b['ratios'].append(k['avg_ratio'])
+            b['question_count'] += k['question_count']
+            b['hw_ids'].add(hw.id)
+        if st['hw_type'] == HomeworkTypeEnum.OPEN:
+            continue
+        disc_map = _question_discrimination(hw)
+        for q in st['questions']:
+            q_rows.append({
+                'homework_id': hw.id, 'homework_title': st['title'],
+                'question_id': q['question_id'], 'content': q['content'], 'type': q['type'],
+                'answers': q['attempts'], 'avg_ratio': q['avg_ratio'],
+                'correct_rate': q['correct_rate'],
+                'discrimination': disc_map.get(q['question_id']),
+            })
+    trend.sort(key=lambda t: (t['published_at'] is None, t['published_at'] or ''))
+    knowledge_heat = []
+    for b in kp_bucket.values():
+        avg = round(sum(b['ratios']) / len(b['ratios']), 4) if b['ratios'] else None
+        knowledge_heat.append({'id': b['id'], 'name': b['name'], 'avg_ratio': avg,
+                               'question_count': b['question_count'], 'hw_count': len(b['hw_ids'])})
+    knowledge_heat.sort(key=lambda x: (x['avg_ratio'] if x['avg_ratio'] is not None else 1.0))
+    graded_q = [r for r in q_rows if r['avg_ratio'] is not None]
+    weak_questions = sorted(graded_q, key=lambda x: (x['avg_ratio'], -(x['answers'] or 0)))[:20]
+    rates = [t['avg_ratio'] for t in trend if t['avg_ratio'] is not None]
+    srates = [t['submitted_rate'] for t in trend]
+    summary = {
+        'homework_count': len(trend),
+        'avg_submitted_rate': round(sum(srates) / len(srates), 1) if srates else 0.0,
+        'avg_score_rate': round(sum(rates) / len(rates), 4) if rates else None,
+        'total_submissions': sum(t['submitted'] for t in trend),
+        'graded_submissions': sum(t['graded'] for t in trend),
+    }
+    return {'summary': summary, 'trend': trend,
+            'knowledge_heat': knowledge_heat, 'weak_questions': weak_questions}
+
+
 def _class_prompt(stats):
     lines = [
         f"作业《{stats['title']}》（{'开放式' if stats['hw_type'] == HomeworkTypeEnum.OPEN else '题集式'}）",

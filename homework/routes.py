@@ -36,6 +36,7 @@ from homework.services import (
     finalize_submission, recompute_total, notify_homework_students, ai_suggest_grading,
     apply_late_penalty, blind_active, blind_label, ensure_submission_paper,
     build_class_review, build_submission_review, upsert_ai_review,
+    build_class_analytics,
     distribute_peer_reviews, peer_review_summary, peer_review_received,
     compute_peer_final_score, _clean_dimension_scores, peer_review_dimensions,
     audit_peer_review, complete_peer_review_daily_task,
@@ -715,6 +716,24 @@ def api_stats(hw_id):
     if err:
         return err
     return jsonify({'homework': hw.to_dict(for_teacher=True), 'stats': _compute_stats(hw)})
+
+
+@homework_bp.route('/homeworks/analytics', methods=['GET'])
+@limiter.limit('60/minute')
+def api_class_analytics():
+    """v5.18 跨作业学情分析看板（教师）：完成率/得分趋势/知识点薄弱热力/每题得分率+区分度。
+
+    只读聚合，不改判分与账本口径；可选 ?homework_id= 限定单份作业。"""
+    user, err = require_teacher()
+    if err:
+        return err
+    q = Homework.query.filter(Homework.teacher_id == user.id,
+                              Homework.status != HomeworkStatusEnum.DRAFT)
+    hw_filter = request.args.get('homework_id', type=int)
+    if hw_filter:
+        q = q.filter(Homework.id == hw_filter)
+    hws = q.order_by(Homework.id.asc()).all()
+    return jsonify(build_class_analytics(hws))
 
 
 # ═══════════════════════ v5.3 AI 讲评：班级共性分析 ═══════════════════════
