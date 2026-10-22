@@ -5,6 +5,10 @@
         <h2>{{ hw.title }}</h2>
         <div class="sub">
           <el-tag size="small" effect="plain">{{ hw.hw_type === 'open' ? '开放式' : '题集式' }}</el-tag>
+          <el-tag v-if="hw.is_group" size="small" type="success" effect="plain">
+            小组作业 · {{ myGroup?.name || '未分组' }}
+            <template v-if="myGroup?.members?.length">（{{ myGroup.members.map(m => m.username).join('、') }}）</template>
+          </el-tag>
           <span v-if="hw.has_deadline" :class="{ overdue: hw.is_expired }">截止 {{ (hw.deadline || '').slice(0, 16) }}</span>
           <span v-else>长期有效·不限期</span>
           <el-tag v-if="hw.is_expired" size="small" type="warning">已过截止{{ hw.allow_late ? '（可迟交）' : '（不再接收）' }}</el-tag>
@@ -35,6 +39,45 @@
         <el-tag v-if="submission.is_late" type="warning" size="small">迟交</el-tag>
       </div>
       <div v-if="submission.comment" class="teacher-comment">教师评语：{{ submission.comment }}</div>
+      <div v-if="hw.hw_type !== 'open'" class="wrongbook-tip">
+        <router-link to="/learning/wrong">得分率不足的题目已自动收入错题本，前往复习 →</router-link>
+      </div>
+    </el-card>
+
+    <!-- v5.3 班级 AI 讲评（教师发布后可见） -->
+    <el-card v-if="classReview" class="review-card" shadow="never">
+      <template #header>
+        <span class="review-title"><el-icon><ChatLineSquare /></el-icon> 班级讲评</span>
+      </template>
+      <AiReviewContent :content="classReview.content" kind="class"
+                       :degraded="classReview.degraded" />
+    </el-card>
+
+    <!-- v5.3 单份 AI 个性化讲评（批改后可见） -->
+    <el-card v-if="personalReview" class="review-card personal" shadow="never">
+      <template #header>
+        <span class="review-title"><el-icon><MagicStick /></el-icon> 我的个性化讲评</span>
+      </template>
+      <AiReviewContent :content="personalReview.content" kind="submission"
+                       :degraded="personalReview.degraded" />
+    </el-card>
+
+    <!-- v5.5 生生互评结果（批改后匿名展示） -->
+    <el-card v-if="peerReview" class="review-card peer" shadow="never">
+      <template #header>
+        <span class="review-title"><el-icon><UserFilled /></el-icon> 同学互评（匿名）</span>
+      </template>
+      <div class="peer-avg">
+        <span class="peer-score">{{ peerReview.avg_score ?? '—' }}</span>
+        <span class="of">/ 100 互评均分 · {{ peerReview.count }} 份</span>
+      </div>
+      <div v-for="(c, i) in peerReview.comments" :key="i" class="peer-comment">
+        <div class="peer-comment-head">
+          匿名同学 {{ i + 1 }}
+          <el-tag size="small" effect="plain">{{ c.score }} 分</el-tag>
+        </div>
+        <div class="peer-comment-body">{{ c.comment || '（未留评语）' }}</div>
+      </div>
     </el-card>
 
     <!-- 开放式 -->
@@ -94,15 +137,29 @@
     </div>
     <el-alert v-else-if="submission" :closable="false" type="success" class="done-tip"
               :title="submission.status === 'submitted' ? '已提交，等待老师批改' : '本次作业已完成'" />
+    <div v-if="!editable && submission && submission.status === 'submitted' && hw.hw_type !== 'open'"
+         class="wrongbook-tip">
+      <router-link to="/learning/wrong">错题已自动收入错题本（正确答案与归因待批改后可见）→</router-link>
+    </div>
+
+    <!-- v5.4 作业讨论区 -->
+    <el-card class="review-card discuss" shadow="never">
+      <template #header>
+        <span class="review-title"><el-icon><ChatDotRound /></el-icon> 作业讨论区</span>
+      </template>
+      <HomeworkDiscussion :homework-id="hwId" />
+    </el-card>
   </div>
 </template>
 
 <script setup>
 import { ref, reactive, computed, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
-import { Back } from '@element-plus/icons-vue'
+import { Back, ChatLineSquare, ChatDotRound, MagicStick, UserFilled } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import request from '../utils/request'
+import AiReviewContent from '../components/AiReviewContent.vue'
+import HomeworkDiscussion from '../components/HomeworkDiscussion.vue'
 
 const route = useRoute()
 const hwId = route.params.id
@@ -121,6 +178,10 @@ const attachment = ref(null)
 const pickedFile = ref(null)
 const submission = ref(null)
 const scoreMap = reactive({})      // question_id -> 学生可见得分（ graded 后）
+const classReview = ref(null)      // 班级讲评（教师发布后）
+const personalReview = ref(null)   // 单份 AI 讲评（批改后）
+const peerReview = ref(null)       // 生生互评结果（批改后匿名）
+const myGroup = ref(null)          // 小组作业：本人所在小组
 
 const typeName = (t) => ({ single_choice: '单选', multiple_choice: '多选', true_false: '判断',
   fill_blank: '填空', programming: '编程', short_answer: '简答', essay: '论述' }[t] || t)
@@ -168,7 +229,8 @@ const load = async () => {
       attachment.value = d.attachment || null
     }
     submission.value = d.submission || null
-    if (submission.value && submission.value.status === 'graded') await loadResult()
+    myGroup.value = d.my_group || null
+    if (submission.value) await loadResult()
   } finally {
     loading.value = false
   }
@@ -178,9 +240,14 @@ const loadResult = async () => {
   const res = await request.get(`/api/homeworks/${hwId}/result`)
   const d = res.data
   submission.value = d.submission
-  ;(d.answers || []).forEach(a => {
-    if (a.auto_score != null) scoreMap[a.question_id] = a.auto_score
-  })
+  classReview.value = d.class_review || null
+  personalReview.value = d.ai_review || null
+  peerReview.value = d.peer_review || null
+  if (submission.value.status === 'graded') {
+    ;(d.answers || []).forEach(a => {
+      if (a.auto_score != null) scoreMap[a.question_id] = a.auto_score
+    })
+  }
 }
 
 const saveDraft = async () => {
@@ -241,6 +308,23 @@ onMounted(load)
 .big { font-size: 32px; font-weight: 700; color: #67c23a; }
 .of { font-size: 16px; color: #909399; }
 .teacher-comment { margin-top: 8px; color: #606266; }
+.wrongbook-tip { margin-top: 8px; font-size: 13px; }
+.wrongbook-tip a { color: var(--el-color-primary); text-decoration: none; }
+.wrongbook-tip a:hover { text-decoration: underline; }
+.review-card { margin-bottom: 16px; border-color: rgba(99, 102, 241, 0.2); }
+.review-card.personal { border-color: rgba(6, 182, 212, 0.24); }
+.review-card.peer { border-color: rgba(245, 158, 11, 0.26); }
+.review-card.discuss { border-color: rgba(139, 92, 246, 0.2); }
+.review-title { display: flex; align-items: center; gap: 6px; font-weight: 600; color: #4b5563; }
+.review-title .el-icon { color: #6366f1; }
+.review-card.personal .review-title .el-icon { color: #06b6d4; }
+.review-card.peer .review-title .el-icon { color: #f59e0b; }
+.review-card.discuss .review-title .el-icon { color: #8b5cf6; }
+.peer-avg { display: flex; align-items: baseline; gap: 8px; margin-bottom: 10px; }
+.peer-score { font-size: 28px; font-weight: 700; color: #f59e0b; }
+.peer-comment { background: #fffbeb; border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; }
+.peer-comment-head { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #92400e; margin-bottom: 4px; }
+.peer-comment-body { color: #4b5563; line-height: 1.6; white-space: pre-wrap; }
 .label { font-weight: 600; margin-bottom: 8px; display: block; }
 .open-area { margin-top: 8px; }
 .attach-row { margin-top: 12px; display: flex; align-items: center; gap: 10px; }

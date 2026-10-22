@@ -24,6 +24,7 @@
         <el-option label="考试" value="exam" />
         <el-option label="竞赛" value="competition" />
         <el-option label="练习" value="practice" />
+        <el-option label="作业" value="homework" />
       </el-select>
       <el-button type="primary" @click="refresh">刷新</el-button>
       <el-button @click="startPractice">重做错题练习</el-button>
@@ -44,6 +45,10 @@
         <el-tag :type="sourceTagType(rec.source_type)" size="small">
           {{ sourceLabel(rec.source_type) }}
         </el-tag>
+        <router-link v-if="rec.source_type === 'homework' && rec.source_id"
+                     :to="`/homeworks/${rec.source_id}/take`" class="source-link">
+          《{{ rec.source_title || '查看原作业' }}》
+        </router-link>
         <el-tag v-if="rec.question_type" size="small">{{ typeLabel(rec.question_type) }}</el-tag>
         <el-tag v-if="rec.is_mastered" type="success" size="small">已掌握</el-tag>
         <el-tag v-else type="danger" size="small">待攻克</el-tag>
@@ -69,7 +74,8 @@
         </div>
         <div class="answer-row correct">
           <span class="answer-label">正确答案：</span>
-          <span class="answer-text">{{ rec.correct_answer }}</span>
+          <span v-if="rec.answer_hidden" class="answer-text answer-hidden-tip">暂不可见（该来源仍可重答，截止/批改完成后开放）</span>
+          <span v-else class="answer-text">{{ rec.correct_answer }}</span>
         </div>
       </div>
 
@@ -93,7 +99,9 @@
           <el-button size="small" @click="toggleMastered(rec)">
             {{ rec.is_mastered ? '取消掌握' : '标记已掌握' }}
           </el-button>
-          <el-button size="small" :loading="analyzingId === rec.id" @click="analyzeWrong(rec)">
+          <el-button size="small" :loading="analyzingId === rec.id" :disabled="!!rec.answer_hidden"
+                       :title="rec.answer_hidden ? '该来源仍可重答，归因暂不开放' : ''"
+                       @click="analyzeWrong(rec)">
             {{ rec.ai_analysis ? '重新归因' : 'AI 归因' }}
           </el-button>
           <el-button size="small" type="primary" @click="askAI(rec)">AI 答疑</el-button>
@@ -202,8 +210,8 @@ async function load() {
 
 function refresh() { page.value = 1; load() }
 
-function sourceLabel(t) { return { exam: '考试', competition: '竞赛', practice: '练习' }[t] || t }
-function sourceTagType(t) { return { exam: '', competition: 'warning', practice: 'success' }[t] || '' }
+function sourceLabel(t) { return { exam: '考试', competition: '竞赛', practice: '练习', homework: '作业' }[t] || t }
+function sourceTagType(t) { return { exam: '', competition: 'warning', practice: 'success', homework: 'info' }[t] || '' }
 // v4.6.1 枚举收敛：题型中文名单一来源 frontend/src/utils/enums.js
 import { typeLabel } from '../utils/enums'
 function optionLabel(i) { return String.fromCharCode(65 + i) }
@@ -310,6 +318,12 @@ onMounted(load)
 .wrong-header { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }
 .wrong-count { font-size: 12px; color: var(--text-muted); margin-left: auto; }
 
+.source-link {
+  font-size: 13px; color: var(--primary-color, #409eff); text-decoration: none;
+  max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.source-link:hover { text-decoration: underline; }
+
 .question-content { font-size: 15px; line-height: 1.7; color: var(--text-primary); margin-bottom: 14px; white-space: pre-wrap; }
 
 .options { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
@@ -327,6 +341,7 @@ onMounted(load)
 .answer-row.correct { background: rgba(16,185,129,0.08); }
 .answer-label { color: var(--text-muted); margin-right: 6px; }
 .answer-text { color: var(--text-primary); }
+.answer-hidden-tip { color: var(--text-secondary); font-style: italic; }
 
 .knowledge-row { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
 

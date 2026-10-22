@@ -7,7 +7,13 @@
           {{ hw.hw_type === 'open' ? '开放式' : '题集式' }}
         </el-tag>
       </div>
-      <el-button :icon="Back" @click="$router.push('/homeworks/manage')">返回</el-button>
+      <div class="header-actions">
+        <el-button :icon="ChatDotRound" @click="discDialog = true">讨论区</el-button>
+        <el-button :icon="UserFilled" @click="openPeer">互评管理</el-button>
+        <el-button :icon="DocumentCopy" type="warning" plain @click="openPlagiarism">查重</el-button>
+        <el-button :icon="MagicStick" type="primary" plain @click="openClassReview">班级 AI 讲评</el-button>
+        <el-button :icon="Back" @click="$router.push('/homeworks/manage')">返回</el-button>
+      </div>
     </div>
 
     <div class="summary">
@@ -86,21 +92,237 @@
 
         <div class="label" style="margin-top: 14px">整体评语</div>
         <el-input v-model="overall" type="textarea" :rows="2" />
+
+        <!-- v5.3 单份 AI 讲评 -->
+        <div class="ai-review-head">
+          <span class="label" style="margin: 0">AI 个性化讲评</span>
+          <el-button size="small" :icon="MagicStick" :loading="personalLoading"
+                     :disabled="grade.submission.status !== 'graded'"
+                     @click="generatePersonalReview">
+            {{ personalReview ? '重新生成' : '生成讲评' }}
+          </el-button>
+        </div>
+        <AiReviewContent v-if="personalReview" :content="personalReview.content"
+                         kind="submission" :degraded="personalReview.degraded"
+                         class="personal-review" />
+        <div v-else class="muted small">
+          {{ grade.submission.status === 'graded'
+            ? '可生成针对该学生的个性化讲评（不替代教师评语）'
+            : '批改完成后可生成个性化讲评' }}
+        </div>
+
+        <!-- v5.5 同学互评（匿名） / v5.9 深度互评 -->
+        <div v-if="grade.peer_review" class="peer-block">
+          <div class="label" style="margin: 0">同学互评（匿名，仅作参考）</div>
+          <div class="peer-line">
+            均分 <b>{{ grade.peer_review.avg_score ?? '—' }}</b> / 100 · 共 {{ grade.peer_review.count }} 份
+            <span v-if="grade.peer_review.accepted_count">
+              · 采纳 {{ grade.peer_review.accepted_count }} 份，采纳均分
+              <b>{{ grade.peer_review.accepted_avg_score ?? '—' }}</b>
+            </span>
+            <span v-if="grade.peer_review.rejected_count">
+              · 已驳回 {{ grade.peer_review.rejected_count }} 份
+            </span>
+          </div>
+          <div v-if="grade.peer_review.weighted_contribution != null" class="peer-weight-line">
+            互评加权分 <b>+{{ grade.peer_review.weighted_contribution }}</b>
+            （权重 {{ Math.round((grade.peer_review.weight || 0) * 100) }}%）
+            · 总分视图 <b>{{ grade.peer_review.final_view_score }}</b>
+            <span class="muted small">（不改写官方总分）</span>
+          </div>
+          <div v-for="(c, i) in grade.peer_review.comments" :key="i" class="peer-item">
+            <span class="peer-score">{{ c.score }} 分</span>
+            <el-tag v-if="c.audit_status === 'accepted'" size="small" type="success" effect="plain">
+              已采纳
+            </el-tag>
+            <el-tag v-else-if="c.audit_status === 'rejected'" size="small" type="danger" effect="plain">
+              已驳回
+            </el-tag>
+            {{ c.comment || '（无评语）' }}
+          </div>
+        </div>
       </div>
       <template #footer>
         <el-button v-if="grade && grade.homework.hw_type !== 'open'" :loading="aiLoading" @click="askAi">AI 建议</el-button>
         <el-button type="primary" :loading="saving" @click="submitGrade">保存批改</el-button>
       </template>
     </el-drawer>
+
+    <!-- 班级 AI 讲评 -->
+    <el-dialog v-model="classDialog" title="班级 AI 讲评" width="780px" top="6vh">
+      <div v-if="classLoading" class="center">正在分析班级作答数据…</div>
+      <template v-else-if="classReview">
+        <div class="class-stats">
+          <span>提交 <b>{{ classStats.submitted }}</b> / {{ classStats.total_students }} 人</span>
+          <span v-if="classStats.avg_score != null">平均 <b>{{ classStats.avg_score }}</b> / {{ classStats.max_score }}</span>
+          <span v-if="classStats.avg_ratio != null">平均得分率 <b>{{ Math.round(classStats.avg_ratio * 100) }}%</b></span>
+          <span>已批改 {{ classStats.graded }} 份</span>
+          <el-tag v-if="classReview.published" type="success" size="small">已发布给学生</el-tag>
+          <el-tag v-else type="info" size="small">仅教师可见</el-tag>
+        </div>
+        <div v-if="classStats.weak_questions?.length" class="weak-list">
+          <div class="weak-title">薄弱题目（平均得分率 &lt; 60%）</div>
+          <div v-for="q in classStats.weak_questions" :key="q.question_id" class="weak-item">
+            <span class="weak-q">{{ q.content }}</span>
+            <span class="weak-ratio">{{ Math.round((q.avg_ratio || 0) * 100) }}%</span>
+          </div>
+        </div>
+        <AiReviewContent :content="classReview.content" kind="class"
+                         :degraded="classReview.degraded" />
+      </template>
+      <el-empty v-else description="还没有生成班级讲评，点击下方按钮开始分析" />
+      <template #footer>
+        <el-button :loading="classLoading" :icon="MagicStick" @click="generateClassReview">
+          {{ classReview ? '重新生成' : '生成讲评' }}
+        </el-button>
+        <el-button v-if="classReview" :type="classReview.published ? 'warning' : 'success'"
+                   :loading="publishing" @click="togglePublish">
+          {{ classReview.published ? '撤回发布' : '发布给学生' }}
+        </el-button>
+        <el-button @click="classDialog = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- v5.4 讨论区 -->
+    <el-drawer v-model="discDialog" title="作业讨论区" size="560px">
+      <HomeworkDiscussion :homework-id="hwId" can-moderate />
+    </el-drawer>
+
+    <!-- v5.5 生生互评管理 -->
+    <el-dialog v-model="peerDialog" title="生生互评管理" width="920px" top="5vh">
+      <div class="peer-settings">
+        <div class="setting-item">
+          <span class="label">互评截止时间</span>
+          <el-date-picker v-model="peerDeadline" type="datetime" clearable
+                          value-format="YYYY-MM-DDTHH:mm:ss" placeholder="不设截止"
+                          style="width: 200px" size="small" />
+        </div>
+        <div class="setting-item">
+          <span class="label">互评分权重</span>
+          <el-input-number v-model="peerWeightPercent" :min="0" :max="100" :step="5"
+                           size="small" />
+          <span class="muted small">%（0=仅参考，不计入总分视图）</span>
+        </div>
+        <el-button type="primary" size="small" :loading="peerSaving" @click="savePeerSettings">
+          保存设置
+        </el-button>
+      </div>
+      <div class="peer-toolbar">
+        <span class="label" style="margin: 0">每份作业分配互评人数</span>
+        <el-input-number v-model="peerPer" :min="1" :max="5" size="small" />
+        <el-button type="primary" size="small" :loading="peerDistributing" @click="distributePeer">
+          生成 / 重新分配
+        </el-button>
+        <span class="muted small">重新分配会清空未完成的任务，已提交的互评保留</span>
+      </div>
+      <div v-if="peerSummary" class="peer-stats">
+        <span>互评任务 <b>{{ peerSummary.total }}</b></span>
+        <span>已完成 <b>{{ peerSummary.submitted }}</b></span>
+        <span>完成率 <b>{{ peerSummary.completion_rate }}%</b></span>
+        <span>已采纳 <b>{{ peerSummary.accepted }}</b></span>
+        <span>已驳回 <b>{{ peerSummary.rejected }}</b></span>
+        <span>待审核 <b>{{ peerSummary.pending_audit }}</b></span>
+        <span v-if="peerSummary.deadline">截止 {{ fmt(peerSummary.deadline) }}</span>
+      </div>
+      <el-table :data="peerSummary?.per_submission || []" size="small" max-height="240" stripe>
+        <el-table-column prop="username" label="学生" width="130" />
+        <el-table-column label="互评进度" width="100">
+          <template #default="{ row }">{{ row.submitted_count }} / {{ row.review_count }}</template>
+        </el-table-column>
+        <el-table-column label="互评均分" width="100">
+          <template #default="{ row }">{{ row.avg_score ?? '—' }}</template>
+        </el-table-column>
+        <el-table-column label="采纳均分" width="100">
+          <template #default="{ row }">{{ row.accepted_avg_score ?? '—' }}</template>
+        </el-table-column>
+        <el-table-column label="互评加权分" width="110">
+          <template #default="{ row }">{{ row.peer_weighted_score ?? '—' }}</template>
+        </el-table-column>
+        <el-table-column label="提交状态" width="90">
+          <template #default="{ row }">{{ statusText(row.submission_status) }}</template>
+        </el-table-column>
+      </el-table>
+      <div class="label" style="margin-top: 14px">评审人进度</div>
+      <el-table :data="peerSummary?.reviewers || []" size="small" max-height="180" stripe>
+        <el-table-column prop="username" label="学生" width="130" />
+        <el-table-column prop="assigned" label="分配" width="70" />
+        <el-table-column prop="submitted" label="完成" width="70" />
+        <el-table-column prop="pending" label="待完成" width="80" />
+        <el-table-column prop="accepted" label="被采纳" width="80" />
+        <el-table-column prop="rejected" label="被驳回" />
+      </el-table>
+
+      <div class="label" style="margin-top: 14px">互评审核（采纳后计入加权分）</div>
+      <el-table :data="peerSummary?.reviews || []" size="small" max-height="240" stripe>
+        <el-table-column prop="student_name" label="被评学生" width="120" />
+        <el-table-column prop="reviewer_name" label="评审人" width="120" />
+        <el-table-column label="维度分" min-width="200">
+          <template #default="{ row }">
+            <span class="muted small">{{ dimsText(row.scores) }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="加权总分" width="95">
+          <template #default="{ row }">{{ row.score ?? '—' }}</template>
+        </el-table-column>
+        <el-table-column label="审核" width="90">
+          <template #default="{ row }">
+            <el-tag size="small" :type="auditTag(row.audit_status)">
+              {{ auditText(row.audit_status) }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="130" fixed="right">
+          <template #default="{ row }">
+            <el-button link type="success" size="small" :disabled="row.audit_status === 'accepted'"
+                       @click="auditPeer(row, 'accept')">采纳</el-button>
+            <el-button link type="danger" size="small" :disabled="row.audit_status === 'rejected'"
+                       @click="auditPeer(row, 'reject')">驳回</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+      <template #footer>
+        <el-button @click="peerDialog = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- v5.6 作业反抄袭 -->
+    <el-dialog v-model="plagDialog" title="作业查重（相似对）" width="720px" top="6vh">
+      <div class="plag-toolbar">
+        <span class="hint">阈值</span>
+        <el-input-number v-model="plagThreshold" :min="0.1" :max="1" :step="0.05" :precision="2" size="small" controls-position="right" style="width: 120px" />
+        <el-button size="small" type="primary" :loading="plagLoading" @click="loadPlagiarism">重新检测</el-button>
+        <span class="hint">扫描 {{ plagResult.scanned || 0 }} 份，高相似对 {{ plagResult.pair_count || 0 }}</span>
+      </div>
+      <el-empty v-if="!plagLoading && plagResult.pair_count === 0" description="未发现高相似提交对" />
+      <div v-else class="plag-items">
+        <div v-for="(item, idx) in plagResult.items" :key="idx" class="plag-item">
+          <div class="plag-item-head">
+            <el-tag size="small" type="warning">{{ item.hw_type === 'open' ? '开放式正文' : item.question_content }}</el-tag>
+          </div>
+          <div v-for="(p, pi) in item.pairs" :key="pi" class="plag-pair">
+            <span class="plag-user">{{ p.a.username }}</span>
+            <el-icon><Right /></el-icon>
+            <span class="plag-user">{{ p.b.username }}</span>
+            <el-progress :percentage="Math.round(p.similarity * 100)" :stroke-width="10" style="width: 180px; margin: 0 10px" :color="'#f56c6c'" />
+            <el-tag size="small" :type="p.similarity >= 0.9 ? 'danger' : 'warning'">{{ (p.similarity * 100).toFixed(1) }}%</el-tag>
+          </div>
+        </div>
+      </div>
+      <template #footer>
+        <el-button @click="plagDialog = false">关闭</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
-import { EditPen, Back } from '@element-plus/icons-vue'
-import { ElMessage } from 'element-plus'
+import { EditPen, Back, MagicStick, ChatDotRound, UserFilled, DocumentCopy, Right } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import request from '../utils/request'
+import AiReviewContent from '../components/AiReviewContent.vue'
+import HomeworkDiscussion from '../components/HomeworkDiscussion.vue'
 
 const route = useRoute()
 const hwId = route.params.id
@@ -118,8 +340,38 @@ const current = ref(null)
 const overall = ref('')
 const openScore = ref(0)
 const openMax = ref(100)
+// v5.3 AI 讲评
+const classDialog = ref(false)
+const classLoading = ref(false)
+const classReview = ref(null)
+const publishing = ref(false)
+const personalReview = ref(null)
+const personalLoading = ref(false)
+const classStats = computed(() => classReview.value?.stats || {})
+// v5.4 讨论区 / v5.5 生生互评
+const discDialog = ref(false)
+const peerDialog = ref(false)
+const peerDistributing = ref(false)
+const peerPer = ref(2)
+const peerSummary = ref(null)
+const peerDeadline = ref(null)
+const peerWeightPercent = ref(0)
+const peerSaving = ref(false)
+// v5.6 反抄袭
+const plagDialog = ref(false)
+const plagLoading = ref(false)
+const plagThreshold = ref(0.7)
+const plagResult = ref({ scanned: 0, pair_count: 0, items: [] })
 
+const fmt = (v) => (v || '').slice(0, 16).replace('T', ' ')
 const statusText = (s) => ({ submitted: '待批改', graded: '已批改' }[s] || s)
+const auditText = (s) => ({ accepted: '已采纳', rejected: '已驳回' }[s] || '待审核')
+const auditTag = (s) => ({ accepted: 'success', rejected: 'danger' }[s] || 'info')
+const dimsText = (scores) => {
+  if (!scores || !Object.keys(scores).length) return '—'
+  const labels = { accuracy: '准确', completeness: '完整', standard: '规范', innovation: '创造' }
+  return Object.entries(scores).map(([k, v]) => `${labels[k] || k} ${v}`).join(' · ')
+}
 const statusTag = (s) => ({ submitted: 'warning', graded: 'success' }[s] || 'info')
 const typeName = (t) => ({ single_choice: '单选', multiple_choice: '多选', true_false: '判断',
   fill_blank: '填空', programming: '编程', short_answer: '简答', essay: '论述' }[t] || t)
@@ -141,12 +393,14 @@ const openGrade = async (row) => {
   loading.value = true
   grade.value = null
   rows.value = []
+  personalReview.value = null
   try {
     const res = await request.get(`/api/homeworks/${hwId}/grade/${row.id}`)
     grade.value = res.data
     overall.value = res.data.submission.comment || ''
     openScore.value = res.data.submission.total_score || 0
     openMax.value = res.data.submission.max_score || 100
+    personalReview.value = res.data.ai_review || null
     // 题面元数据（content/type/answer）在 questions 里，按 question_id 合并到逐题行
     const qmap = {}
     ;(res.data.questions || []).forEach(q => { qmap[q.question_id] = q })
@@ -180,6 +434,129 @@ const askAi = async () => {
   }
 }
 
+const openClassReview = async () => {
+  classDialog.value = true
+  if (classReview.value) return
+  classLoading.value = true
+  try {
+    const res = await request.get(`/api/homeworks/${hwId}/ai_review`)
+    classReview.value = res.data.review || null
+  } finally {
+    classLoading.value = false
+  }
+}
+
+const generateClassReview = async () => {
+  classLoading.value = true
+  try {
+    const res = await request.post(`/api/homeworks/${hwId}/ai_review`)
+    classReview.value = res.data.review
+    ElMessage.success(res.data.message || '班级讲评已生成')
+  } finally {
+    classLoading.value = false
+  }
+}
+
+const togglePublish = async () => {
+  publishing.value = true
+  try {
+    const res = await request.post(`/api/homeworks/${hwId}/ai_review/publish`,
+      { published: !classReview.value.published })
+    classReview.value = res.data.review
+    ElMessage.success(res.data.message)
+  } finally {
+    publishing.value = false
+  }
+}
+
+const generatePersonalReview = async () => {
+  personalLoading.value = true
+  try {
+    const res = await request.post(
+      `/api/homeworks/${hwId}/grade/${current.value.id}/ai_review`)
+    personalReview.value = res.data.review
+    ElMessage.success(res.data.message || '个性化讲评已生成')
+  } finally {
+    personalLoading.value = false
+  }
+}
+
+const applyPeerSettings = () => {
+  peerDeadline.value = peerSummary.value?.deadline || null
+  peerWeightPercent.value = Math.round((peerSummary.value?.weight || 0) * 100)
+}
+
+const openPeer = async () => {
+  peerDialog.value = true
+  const res = await request.get(`/api/homeworks/${hwId}/peer_reviews`)
+  peerSummary.value = res.data
+  applyPeerSettings()
+}
+
+const savePeerSettings = async () => {
+  peerSaving.value = true
+  try {
+    const res = await request.put(`/api/homeworks/${hwId}/peer_reviews/settings`, {
+      deadline: peerDeadline.value || null,
+      weight: (peerWeightPercent.value || 0) / 100
+    })
+    peerSummary.value = res.data.summary
+    applyPeerSettings()
+    ElMessage.success(res.data.message)
+  } finally {
+    peerSaving.value = false
+  }
+}
+
+const auditPeer = async (row, action) => {
+  let comment = ''
+  if (action === 'reject') {
+    const r = await ElMessageBox.prompt('请填写驳回原因（将通知评审人）', '驳回互评', {
+      inputType: 'textarea', confirmButtonText: '确认驳回', cancelButtonText: '取消',
+      inputPlaceholder: '如：评分明显偏离标准，请说明原因'
+    }).catch(() => null)
+    if (!r) return
+    comment = r.value || ''
+  } else {
+    const ok = await ElMessageBox.confirm('采纳后该互评分将按权重计入「互评加权分」，是否继续？',
+      '采纳互评', { type: 'warning', confirmButtonText: '采纳' }).catch(() => false)
+    if (!ok) return
+  }
+  const res = await request.post(
+    `/api/homeworks/${hwId}/peer_reviews/${row.id}/audit`, { action, comment })
+  peerSummary.value = res.data.summary
+  applyPeerSettings()
+  ElMessage.success(res.data.message)
+}
+
+const distributePeer = async () => {
+  peerDistributing.value = true
+  try {
+    const res = await request.post(`/api/homeworks/${hwId}/peer_reviews/distribute`,
+      { per_submission: peerPer.value })
+    peerSummary.value = res.data.summary
+    ElMessage.success(res.data.message)
+  } finally {
+    peerDistributing.value = false
+  }
+}
+
+const openPlagiarism = async () => {
+  plagDialog.value = true
+  await loadPlagiarism()
+}
+
+const loadPlagiarism = async () => {
+  plagLoading.value = true
+  try {
+    const res = await request.get(`/api/homeworks/${hwId}/plagiarism`,
+      { params: { threshold: plagThreshold.value } })
+    plagResult.value = res.data
+  } finally {
+    plagLoading.value = false
+  }
+}
+
 const submitGrade = async () => {
   saving.value = true
   try {
@@ -209,6 +586,7 @@ onMounted(load)
 <style scoped>
 .page-wrapper { padding: 20px; }
 .page-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.header-actions { display: flex; align-items: center; gap: 8px; }
 .title-icon { vertical-align: middle; margin-right: 6px; color: #6366f1; }
 .summary { margin-bottom: 12px; color: #606266; font-size: 14px; }
 .not-sub { color: #f56c6c; }
@@ -225,5 +603,52 @@ onMounted(load)
 .content-box { background: #f5f7fa; padding: 12px; border-radius: 4px; white-space: pre-wrap; max-height: 240px; overflow: auto; }
 .label { font-weight: 500; margin-bottom: 6px; }
 .attach { margin: 8px 0; }
+.muted { color: #909399; }
+.small { font-size: 12px; line-height: 1.6; }
+.ai-review-head {
+  display: flex; align-items: center; justify-content: space-between;
+  margin: 16px 0 8px; padding-top: 14px; border-top: 1px dashed #ebeef5;
+}
+.personal-review { margin-top: 8px; }
+.peer-block { margin-top: 16px; padding-top: 14px; border-top: 1px dashed #ebeef5; }
+.peer-line { font-size: 13px; color: #606266; margin: 4px 0 8px; }
+.peer-line b { color: #f59e0b; font-size: 16px; }
+.peer-item { font-size: 13px; color: #4b5563; background: #fffbeb; border-radius: 6px; padding: 8px 10px; margin-bottom: 6px; line-height: 1.5; }
+.peer-score { color: #d97706; font-weight: 600; margin-right: 6px; }
+.peer-settings { display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+  padding: 10px 14px; margin-bottom: 10px; border-radius: 10px; border: 1px dashed #dbeafe;
+  background: #f8faff; }
+.setting-item { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #4b5563; }
+.peer-weight-line { font-size: 13px; color: #4f46e5; background: #eef2ff;
+  border-radius: 6px; padding: 8px 10px; margin-bottom: 8px; }
+.peer-weight-line b { color: #4338ca; }
+.peer-toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+.peer-stats {
+  display: flex; flex-wrap: wrap; gap: 16px; align-items: center;
+  padding: 10px 14px; margin-bottom: 12px; border-radius: 10px; font-size: 13px; color: #606266;
+  background: linear-gradient(135deg, rgba(245, 158, 11, 0.08), rgba(139, 92, 246, 0.05));
+}
+.peer-stats b { color: #d97706; font-size: 15px; }
+.class-stats {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 14px;
+  padding: 10px 14px; margin-bottom: 12px; border-radius: 10px;
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.08), rgba(139, 92, 246, 0.05));
+  color: #606266; font-size: 13px;
+}
+.class-stats b { color: #4f46e5; font-size: 15px; }
+.weak-list {
+  margin-bottom: 14px; padding: 10px 14px; border-radius: 10px;
+  background: rgba(245, 108, 108, 0.05); border: 1px solid rgba(245, 108, 108, 0.14);
+}
+.weak-title { font-size: 13px; font-weight: 600; color: #b91c1c; margin-bottom: 8px; }
+.weak-item { display: flex; justify-content: space-between; gap: 12px; font-size: 13px; padding: 4px 0; color: #606266; }
+.weak-q { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.weak-ratio { flex-shrink: 0; font-weight: 600; color: #f56c6c; }
+.plag-toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
+.plag-items { display: flex; flex-direction: column; gap: 14px; }
+.plag-item { padding: 12px 14px; border-radius: 10px; background: rgba(245, 108, 108, 0.04); border: 1px solid rgba(245, 108, 108, 0.14); }
+.plag-item-head { margin-bottom: 8px; }
+.plag-pair { display: flex; align-items: center; gap: 6px; padding: 4px 0; font-size: 13px; }
+.plag-user { font-weight: 600; color: #303133; min-width: 70px; }
 :deep(.el-table__row) { cursor: pointer; }
 </style>

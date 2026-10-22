@@ -96,6 +96,7 @@ const routes = [
       { path: 'homeworks/manage', name: 'HomeworkManage', component: () => import('../views/HomeworkManage.vue'), meta: { module: 'homework', requiresTeacher: true } },
       { path: 'homeworks/:id/grade', name: 'HomeworkGrade', component: () => import('../views/HomeworkGrade.vue'), meta: { module: 'homework', requiresTeacher: true } },
       { path: 'homeworks/my', name: 'HomeworkStudent', component: () => import('../views/HomeworkStudent.vue'), meta: { module: 'homework', requiresStudent: true } },
+      { path: 'homeworks/peer-reviews', name: 'PeerReviewCenter', component: () => import('../views/PeerReviewCenter.vue'), meta: { module: 'homework', requiresStudent: true } },
       { path: 'homeworks/:id/take', name: 'HomeworkTake', component: () => import('../views/HomeworkTake.vue'), meta: { module: 'homework', requiresStudent: true } },
     ]
   },

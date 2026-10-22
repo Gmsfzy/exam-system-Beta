@@ -4,9 +4,18 @@
       <div class="header-title">
         <h2><el-icon :size="24" class="title-icon"><Notebook /></el-icon> 作业管理</h2>
       </div>
-      <el-button type="primary" :icon="Plus" @click="openCreate">新建作业</el-button>
+      <el-button v-if="view === 'hw'" type="primary" :icon="Plus" @click="openCreate">新建作业</el-button>
+      <el-button v-else-if="view === 'tpl'" type="primary" :icon="Plus" @click="openTplCreate">新建模板</el-button>
+      <el-button v-else type="primary" :icon="Plus" @click="openSeriesCreate">新建系列</el-button>
     </div>
 
+    <el-radio-group v-model="view" style="margin-bottom: 12px">
+      <el-radio-button label="hw">作业</el-radio-button>
+      <el-radio-button label="tpl">模板</el-radio-button>
+      <el-radio-button label="series">系列</el-radio-button>
+    </el-radio-group>
+
+    <template v-if="view === 'hw'">
     <el-tabs v-model="tab" @tab-change="load">
       <el-tab-pane label="全部" name="all" />
       <el-tab-pane label="草稿" name="draft" />
@@ -60,6 +69,94 @@
         </template>
       </el-table-column>
     </el-table>
+    </template>
+
+    <!-- 模板 / 系列筛选 -->
+    <div v-if="view !== 'hw'" class="list-toolbar">
+      <el-input v-model="viewKeyword" placeholder="按名称搜索" clearable :prefix-icon="Search"
+                style="width: 240px" />
+      <span class="hint">共 {{ view === 'tpl' ? filteredTemplates.length : filteredSeries.length }} 条</span>
+    </div>
+
+    <!-- 模板列表 -->
+    <template v-else-if="view === 'tpl'">
+      <el-skeleton v-if="tplLoading" :rows="5" animated style="padding: 12px" />
+      <el-empty v-else-if="!filteredTemplates.length"
+                :description="viewKeyword ? '没有匹配的模板' : '还没有模板，点击右上角新建'" />
+      <template v-else>
+        <el-table :data="pagedTemplates" stripe>
+          <el-table-column prop="title" label="模板名称" min-width="160" />
+          <el-table-column label="筛选" min-width="160">
+            <template #default="{ row }">
+              <span class="muted small">{{ tplFilterText(row) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="题量 / 难度分布" width="220">
+            <template #default="{ row }">
+              <div class="dist-cell">
+                <span>{{ tplTotal(row) }} 题</span>
+                <div class="dist-bars">
+                  <span v-for="(n, d) in tplDistribution(row)" :key="d" class="dist-seg"
+                        :class="'d-' + d" :style="{ flex: n }" :title="`${difficultyLabel(d)} ${n} 题`" />
+                </div>
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column label="默认分值" width="90" align="center">
+            <template #default="{ row }">{{ row.config?.default_score ?? 5 }}</template>
+          </el-table-column>
+          <el-table-column label="操作" width="280" align="center">
+            <template #default="{ row }">
+              <el-button size="small" @click="openTplEdit(row)">编辑</el-button>
+              <el-button size="small" type="success" :loading="generatingId === row.id"
+                         @click="genFromTpl(row)">生成作业</el-button>
+              <el-button size="small" type="danger" text @click="delTpl(row)">删除</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+        <el-pagination v-if="filteredTemplates.length > pageSize" v-model:current-page="page"
+                       :page-size="pageSize" :total="filteredTemplates.length"
+                       layout="prev, pager, next" style="margin-top: 12px; justify-content: flex-end" />
+      </template>
+    </template>
+
+    <!-- 系列列表 -->
+    <template v-else>
+      <el-skeleton v-if="seriesLoading" :rows="4" animated style="padding: 12px" />
+      <el-empty v-else-if="!filteredSeries.length"
+                :description="viewKeyword ? '没有匹配的系列' : '还没有系列，点击右上角新建'" />
+      <template v-else>
+        <el-table :data="pagedSeries" stripe>
+          <el-table-column prop="title" label="系列名称" min-width="160" />
+          <el-table-column label="进度" width="150" align="center">
+            <template #default="{ row }">
+              <el-progress :percentage="Math.round(row.generated_count / row.count * 100)"
+                           :stroke-width="8" />
+              <span class="muted small">{{ row.generated_count }} / {{ row.count }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="状态" width="90" align="center">
+            <template #default="{ row }">
+              <el-tag size="small" :type="seriesStatusTag(row.status)">{{ seriesStatusText(row.status) }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="首次发布" width="150">
+            <template #default="{ row }">{{ (row.start_at || '').slice(0, 16) }}</template>
+          </el-table-column>
+          <el-table-column label="操作" width="330" align="center">
+            <template #default="{ row }">
+              <el-button size="small" @click="openTimeline(row)">时间轴</el-button>
+              <el-button size="small" type="success" :disabled="row.status === 'active' || row.status === 'completed'" @click="startSeries(row)">启动</el-button>
+              <el-button size="small" :disabled="row.generated_count >= row.count" @click="genNow(row)">立即生成下一份</el-button>
+              <el-button size="small" type="danger" text @click="delSeries(row)">停止</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+        <el-pagination v-if="filteredSeries.length > pageSize" v-model:current-page="page"
+                       :page-size="pageSize" :total="filteredSeries.length"
+                       layout="prev, pager, next" style="margin-top: 12px; justify-content: flex-end" />
+      </template>
+    </template>
 
     <!-- 创建/编辑对话框 -->
     <el-dialog v-model="dialog" :title="form.id ? '编辑作业' : '新建作业'" width="760px" top="6vh">
@@ -72,6 +169,10 @@
             <el-radio-button value="question_set">题集式</el-radio-button>
             <el-radio-button value="open">开放式</el-radio-button>
           </el-radio-group>
+        </el-form-item>
+        <el-form-item label="作业模式">
+          <el-switch v-model="form.is_group" active-text="小组作业" inactive-text="个人作业" />
+          <span class="hint">小组作业：组内共用一份提交，一人提交全组得分</span>
         </el-form-item>
         <el-form-item label="说明">
           <el-input v-model="form.description" type="textarea" :rows="3" placeholder="作业说明（开放式必填）" />
@@ -117,7 +218,7 @@
                   <el-option v-for="m in majors" :key="m.id" :label="m.name" :value="m.id" />
                 </el-select>
                 <el-select v-model="randDifficulty" placeholder="难度" clearable size="small" style="width: 96px">
-                  <el-option v-for="d in DIFFICULTY_OPTIONS" :key="d" :label="difficultyLabel(d)" :value="d" />
+                  <el-option v-for="d in DIFFICULTY_OPTIONS" :key="d.value" :label="d.label" :value="d.value" />
                 </el-select>
                 <el-input-number v-model="randCount" :min="1" :max="50" size="small" controls-position="right" style="width: 92px" />
                 <el-button size="small" :icon="MagicStick" @click="randomPick">随机抽题</el-button>
@@ -140,10 +241,22 @@
           </div>
         </el-form-item>
 
-        <el-form-item label="发布名单">
+        <el-form-item v-if="!form.is_group" label="发布名单">
           <el-select v-model="form.student_ids" multiple filterable placeholder="选择学生" style="width: 100%">
             <el-option v-for="s in students" :key="s.id" :label="s.username" :value="s.id" />
           </el-select>
+        </el-form-item>
+        <el-form-item v-else label="小组名单">
+          <div class="group-builder">
+            <div v-for="(g, gi) in form.groups" :key="gi" class="group-row">
+              <el-input v-model="g.name" placeholder="小组名称" style="width: 140px" />
+              <el-select v-model="g.student_ids" multiple filterable placeholder="选择组员" style="flex:1">
+                <el-option v-for="s in students" :key="s.id" :label="s.username" :value="s.id" />
+              </el-select>
+              <el-button size="small" text type="danger" :icon="Delete" @click="form.groups.splice(gi, 1)" />
+            </div>
+            <el-button size="small" :icon="Plus" @click="form.groups.push({ name: '', student_ids: [] })">添加小组</el-button>
+          </div>
         </el-form-item>
       </el-form>
       <template #footer>
@@ -171,12 +284,185 @@
         <el-button type="primary" :icon="Download" @click="doExportStats">导出成绩</el-button>
       </template>
     </el-dialog>
+
+    <!-- 模板对话框 -->
+    <el-dialog v-model="tplDialog" :title="tplForm.id ? '编辑模板' : '新建模板'" width="680px" top="6vh">
+      <el-form :model="tplForm" label-width="100px">
+        <el-form-item label="模板名称" required>
+          <el-input v-model="tplForm.title" maxlength="200" placeholder="如：高数周练" />
+        </el-form-item>
+        <el-form-item label="说明">
+          <el-input v-model="tplForm.description" type="textarea" :rows="2" />
+        </el-form-item>
+        <el-form-item label="专业" required>
+          <el-select v-model="tplForm.major_id" filterable placeholder="必选，决定题库范围"
+                     @change="onTplMajorChange" style="width: 100%">
+            <el-option v-for="m in majors" :key="m.id" :label="m.name" :value="m.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="课程 / 章节">
+          <div class="cascade-row">
+            <el-select v-model="tplForm.course_id" clearable filterable placeholder="全部课程"
+                       :disabled="!tplForm.major_id" @change="onTplCourseChange">
+              <el-option v-for="c in tplCourses" :key="c.id" :label="c.name" :value="c.id" />
+            </el-select>
+            <el-select v-model="tplForm.chapter_id" clearable filterable placeholder="全部章节"
+                       :disabled="!tplForm.course_id">
+              <el-option v-for="c in tplChapters" :key="c.id" :label="c.name" :value="c.id" />
+            </el-select>
+          </div>
+          <span class="hint">按专业 → 课程 → 章节逐级缩小抽题范围</span>
+        </el-form-item>
+        <el-form-item label="题型">
+          <el-select v-model="tplForm.types" multiple collapse-tags placeholder="不选=全部">
+            <el-option label="单选" value="single_choice" /><el-option label="多选" value="multiple_choice" />
+            <el-option label="判断" value="true_false" /><el-option label="填空" value="fill_blank" />
+            <el-option label="简答" value="short_answer" /><el-option label="编程" value="programming" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="难度">
+          <el-select v-model="tplForm.difficulty" clearable placeholder="不选=全部"
+                     :disabled="tplForm.useDistribution">
+            <el-option v-for="d in DIFFICULTY_OPTIONS" :key="d.value" :label="d.label" :value="d.value" />
+          </el-select>
+          <span class="hint">启用下方难度分布后，此单项难度不生效</span>
+        </el-form-item>
+        <el-form-item label="难度分布">
+          <el-switch v-model="tplForm.useDistribution" active-text="按分布抽题" />
+        </el-form-item>
+        <el-form-item v-if="tplForm.useDistribution" label="各难度题数">
+          <div class="dist-editor">
+            <div v-for="d in DIFFICULTY_OPTIONS" :key="d.value" class="dist-row">
+              <span class="dist-name">{{ d.label }}</span>
+              <el-input-number v-model="tplForm.distribution[d.value]" :min="0" :max="50" size="small"
+                               controls-position="right" />
+              <div class="dist-preview">
+                <div class="dist-seg" :class="'d-' + d.value"
+                     :style="{ width: distPercent(d.value) + '%' }" />
+              </div>
+            </div>
+            <div class="hint">合计 {{ distributionTotal }} 题
+              <span v-if="!distributionTotal" class="error-text">· 请至少给一个难度分配题数</span>
+            </div>
+          </div>
+        </el-form-item>
+        <el-form-item v-else label="题量" required>
+          <el-input-number v-model="tplForm.count" :min="1" :max="50" />
+        </el-form-item>
+        <el-form-item label="默认分值">
+          <el-input-number v-model="tplForm.default_score" :min="1" :max="100" />
+        </el-form-item>
+        <el-form-item label="发布名单">
+          <el-select v-model="tplForm.roster" multiple filterable placeholder="选择学生">
+            <el-option v-for="s in students" :key="s.id" :label="s.username" :value="s.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="截止(小时)">
+          <el-input-number v-model="tplForm.deadline_hours" :min="0" placeholder="0=不设" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button :loading="previewLoading" :disabled="!tplForm.major_id"
+                   @click="previewTpl">预览抽题</el-button>
+        <el-button @click="tplDialog = false">取消</el-button>
+        <el-button type="primary" :loading="tplSaving" @click="saveTpl">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 抽题预览 -->
+    <el-dialog v-model="previewDialog" title="抽题预览（不落库）" width="720px" top="8vh">
+      <el-skeleton v-if="previewLoading" :rows="5" animated />
+      <template v-else-if="previewResult">
+        <div class="preview-stats">
+          <el-tag effect="plain">题库可用 {{ previewResult.pool_total }} 题</el-tag>
+          <el-tag type="success" effect="plain">本次抽中 {{ previewResult.picked_total }} 题</el-tag>
+          <el-tag v-for="(n, d) in previewResult.available" :key="d" size="small" effect="plain">
+            {{ difficultyLabel(d) }}池 {{ n }}
+          </el-tag>
+        </div>
+        <div class="dist-bars preview-bars">
+          <span v-for="(n, d) in previewResult.picked_counts" :key="d" class="dist-seg"
+                :class="'d-' + d" :style="{ flex: n }"
+                :title="`${difficultyLabel(d)} ${n} 题`" />
+        </div>
+        <el-table :data="previewResult.questions" size="small" max-height="360" stripe>
+          <el-table-column type="index" width="50" />
+          <el-table-column prop="content" label="题干" min-width="260" show-overflow-tooltip />
+          <el-table-column label="难度" width="80">
+            <template #default="{ row }">{{ difficultyLabel(row.difficulty) }}</template>
+          </el-table-column>
+          <el-table-column prop="score" label="分值" width="70" />
+        </el-table>
+      </template>
+      <el-empty v-else description="点击「预览抽题」查看命中题目" />
+      <template #footer>
+        <el-button @click="previewDialog = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 系列对话框 -->
+    <el-dialog v-model="seriesDialog" title="新建作业系列" width="520px" top="10vh">
+      <el-form :model="seriesForm" label-width="100px">
+        <el-form-item label="选择模板" required>
+          <el-select v-model="seriesForm.template_id" filterable placeholder="从已有模板选择">
+            <el-option v-for="t in templates" :key="t.id" :label="t.title" :value="t.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="系列名称">
+          <el-input v-model="seriesForm.title" maxlength="200" />
+        </el-form-item>
+        <el-form-item label="首次发布" required>
+          <el-date-picker v-model="seriesForm.start_at" type="datetime" placeholder="首次发布时间" style="width:100%" />
+        </el-form-item>
+        <el-form-item label="份数">
+          <el-input-number v-model="seriesForm.count" :min="1" :max="30" />
+        </el-form-item>
+        <el-form-item label="间隔(小时)">
+          <el-input-number v-model="seriesForm.interval_hours" :min="1" />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="seriesDialog = false">取消</el-button>
+        <el-button type="primary" :loading="seriesSaving" @click="saveSeries">创建</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 系列时间轴 -->
+    <el-dialog v-model="timelineDialog" :title="`系列时间轴：${timeline?.title || ''}`"
+               width="620px" top="8vh">
+      <el-skeleton v-if="timelineLoading" :rows="5" animated />
+      <template v-else-if="timeline">
+        <div class="timeline-summary">
+          <span>模板：{{ timeline.template_title || '—' }}</span>
+          <span>共 {{ timeline.count }} 份 · 每 {{ timeline.interval_hours }} 小时一份</span>
+        </div>
+        <el-timeline>
+          <el-timeline-item v-for="p in timelinePoints" :key="p.index"
+                            :timestamp="p.planned" placement="top"
+                            :type="p.generated ? 'success' : (p.overdue ? 'warning' : 'info')">
+            <div class="tl-title">
+              第 {{ p.index + 1 }} 份
+              <el-tag v-if="p.generated" size="small" type="success">已生成</el-tag>
+              <el-tag v-else-if="p.overdue" size="small" type="warning">已到期待生成</el-tag>
+              <el-tag v-else size="small" type="info">计划中</el-tag>
+            </div>
+            <div class="muted small" v-if="p.generated">
+              {{ p.generated.title }} · {{ p.generated.status }}
+            </div>
+          </el-timeline-item>
+        </el-timeline>
+      </template>
+      <el-empty v-else description="暂无时间轴数据" />
+      <template #footer>
+        <el-button @click="timelineDialog = false">关闭</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted } from 'vue'
-import { Notebook, Plus, Delete, ArrowDown, Upload, MagicStick, Download } from '@element-plus/icons-vue'
+import { ref, reactive, computed, onMounted, watch } from 'vue'
+import { Notebook, Plus, Delete, ArrowDown, Upload, MagicStick, Download, Search } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import request from '../utils/request'
 import { DIFFICULTY_OPTIONS, difficultyLabel } from '../utils/enums'
@@ -197,10 +483,320 @@ const stats = ref({})
 const statsHomework = ref('')
 const statsId = ref(null)
 
+// v5.8 模板与系列
+const view = ref('hw')
+const templates = ref([])
+const seriesList = ref([])
+const tplDialog = ref(false)
+const tplSaving = ref(false)
+const tplLoading = ref(false)
+const generatingId = ref(null)
+const tplCourses = ref([])
+const tplChapters = ref([])
+const tplForm = reactive({
+  id: null, title: '', description: '', major_id: null, course_id: null, chapter_id: null,
+  types: [], difficulty: '', useDistribution: false,
+  distribution: { easy: 0, medium: 0, hard: 0 },
+  count: 5, default_score: 5, roster: [], deadline_hours: 0
+})
+const previewDialog = ref(false)
+const previewLoading = ref(false)
+const previewResult = ref(null)
+const seriesLoading = ref(false)
+const viewKeyword = ref('')
+const page = ref(1)
+const pageSize = 8
+const timelineDialog = ref(false)
+const timelineLoading = ref(false)
+const timeline = ref(null)
+const seriesDialog = ref(false)
+const seriesSaving = ref(false)
+const seriesForm = reactive({ template_id: null, title: '', start_at: null, count: 5, interval_hours: 24 })
+
+const seriesStatusText = (s) => ({ draft: '草稿', active: '进行中', completed: '已完成', paused: '已暂停' }[s] || s)
+const seriesStatusTag = (s) => ({ draft: 'info', active: 'success', completed: '', paused: 'warning' }[s] || 'info')
+
+const filteredTemplates = computed(() => {
+  const kw = viewKeyword.value.trim()
+  return kw ? templates.value.filter(t => (t.title || '').includes(kw)) : templates.value
+})
+const filteredSeries = computed(() => {
+  const kw = viewKeyword.value.trim()
+  return kw ? seriesList.value.filter(s => (s.title || '').includes(kw)) : seriesList.value
+})
+const pagedTemplates = computed(() =>
+  filteredTemplates.value.slice((page.value - 1) * pageSize, page.value * pageSize))
+const pagedSeries = computed(() =>
+  filteredSeries.value.slice((page.value - 1) * pageSize, page.value * pageSize))
+
+const distributionTotal = computed(() =>
+  Object.values(tplForm.distribution).reduce((s, n) => s + (Number(n) || 0), 0))
+const distPercent = (d) => {
+  const total = distributionTotal.value
+  return total ? Math.round((Number(tplForm.distribution[d]) || 0) / total * 100) : 0
+}
+
+const tplDistribution = (row) => {
+  const c = row.config || {}
+  if (Array.isArray(c.distribution) && c.distribution.length) {
+    const out = {}
+    c.distribution.forEach(s => { out[s.difficulty] = (out[s.difficulty] || 0) + (s.count || 0) })
+    return out
+  }
+  const f = c.filters || {}
+  if (f.difficulty) return { [f.difficulty]: c.count || 0 }
+  return { easy: 1, medium: 1, hard: 1 }
+}
+const tplTotal = (row) => {
+  const dist = tplDistribution(row)
+  const sum = Object.values(dist).reduce((s, n) => s + n, 0)
+  return (row.config || {}).count || sum
+}
+const tplFilterText = (row) => {
+  const f = (row.config || {}).filters || {}
+  const major = majors.value.find(m => m.id === f.major_id)
+  return [major?.name || '全部专业',
+    f.course_id ? `课程#${f.course_id}` : '',
+    f.chapter_id ? `章节#${f.chapter_id}` : '',
+    (f.types || []).length ? `${f.types.length} 种题型` : ''].filter(Boolean).join(' / ')
+}
+
+const loadTemplates = async () => {
+  tplLoading.value = true
+  try {
+    const res = await request.get('/api/homeworks/templates')
+    templates.value = res.data.items || []
+    if (page.value > Math.max(1, Math.ceil(filteredTemplates.value.length / pageSize))) page.value = 1
+  } finally {
+    tplLoading.value = false
+  }
+}
+const loadSeries = async () => {
+  seriesLoading.value = true
+  try {
+    const res = await request.get('/api/homeworks/series')
+    seriesList.value = res.data.items || []
+  } finally {
+    seriesLoading.value = false
+  }
+}
+
+const loadTplCourses = async (majorId) => {
+  tplCourses.value = []
+  tplChapters.value = []
+  if (!majorId) return
+  const res = await request.get('/api/courses', { params: { major_id: majorId } })
+  tplCourses.value = Array.isArray(res.data) ? res.data : (res.data.items || [])
+}
+const loadTplChapters = async (courseId) => {
+  tplChapters.value = []
+  if (!courseId) return
+  const res = await request.get('/api/chapters', { params: { course_id: courseId } })
+  tplChapters.value = Array.isArray(res.data) ? res.data : (res.data.items || [])
+}
+const onTplMajorChange = (majorId) => {
+  tplForm.course_id = null
+  tplForm.chapter_id = null
+  loadTplCourses(majorId)
+}
+const onTplCourseChange = (courseId) => {
+  tplForm.chapter_id = null
+  loadTplChapters(courseId)
+}
+
+const resetTplForm = () => Object.assign(tplForm, {
+  id: null, title: '', description: '', major_id: null, course_id: null, chapter_id: null,
+  types: [], difficulty: '', useDistribution: false,
+  distribution: { easy: 0, medium: 0, hard: 0 },
+  count: 5, default_score: 5, roster: [], deadline_hours: 0
+})
+const openTplCreate = () => {
+  resetTplForm()
+  tplCourses.value = []
+  tplChapters.value = []
+  tplDialog.value = true
+}
+const openTplEdit = async (row) => {
+  const c = row.config || {}
+  const f = c.filters || {}
+  const dist = { easy: 0, medium: 0, hard: 0 }
+  ;(c.distribution || []).forEach(s => {
+    if (s.difficulty in dist) dist[s.difficulty] = s.count || 0
+  })
+  Object.assign(tplForm, {
+    id: row.id, title: row.title, description: row.description || '',
+    major_id: f.major_id || null, course_id: f.course_id || null,
+    chapter_id: f.chapter_id || null,
+    types: f.types || [], difficulty: f.difficulty || '',
+    useDistribution: Array.isArray(c.distribution) && c.distribution.length > 0,
+    distribution: dist,
+    count: c.count || 5, default_score: c.default_score || 5,
+    roster: row.roster || [], deadline_hours: (row.settings || {}).deadline_hours || 0
+  })
+  tplDialog.value = true
+  await Promise.all([
+    loadTplCourses(tplForm.major_id),
+    tplForm.course_id ? loadTplChapters(tplForm.course_id) : Promise.resolve()
+  ])
+}
+
+const buildTplConfig = () => {
+  const filters = { major_id: tplForm.major_id }
+  if (tplForm.course_id) filters.course_id = tplForm.course_id
+  if (tplForm.chapter_id) filters.chapter_id = tplForm.chapter_id
+  if (tplForm.types.length) filters.types = tplForm.types
+  if (tplForm.difficulty) filters.difficulty = tplForm.difficulty
+  const config = { filters, default_score: tplForm.default_score }
+  if (tplForm.useDistribution) {
+    config.distribution = DIFFICULTY_OPTIONS
+      .map(d => ({ difficulty: d.value, count: Number(tplForm.distribution[d.value]) || 0 }))
+      .filter(s => s.count > 0)
+    config.count = distributionTotal.value
+  } else {
+    config.count = tplForm.count
+  }
+  return config
+}
+
+const previewTpl = async () => {
+  if (!tplForm.major_id) return ElMessage.warning('请先选择专业')
+  if (tplForm.useDistribution && !distributionTotal.value) {
+    return ElMessage.warning('请至少给一个难度分配题数')
+  }
+  previewLoading.value = true
+  previewDialog.value = true
+  try {
+    const res = await request.post('/api/homeworks/templates/preview',
+      { config: buildTplConfig() })
+    previewResult.value = res.data
+    if (!res.data.pool_total) ElMessage.warning(res.data.message || '没有匹配题目')
+  } catch (e) {
+    previewResult.value = null
+  } finally {
+    previewLoading.value = false
+  }
+}
+
+const saveTpl = async () => {
+  if (!tplForm.title.trim()) return ElMessage.warning('请填写模板名称')
+  if (!tplForm.major_id) return ElMessage.warning('请选择专业')
+  if (tplForm.useDistribution && !distributionTotal.value) {
+    return ElMessage.warning('请至少给一个难度分配题数')
+  }
+  tplSaving.value = true
+  try {
+    const payload = {
+      title: tplForm.title, description: tplForm.description,
+      config: buildTplConfig(),
+      settings: { deadline_hours: tplForm.deadline_hours || null },
+      roster: tplForm.roster
+    }
+    if (tplForm.id) {
+      await request.put(`/api/homeworks/templates/${tplForm.id}`, payload)
+      ElMessage.success('已更新')
+    } else {
+      await request.post('/api/homeworks/templates', payload)
+      ElMessage.success('已创建')
+    }
+    tplDialog.value = false
+    loadTemplates()
+  } finally { tplSaving.value = false }
+}
+const genFromTpl = async (row) => {
+  generatingId.value = row.id
+  try {
+    const res = await request.post(`/api/homeworks/templates/${row.id}/generate`)
+    ElMessage.success(res.data.message || '已生成作业草稿')
+  } finally {
+    generatingId.value = null
+  }
+}
+const delTpl = async (row) => {
+  const ok = await ElMessageBox.confirm(`删除模板「${row.title}」？`, '确认', {
+    type: 'warning', confirmButtonText: '删除'
+  }).catch(() => false)
+  if (!ok) return
+  await request.delete(`/api/homeworks/templates/${row.id}`)
+  ElMessage.success('已删除')
+  loadTemplates()
+}
+const openSeriesCreate = () => {
+  Object.assign(seriesForm, { template_id: null, title: '', start_at: null, count: 5, interval_hours: 24 })
+  seriesDialog.value = true
+}
+const saveSeries = async () => {
+  if (!seriesForm.template_id) return ElMessage.warning('请选择模板')
+  if (!seriesForm.start_at) return ElMessage.warning('请指定首次发布时间')
+  seriesSaving.value = true
+  try {
+    await request.post('/api/homeworks/series', {
+      template_id: seriesForm.template_id, title: seriesForm.title,
+      start_at: seriesForm.start_at instanceof Date ? seriesForm.start_at.toISOString() : seriesForm.start_at,
+      count: seriesForm.count, interval_hours: seriesForm.interval_hours
+    })
+    ElMessage.success('系列已创建，启动后到达时间自动生成')
+    seriesDialog.value = false
+    loadSeries()
+  } finally { seriesSaving.value = false }
+}
+const startSeries = async (row) => {
+  await request.post(`/api/homeworks/series/${row.id}/start`)
+  ElMessage.success('已启动')
+  loadSeries()
+}
+const genNow = async (row) => {
+  const res = await request.post(`/api/homeworks/series/${row.id}/generate_now`)
+  ElMessage.success(res.data.message || '已生成')
+  loadSeries()
+}
+const delSeries = async (row) => {
+  const ok = await ElMessageBox.confirm(`停止系列「${row.title}」？已生成的作业保留。`, '确认', {
+    type: 'warning', confirmButtonText: '停止'
+  }).catch(() => false)
+  if (!ok) return
+  await request.delete(`/api/homeworks/series/${row.id}`)
+  ElMessage.success('已停止')
+  loadSeries()
+}
+
+const pad = (n) => String(n).padStart(2, '0')
+const fmtDateTime = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` +
+  `${pad(d.getHours())}:${pad(d.getMinutes())}`
+const timelinePoints = computed(() => {
+  const s = timeline.value
+  if (!s) return []
+  const hws = s.homeworks || []
+  const start = new Date((s.start_at || '').replace(' ', 'T'))
+  return Array.from({ length: s.count }, (_, i) => {
+    const dt = new Date(start.getTime() + i * (s.interval_hours || 24) * 3600000)
+    return { index: i, planned: fmtDateTime(dt), generated: hws[i] || null,
+             overdue: !hws[i] && dt < new Date() }
+  })
+})
+const openTimeline = async (row) => {
+  timeline.value = null
+  timelineDialog.value = true
+  timelineLoading.value = true
+  try {
+    const res = await request.get(`/api/homeworks/series/${row.id}`)
+    timeline.value = res.data.series
+  } finally {
+    timelineLoading.value = false
+  }
+}
+
+watch(view, (v) => {
+  page.value = 1
+  viewKeyword.value = ''
+  if (v === 'tpl') loadTemplates()
+  else if (v === 'series') loadSeries()
+})
+watch(viewKeyword, () => { page.value = 1 })
+
 const form = reactive({
   id: null, title: '', description: '', hw_type: 'question_set', deadline: '', has_deadline: true,
   allow_late: true, allow_resubmit: true, remind_before: 0, pass_score: null, reference: null,
-  questions: [], student_ids: []
+  questions: [], student_ids: [], is_group: false, groups: []
 })
 
 const totalScore = computed(() =>
@@ -231,7 +827,7 @@ const openCreate = () => {
   Object.assign(form, {
     id: null, title: '', description: '', hw_type: 'question_set', deadline: '', has_deadline: true,
     allow_late: true, allow_resubmit: true, remind_before: 0, pass_score: null, reference: null,
-    questions: [], student_ids: []
+    questions: [], student_ids: [], is_group: false, groups: []
   })
   pickMajor.value = null
   questionPool.value = []
@@ -247,7 +843,9 @@ const openEdit = async (row) => {
     allow_late: hw.allow_late, allow_resubmit: hw.allow_resubmit,
     remind_before: hw.remind_before || 0, pass_score: hw.pass_score ?? null, reference: hw.reference || null,
     questions: (hw.questions || []).map(q => ({ question_id: q.question_id, content: q.content, score: q.score })),
-    student_ids: hw.student_ids || []
+    student_ids: hw.student_ids || [],
+    is_group: !!hw.is_group,
+    groups: (hw.groups || []).map(g => ({ name: g.name, student_ids: (g.members || []).map(m => m.student_id) }))
   })
   await loadQuestions()
   dialog.value = true
@@ -277,7 +875,12 @@ const save = async () => {
       title: form.title, description: form.description, hw_type: form.hw_type,
       deadline: form.has_deadline ? form.deadline : '', allow_late: form.allow_late,
       allow_resubmit: form.allow_resubmit, remind_before: form.has_deadline ? form.remind_before : 0,
-      pass_score: form.pass_score, student_ids: form.student_ids
+      pass_score: form.pass_score, is_group: form.is_group
+    }
+    if (form.is_group) {
+      payload.groups = form.groups.map(g => ({ name: g.name, student_ids: g.student_ids }))
+    } else {
+      payload.student_ids = form.student_ids
     }
     if (form.hw_type === 'question_set') {
       payload.questions = form.questions.map(q => ({ question_id: q.question_id, score: q.score }))
@@ -410,4 +1013,30 @@ onMounted(() => { load(); loadMeta(); loadQuestions() })
 .chosen-row { display: flex; align-items: center; gap: 8px; padding: 4px 0; border-bottom: 1px dashed #ebeef5; }
 .chosen-row .idx { width: 22px; color: #909399; }
 .chosen-row .ct { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.group-builder { width: 100%; display: flex; flex-direction: column; gap: 8px; }
+.group-row { display: flex; align-items: center; gap: 8px; }
+.list-toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+.muted { color: #9ca3af; }
+.small { font-size: 12px; }
+.cascade-row { display: flex; gap: 8px; width: 100%; }
+.cascade-row .el-select { flex: 1; }
+.dist-cell { display: flex; flex-direction: column; gap: 6px; }
+.dist-bars { display: flex; height: 8px; border-radius: 4px; overflow: hidden; background: #f0f2f5; }
+.dist-seg { display: block; height: 100%; transition: flex .2s; }
+.dist-seg.d-easy { background: #34d399; }
+.dist-seg.d-medium { background: #60a5fa; }
+.dist-seg.d-hard { background: #f59e0b; }
+.dist-seg.d-unknown { background: #cbd5e1; }
+.dist-editor { width: 100%; }
+.dist-row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.dist-name { width: 40px; font-size: 13px; color: #4b5563; }
+.dist-preview { flex: 1; height: 8px; background: #f0f2f5; border-radius: 4px; overflow: hidden; }
+.dist-preview .dist-seg { height: 100%; }
+.error-text { color: #ef4444; }
+.preview-stats { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+.preview-bars { margin-bottom: 12px; height: 10px; }
+.timeline-summary { display: flex; gap: 16px; font-size: 13px; color: #6b7280;
+  padding: 8px 12px; background: #f8fafc; border-radius: 8px; margin-bottom: 14px; }
+.tl-title { font-size: 13px; font-weight: 600; color: #374151; display: flex;
+  align-items: center; gap: 8px; margin-bottom: 4px; }
 </style>
