@@ -53,7 +53,9 @@
               <el-tag :type="statusTag(it.status_of_me)" size="small">{{ statusText(it.status_of_me) }}</el-tag>
               <div class="hi-count" :class="countClass(it)">{{ countdown(it) }}</div>
               <div v-if="it.status_of_me === 'graded'" class="hi-score">
-                {{ it.total_score }} / {{ it.max_score ?? '—' }}
+                <template v-if="it.grade_mode === 'level'">{{ it.grade_display || '—' }}（等级）</template>
+                <template v-else-if="it.grade_mode === 'comment'">评语制</template>
+                <template v-else>{{ it.total_score }} / {{ it.max_score ?? '—' }}</template>
               </div>
             </div>
           </div>

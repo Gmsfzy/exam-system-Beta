@@ -462,6 +462,7 @@ const moduleMenus = {
     teacher: [
       { path: '/homeworks/manage', label: '作业管理', icon: iconMap.Notebook },
       { path: '/homeworks/grading-workbench', label: '批改工作台', icon: iconMap.EditPen },
+      { path: '/homeworks/grading-scheme', label: '评分制', icon: iconMap.Medal },
     ],
     student: [
       { path: '/homeworks/my', label: '我的作业', icon: iconMap.Notebook },

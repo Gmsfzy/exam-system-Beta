@@ -66,7 +66,9 @@
           <el-tag v-else-if="hw.my_submission.status === 'draft'" size="small" type="info">草稿</el-tag>
           <el-tag v-else-if="hw.my_submission.status === 'submitted'" size="small" type="warning">待批改</el-tag>
           <el-tag v-else size="small" type="success">
-            已批 {{ hw.my_submission.total_score }}/{{ hw.my_submission.max_score ?? '—' }}
+            <template v-if="hw.my_submission.grade_mode === 'level'">已批 {{ hw.my_submission.grade_display || '—' }}（等级制）</template>
+            <template v-else-if="hw.my_submission.grade_mode === 'comment'">已批 · 评语制</template>
+            <template v-else>已批 {{ hw.my_submission.total_score }}/{{ hw.my_submission.max_score ?? '—' }}</template>
           </el-tag>
           <el-button type="primary" size="small" @click="go(hw)">{{ btnText(hw) }}</el-button>
         </div>

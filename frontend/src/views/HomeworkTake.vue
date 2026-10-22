@@ -29,10 +29,20 @@
     <!-- 已批改：成绩卡片 -->
     <el-card v-if="submission && submission.status === 'graded'" class="score-card" shadow="never">
       <div class="score-line">
-        <span class="big">{{ submission.total_score }}</span>
-        <span class="of">/ {{ submission.max_score ?? '—' }}</span>
+        <!-- v5.14 多种评分制：按 grade_mode 呈现 -->
+        <template v-if="submission.grade_mode === 'level'">
+          <span class="big grade-level">{{ submission.grade_display || '—' }}</span>
+          <span class="of">（等级制）</span>
+        </template>
+        <template v-else-if="submission.grade_mode === 'comment'">
+          <span class="of">评语制 · 详见下方教师评语</span>
+        </template>
+        <template v-else>
+          <span class="big">{{ submission.total_score }}</span>
+          <span class="of">/ {{ submission.max_score ?? '—' }}</span>
+        </template>
         <el-tag type="success" size="small">已批改</el-tag>
-        <el-tag v-if="hw.pass_score != null && submission.total_score != null"
+        <el-tag v-if="submission.grade_mode !== 'level' && submission.grade_mode !== 'comment' && hw.pass_score != null && submission.total_score != null"
                 :type="submission.total_score >= hw.pass_score ? 'success' : 'danger'" size="small">
           {{ submission.total_score >= hw.pass_score ? '及格' : '未及格' }}
         </el-tag>
@@ -306,6 +316,7 @@ onMounted(load)
 .score-card { margin-bottom: 16px; background: #f0f9eb; border-color: #e1f3d8; }
 .score-line { display: flex; align-items: baseline; gap: 8px; }
 .big { font-size: 32px; font-weight: 700; color: #67c23a; }
+.big.grade-level { font-size: 26px; }
 .of { font-size: 16px; color: #909399; }
 .teacher-comment { margin-top: 8px; color: #606266; }
 .wrongbook-tip { margin-top: 8px; font-size: 13px; }

@@ -1481,3 +1481,45 @@ def test_homework_center_http(ctx):
     ids2 = {it['id'] for it in b2['items']}
     assert ids2.isdisjoint({hw1, hw2, hw3})
 
+
+def test_homework_grade_mode_http(ctx):
+    """v5.14 多种评分制 HTTP 端侧：创建/校验、level 学生显等级、comment 隐数值、已发布可改制。"""
+    c = ctx['_client']
+    # 非法 grade_mode → 400
+    bad = c.post('/api/homeworks', json={'title': '评分制非法', 'grade_mode': 'bogus',
+              'student_ids': [ctx['s1_id']],
+              'questions': [{'question_id': ctx['question_id'], 'score': 10}]},
+              headers=_auth(ctx['t1']))
+    assert bad.status_code == 400
+
+    # 创建 level 作业（客观满分 10）
+    r = c.post('/api/homeworks', json={'title': '评分制level', 'grade_mode': 'level',
+             'student_ids': [ctx['s1_id']],
+             'questions': [{'question_id': ctx['question_id'], 'score': 10}]},
+             headers=_auth(ctx['t1']))
+    assert r.status_code == 201
+    hw = r.get_json()['homework']['id']
+    assert r.get_json()['homework']['grade_mode'] == 'level'
+    c.post(f'/api/homeworks/{hw}/publish', headers=_auth(ctx['t1']))
+    sub = c.post(f'/api/homeworks/{hw}/submit',
+                 json={'answers': {str(ctx['question_id']): 'B'}},
+                 headers=_auth(ctx['s1'])).get_json()['submission']
+    # 教师批改→graded（客观满分 10）
+    c.post(f'/api/homeworks/{hw}/grade/{sub["id"]}', json={'answers': []},
+           headers=_auth(ctx['t1']))
+    # 学生结果：level → 得分率 1.0 映射“优”，total_score 仍透传
+    res = c.get(f'/api/homeworks/{hw}/result', headers=_auth(ctx['s1'])).get_json()
+    assert res['submission']['grade_mode'] == 'level'
+    assert res['submission']['grade_display'] == '优'
+    assert res['submission']['total_score'] == 10.0
+    # 已发布作业切换到 comment（隐数值）
+    up = c.put(f'/api/homeworks/{hw}', json={'grade_mode': 'comment', 'grade_scale': None},
+               headers=_auth(ctx['t1']))
+    assert up.status_code == 200
+    res2 = c.get(f'/api/homeworks/{hw}/result', headers=_auth(ctx['s1'])).get_json()
+    assert res2['submission']['grade_mode'] == 'comment'
+    assert res2['submission']['total_score'] is None      # 学生侧隐数值分
+    # 教师侧仍见数值分（批改视图 for_teacher）
+    gv = c.get(f'/api/homeworks/{hw}/grade/{sub["id"]}', headers=_auth(ctx['t1'])).get_json()
+    assert gv['submission']['total_score'] == 10.0
+

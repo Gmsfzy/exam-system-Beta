@@ -186,6 +186,30 @@ def _apply_common_fields(hw, data):
                     return 'remind_levels.minutes 须为 0~10080 分钟'
                 cleaned.append({'minutes': m, 'label': str(lv.get('label') or '')[:20]})
             hw.remind_levels_json = cleaned
+    # v5.14 多种评分制：仅显示层，不改分数/账本口径
+    if 'grade_mode' in data:
+        gm = str(data.get('grade_mode') or 'numeric').strip().lower()
+        if gm not in ('numeric', 'level', 'comment'):
+            return 'grade_mode 须为 numeric/level/comment'
+        hw.grade_mode = gm
+    if 'grade_scale' in data:
+        sc = data.get('grade_scale')
+        if sc in (None, ''):
+            hw.grade_scale_json = None
+        elif not isinstance(sc, list):
+            return 'grade_scale 须为列表或留空'
+        else:
+            cleaned = []
+            for it in sc:
+                if not isinstance(it, dict):
+                    return 'grade_scale 元素须为 {label, min}'
+                try:
+                    mv = float(it.get('min'))
+                except (TypeError, ValueError):
+                    return 'grade_scale.min 须为数字（得分率 0~1）'
+                cleaned.append({'label': str(it.get('label') or '')[:12],
+                                'min': round(mv, 4)})
+            hw.grade_scale_json = cleaned
     return None
 
 
@@ -2189,13 +2213,27 @@ def api_homework_center():
         can_submit = (status_me == 'unsubmitted'
                       and (hw.deadline is None or hw.deadline >= now or bool(hw.allow_late))
                       and hw.status == HomeworkStatusEnum.PUBLISHED)
+        # v5.14 多种评分制：显示层派生（不改 total_score 数值口径，仅影响呈现）
+        gmode = (getattr(hw, 'grade_mode', 'numeric') or 'numeric')
+        gdisp = None
+        if status_me == 'graded' and sub:
+            if gmode == 'level':
+                ratio = (sub.total_score / max_sc) if (max_sc and sub.total_score is not None) else None
+                gdisp = hw.level_for_ratio(ratio) if ratio is not None else None
+            elif gmode == 'comment':
+                gdisp = sub.comment or ''
+            else:
+                gdisp = sub.total_score
+        vis_total = (None if (gmode == 'comment' and status_me == 'graded')
+                     else (sub.total_score if status_me == 'graded' else None))
         items.append({'id': hw.id, 'title': hw.title, 'hw_type': str(hw.hw_type),
                       'teacher_name': hw.teacher.username if hw.teacher else '',
                       'deadline': iso_local(hw.deadline) if hw.deadline else None,
                       'has_deadline': hw.deadline is not None,
                       'is_expired': bool(hw.is_expired), 'allow_late': bool(hw.allow_late),
                       'status_of_me': status_me, 'days_left': days_left,
-                      'total_score': (sub.total_score if status_me == 'graded' else None),
+                      'total_score': vis_total,
+                      'grade_mode': gmode, 'grade_display': gdisp,
                       'max_score': max_sc,
                       'is_late': bool(sub.is_late) if sub else False,
                       'can_submit': can_submit, 'sub_id': sub.id if sub else None})

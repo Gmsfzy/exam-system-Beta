@@ -65,6 +65,9 @@ class Homework(db.Model):
     shuffle_options = db.Column(db.Boolean, nullable=False, default=False)    # 选择题选项乱序
     remind_levels_json = db.Column(JSONType)  # 分级提醒档位 [{minutes,label}]；空=沿用 remind_before 单档
     reminded_json = db.Column(JSONType)       # 各档已发标记 {str(minutes): ISO}
+    # v5.14 多种评分制（仅显示层派生，不改 total_score/积分/错题口径）
+    grade_mode = db.Column(db.String(10), nullable=False, default='numeric')  # numeric|level|comment
+    grade_scale_json = db.Column(JSONType)    # 自定义等级档位 [{label,min}]；空=内置 优/良/中/差 阈值
 
     teacher = db.relationship('User', foreign_keys=[teacher_id], backref='homeworks')
     hw_questions = db.relationship('HomeworkQuestion', backref='homework', lazy=True,
@@ -117,6 +120,31 @@ class Homework(db.Model):
             return [{'minutes': int(self.remind_before), 'label': ''}]
         return []
 
+    # ── v5.14 多种评分制：仅显示层派生，不改 total_score/积分/错题口径 ──
+    _DEFAULT_SCALE = [{'label': '优', 'min': 0.9}, {'label': '良', 'min': 0.8},
+                      {'label': '中', 'min': 0.6}, {'label': '差', 'min': 0.0}]
+
+    def grade_scale(self):
+        """等级阀值列表（按 min 降序）。自定义 grade_scale_json 非法/空时回落内置四档。"""
+        s = self.grade_scale_json
+        if isinstance(s, list) and s:
+            try:
+                items = [{'label': str(x.get('label') or ''), 'min': float(x.get('min'))}
+                         for x in s if isinstance(x, dict)]
+                if items:
+                    return sorted(items, key=lambda k: k['min'], reverse=True)
+            except (TypeError, ValueError):
+                pass
+        return sorted(self._DEFAULT_SCALE, key=lambda k: k['min'], reverse=True)
+
+    def level_for_ratio(self, ratio):
+        """得分率→等级标签：取首个 min<=ratio 的档位（降序遍历）。"""
+        scale = self.grade_scale()
+        for it in scale:
+            if ratio >= it['min']:
+                return it['label']
+        return scale[-1]['label'] if scale else ''
+
     def to_dict(self, for_teacher=False, stats=None):
         d = {'id': self.id, 'title': self.title, 'description': self.description or '',
              'hw_type': self.hw_type, 'teacher_id': self.teacher_id, 'status': self.status,
@@ -136,9 +164,11 @@ class Homework(db.Model):
              'series_id': self.series_id,
              'peer_review_deadline': iso_local(self.peer_review_deadline)
              if self.peer_review_deadline else None,
-             'peer_review_weight': float(self.peer_review_weight or 0.0)}
+             'peer_review_weight': float(self.peer_review_weight or 0.0),
+             'grade_mode': self.grade_mode or 'numeric'}
         if for_teacher:
             d['teacher_name'] = self.teacher.username if self.teacher else ''
+            d['grade_scale'] = list(self.grade_scale_json or [])
             d['blind_grading'] = bool(self.blind_grading)
             d['shuffle_questions'] = bool(self.shuffle_questions)
             d['shuffle_options'] = bool(self.shuffle_options)
@@ -231,6 +261,21 @@ class HomeworkSubmission(db.Model):
         else:
             d['total_score'] = None
             d['comment'] = ''
+        # v5.14 多种评分制：派生展示字段（不改 total_score 数值口径，仅影响呈现）
+        hw = self.homework
+        mode = (getattr(hw, 'grade_mode', 'numeric') if hw else 'numeric') or 'numeric'
+        graded = self.status == SubmissionStatusEnum.GRADED
+        max_sc = self.max_score if self.max_score is not None else (hw.max_score() if hw else None)
+        d['grade_mode'] = mode
+        if mode == 'level':
+            ratio = (self.total_score / max_sc) if (graded and max_sc and self.total_score is not None) else None
+            d['grade_display'] = hw.level_for_ratio(ratio) if (hw and ratio is not None) else None
+        elif mode == 'comment':
+            d['grade_display'] = (self.comment or '') if graded else ''
+            if not for_teacher:
+                d['total_score'] = None      # 学生侧仅显评语，不下发数值分
+        else:  # numeric：原样等于数值总分（未批/隐藏时为 None）
+            d['grade_display'] = d.get('total_score')
         if for_teacher and self.student:
             d['username'] = self.student.username
         if self.group_id and self.group:
