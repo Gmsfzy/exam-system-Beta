@@ -17,6 +17,7 @@ from database.models import (
 )
 from utils.logger import logger
 from utils.timeutil import utcnow
+from utils.notify import create_notification
 
 # ── 算法常量 ──────────────────────────────────────────────────────
 MASTERY_HALF_LIFE_DAYS = 30.0   # 掌握度展示衰减半衰期（天）
@@ -389,7 +390,6 @@ def learning_daily_tick():
         Notification, StudyLog, UserPathEnrollment, LearningPathNode,
         UserNodeProgress, QuizAttempt, PathCertificate,
     )
-    from api.notification_routes import create_notification
 
     # 1) 衰减审查 → 复习卡
     try:

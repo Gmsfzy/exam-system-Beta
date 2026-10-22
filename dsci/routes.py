@@ -20,8 +20,9 @@ from utils.timeutil import utcnow, iso_local
 from competition.models import (
     Competition, CompetitionStatusEnum, CompetitionTypeEnum, CompetitionParticipant,
 )
-from competition.routes import (_UPLOAD_DIR, _get_own_competition, _notify,
-                                _save_upload, _visible_to_student)
+from competition.routes import (_get_own_competition, _notify,
+                                _visible_to_student)
+from utils.uploads import UPLOAD_DIR as _UPLOAD_DIR, save_upload as _save_upload
 from dsci.metrics import METRICS, higher_is_better, score_from_frames
 from dsci.models import (Dataset, DatasetFile, DatasetRole, DsNotebookRun, DsSubmission)
 from dsci.runner import run_custom_scorer, run_notebook

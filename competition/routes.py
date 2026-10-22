@@ -9,7 +9,8 @@ from database import db
 from database.models import Question, User, RoleEnum
 from utils.timeutil import parse_dt, utcnow, iso_local
 from utils.security import verify_token
-from utils.uploads import save_upload as _unified_save_upload, ALLOWED_EXTENSIONS as _FILE_EXTS
+from utils.notify import create_notification
+from utils.uploads import save_upload as _unified_save_upload, UPLOAD_DIR as _UPLOAD_DIR, ALLOWED_EXTENSIONS as _FILE_EXTS
 from ledger import core as ledger
 from competition.models import (
     Competition, CompetitionQuestion, CompetitionStatusEnum, CompetitionTypeEnum,
@@ -42,7 +43,6 @@ def _gen_invite_code():
 
 
 def _notify(user_id, title, content, type='info', related_id=None):
-    from api.notification_routes import create_notification
     create_notification(user_id=user_id, title=title[:200], content=content,
                         type=type, related_type='competition', related_id=related_id,
                         commit=True)
@@ -824,7 +824,6 @@ def api_sanction(comp_id, target_uid):
     target.sanction_reason = reason[:200]
     db.session.commit()
     try:
-        from api.notification_routes import create_notification
         create_notification(user_id=target.id, title='竞技账号受限',
                             content=f'你在竞赛「{comp.title}」中被标记受限：{reason}。如有疑问请联系教师。',
                             type='warning', related_type='competition', related_id=comp.id)
@@ -911,7 +910,6 @@ def api_create_discussion(comp_id):
     db.session.commit()
     if parent is not None and parent.user_id != user.id:
         try:
-            from api.notification_routes import create_notification
             create_notification(
                 user_id=parent.user_id, title='收到新回复',
                 content=f'{user.username} 在竞赛「{comp.title}」的讨论中回复了你。',
@@ -944,9 +942,7 @@ def api_delete_discussion(comp_id, post_id):
 
 
 # ═══════════════ v4.5 赛事公告 / 资料包 / 作品评审 / 结算 ═══════════════
-
-_UPLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'uploads')
-# 资料包/作品文件扩展白名单与保存逻辑统一至 utils/uploads.py（v4.6 与学习/悬赏模块共用，含 csv 表格）
+# _UPLOAD_DIR 已上移至 utils/uploads.UPLOAD_DIR（顶部 import），与学习/悬/作业共用同一落盘目录。
 
 
 def _save_upload(file, prefix):

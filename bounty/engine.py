@@ -1,13 +1,14 @@
 # -*- coding: utf-8 -*-
 """征集悬赏运营引擎：站内通知 / 过期治理 / 贡献榜 / 相似题查重。
 
-被 bounty.routes 与后台 scheduler 调用。通知统一走 api.notification_routes.create_notification
-（延迟导入避免循环依赖）；托管退回走 bounty.wallet。
+被 bounty.routes 与后台 scheduler 调用。通知统一走 utils.notify.create_notification
+（已上移至 utils 稳定层，无循环依赖）；托管退回走 bounty.wallet。
 """
 import re
 
 from database import db
 from utils.timeutil import utcnow, fmt_local
+from utils.notify import create_notification
 from bounty.models import (
     Bounty, BountySubmission, BountyStatusEnum, SubmissionStatusEnum,
 )
@@ -16,7 +17,6 @@ from bounty.models import (
 # ═══════════════ 站内通知 ═══════════════
 
 def _notify(user_id, title, content, type='info', related_id=None):
-    from api.notification_routes import create_notification
     create_notification(user_id=user_id, title=title[:200], content=content,
                         type=type, related_type='bounty', related_id=related_id, commit=True)
 

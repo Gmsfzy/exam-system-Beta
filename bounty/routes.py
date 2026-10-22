@@ -22,7 +22,7 @@ from database import db
 from database.models import Question, Major, User, RoleEnum
 from utils.timeutil import utcnow, parse_dt
 from utils.security import verify_token
-from utils.uploads import save_upload
+from utils.uploads import save_upload, UPLOAD_DIR
 from bounty.models import (
     Bounty, BountySubmission, BountyComment, BountyVote, BountyReport,
     BountyTypeEnum, BountyStatusEnum, SubmissionStatusEnum,
@@ -551,7 +551,7 @@ def bounty_submit(bounty_id):
 
 # ═══════════════ v4.6 投稿附件（统一白名单 utils/uploads.py）═══════════════
 
-_UPLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'uploads')
+_UPLOAD_DIR = UPLOAD_DIR  # 与竞赛/学习/作业/DS 共用 utils/uploads 公共落盘目录
 
 
 def _get_own_submission(bounty_id, user):

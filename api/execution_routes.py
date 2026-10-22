@@ -11,6 +11,7 @@ from api.exam_engine import (
 from utils.security import limiter, RateLimitConfig, verify_token
 from utils.timeutil import utcnow, iso_local
 from utils.logger import logger
+from utils.notify import create_notification
 
 api_execution_bp = Blueprint('api_execution', __name__)
 
@@ -24,7 +25,6 @@ def _notify_teacher_exam(exam, student, extra=''):
     """师生互动：学生交卷给考试创建教师发一条持久铃铛通知（经 ORM 事件实时推送）。"""
     if exam is None or not getattr(exam, 'creator_id', None):
         return
-    from api.notification_routes import create_notification
     title = f'学生交卷：{exam.title}'
     content = (f'{student.username} 已提交「{exam.title}」的试卷' + (extra or '') + '。')
     create_notification(exam.creator_id, title, content,

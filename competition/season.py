@@ -4,6 +4,7 @@
 """
 from database import db
 from utils.timeutil import utcnow, aware_min
+from utils.notify import create_notification
 from competition.models import (
     SeasonMeta, SeasonArchive, UserPointsProfile,
 )
@@ -109,7 +110,6 @@ def _issue_season_certificates(season, total):
         db.session.add(cert)
         db.session.flush()  # 暴露唯一约束竞态
         try:
-            from api.notification_routes import create_notification
             create_notification(
                 a.user_id, f'恭喜获得赛季{label}',
                 f'你在 {season} 赛季以 {a.points} 分获得{label}段位证书（赛季第 {a.rank} 名）。',

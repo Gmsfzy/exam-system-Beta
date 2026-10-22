@@ -14,6 +14,7 @@ from database.models import (
     Exam, ExamQuestion, ExamSession, Answer, Question, Result, QuestionTypeEnum,
 )
 from utils.logger import logger
+from utils.timeutil import utcnow
 
 LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
 
@@ -176,7 +177,7 @@ def apply_exam_result(sess, earned, total):
     if not result:
         result = Result(exam_id=sess.exam_id, student_id=sess.student_id,
                         score=earned, total_score=total,
-                        submitted_at=sess.end_time or _utcnow())
+                        submitted_at=sess.end_time or utcnow())
         result.session_id = sess.id
         db.session.add(result)
         return result, True, True
@@ -194,11 +195,6 @@ def apply_exam_result(sess, earned, total):
         result.session_id = sess.id
         result.submitted_at = sess.end_time
     return result, False, changed
-
-
-def _utcnow():
-    from utils.timeutil import utcnow
-    return utcnow()
 
 
 # ── 知识点掌握度联动（v4.3 P2）─────────────────────────────────────

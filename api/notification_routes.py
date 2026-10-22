@@ -3,6 +3,7 @@ from database.models import Notification, User, Exam, Result, NotificationTypeEn
 from database import db
 from utils.timeutil import utcnow, iso_local, fmt_local
 from utils.security import verify_token
+from utils.notify import create_notification  # 实现已上移至 utils/notify.py（此处再导出保持历史引用兼容）
 from datetime import timedelta
 
 api_notification_bp = Blueprint('api_notification', __name__)
@@ -13,35 +14,6 @@ def _current_user():
     if not user:
         return None, (jsonify({'error': '请先登录'}), 401)
     return user, None
-
-def create_notification(user_id, title, content='', type='info', related_type=None, related_id=None, commit=True):
-    """创建通知助手函数。
-
-    commit=True（默认）：立即提交，适合请求路径单次调用；
-    commit=False：仅 add 不提交，由调用方在外层循环结束后统一 commit
-    （如 scheduler 批量收卷，避免循环内逐行提交争抢写锁、提前半提交）。
-
-    外部渠道旁路投递仅在 commit=True 且站内落库成功后触发（默认关闭、
-    按 related_type 白名单、后台线程尽力而为）；commit=False 批量路径不投递，
-    以免半提交误发与循环刷屏。
-    """
-    notification = Notification(
-        user_id=user_id,
-        title=title,
-        content=content,
-        type=type,
-        related_type=related_type,
-        related_id=related_id
-    )
-    db.session.add(notification)
-    if commit:
-        db.session.commit()
-        # 站内落库成功后旁路投递邮件/webhook（默认关闭，异常不冒泡）
-        from utils.notify_channels import dispatch
-        dispatch(user_id, title, content, related_type)
-    # 实时推送不在此处手动发：由 utils/notify_socket 的 ORM 事件在事务 commit 后统一
-    # 自动发出（覆盖全模块与 commit=False 批量路径，且回滚不发、无幽灵推送）。
-    return notification
 
 def create_exam_publish_notification(exam):
     """考试发布时给所有学生发送通知"""

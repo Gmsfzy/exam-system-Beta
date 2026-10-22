@@ -9,6 +9,7 @@ from datetime import timedelta
 from database import db
 from database.models import User
 from utils.timeutil import utcnow, fmt_local
+from utils.notify import create_notification
 from competition.models import (
     Competition, CompetitionParticipant, CompetitionStatusEnum,
 )
@@ -36,7 +37,6 @@ def send_competition_reminders():
 
 
 def _remind_one(comp, now):
-    from api.notification_routes import create_notification
     rows = (db.session.query(CompetitionParticipant.user_id)
             .join(User, User.id == CompetitionParticipant.user_id)
             .filter(CompetitionParticipant.competition_id == comp.id,

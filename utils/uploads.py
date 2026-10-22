@@ -9,6 +9,10 @@
 import os
 import secrets
 
+# 上传根目录（项目根 uploads/）：竞赛/学习/悬赏/作业共用同一落盘位置，
+# 避免各业务模块重复计算路径或跨模块 import 私有常量（v5.1 上移）。
+UPLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'uploads')
+
 # 扩展白名单（小写含点）
 ALLOWED_EXTENSIONS = {
     # 文档
@@ -32,11 +36,14 @@ def _describe_exts():
     return '/'.join(sorted(e.lstrip('.') for e in ALLOWED_EXTENSIONS))
 
 
-def save_upload(file, prefix, upload_dir):
+def save_upload(file, prefix, upload_dir=None):
     """校验并保存 Werkzeug FileStorage，返回 (stored_name, size)；出错抛 ValueError。
 
-    prefix 为落盘文件名前缀（如 comp_res/work/note/bounty_sub）。
+    prefix 为落盘文件名前缀（如 comp_res/work/note/bounty_sub/hwref）。
+    upload_dir 缺省用模块级 UPLOAD_DIR（各业务模块可显式传入自定义目录）。
     """
+    if upload_dir is None:
+        upload_dir = UPLOAD_DIR
     if not file or not file.filename:
         raise ValueError('请选择文件')
     ext = os.path.splitext(file.filename)[1].lower()

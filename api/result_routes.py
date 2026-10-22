@@ -7,6 +7,7 @@ from utils.security import limiter, RateLimitConfig, verify_token
 from utils.timeutil import iso_local, utcnow
 from utils.logger import logger
 from utils.permissions import require_teacher
+from utils.notify import create_notification
 
 api_result_bp = Blueprint('api_result', __name__)
 
@@ -512,7 +513,6 @@ def api_request_score_review(result_id):
     result.review_reply = None
     result.reviewed_at = None
 
-    from api.notification_routes import create_notification
     create_notification(
         user_id=exam.creator_id,
         title='成绩申诉待处理',
@@ -559,7 +559,6 @@ def api_handle_score_review(result_id):
     result.review_reply = reply
     result.reviewed_at = utcnow()
 
-    from api.notification_routes import create_notification
     if action == 'approve' and result.score != old_score:
         outcome = f'申诉成立，成绩调整为 {result.score}/{result.total_score}'
     elif action == 'approve':
