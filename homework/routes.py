@@ -32,6 +32,7 @@ from homework.models import (
     PeerReviewStatusEnum, PeerReviewAuditEnum, HomeworkRubric,
     HomeworkProctorEvent, ProctorEventTypeEnum,
     ShowcaseStatusEnum,
+    HomeworkAnnotation, AnnotationTypeEnum,
 )
 from homework.services import (
     finalize_submission, recompute_total, notify_homework_students, ai_suggest_grading,
@@ -1657,6 +1658,106 @@ def api_showcase_detail(sub_id):
     return jsonify(d)
 
 
+# ═══════════════════ v5.20 批改批注（图片/PDF 画线，仅教师可写）═══════════════════
+
+def _clean_shape(s):
+    """校验并归一化单个批注图形；非法类型/非 dict 返回 None（不落库脏数据）。
+
+    坐标以归一化比例（0~1）存储，适配不同显示尺寸；page 支持 PDF 多页（图片恒 0）。"""
+    if not isinstance(s, dict):
+        return None
+    t = s.get('type')
+    if t not in AnnotationTypeEnum.ALL:
+        return None
+    try:
+        page = int(s.get('page', 0) or 0)
+    except (TypeError, ValueError):
+        page = 0
+    if page < 0:
+        page = 0
+    try:
+        width = max(0.0, min(float(s.get('width') or 2), 60.0))
+    except (TypeError, ValueError):
+        width = 2.0
+    out = {'id': str(s.get('id') or '')[:40], 'type': t, 'page': page,
+           'color': str(s.get('color') or '#ef4444')[:20], 'width': width}
+    pts = s.get('points')
+    if isinstance(pts, list):
+        norm = []
+        for p in pts[:400]:
+            if isinstance(p, (list, tuple)) and len(p) >= 2:
+                try:
+                    norm.append([round(float(p[0]), 4), round(float(p[1]), 4)])
+                except (TypeError, ValueError):
+                    continue
+        out['points'] = norm
+    if s.get('x') is not None and s.get('y') is not None:
+        try:
+            out['x'] = round(float(s['x']), 4)
+            out['y'] = round(float(s['y']), 4)
+        except (TypeError, ValueError):
+            pass
+    if t == AnnotationTypeEnum.TEXT:
+        out['text'] = str(s.get('text') or '')[:200]
+    return out
+
+
+@homework_bp.route('/homeworks/<int:hw_id>/annotation', methods=['GET'])
+def api_annotation_get(hw_id):
+    """读某份提交的批注图层：创建教师 / 提交本人（含组员）可看，其余 403。"""
+    user, err = require_login()
+    if err:
+        return err
+    hw = db.session.get(Homework, hw_id)
+    if not hw:
+        return jsonify({'message': '作业不存在'}), 404
+    sub_id = request.args.get('submission_id', type=int)
+    mine = _my_submission(hw, user.id)
+    sub = db.session.get(HomeworkSubmission, sub_id) if sub_id else mine
+    if not sub or sub.homework_id != hw.id:
+        return jsonify({'message': '提交不存在'}), 404
+    is_owner_teacher = user.is_teacher() and hw.teacher_id == user.id
+    if not is_owner_teacher and not (mine and mine.id == sub.id):
+        return jsonify({'message': '无权查看该批注'}), 403
+    ann = HomeworkAnnotation.query.filter_by(submission_id=sub.id).first()
+    return jsonify({'submission_id': sub.id,
+                    'shapes': (ann.shapes_json if ann else []) or [],
+                    'can_edit': bool(is_owner_teacher)})
+
+
+@homework_bp.route('/homeworks/<int:hw_id>/annotation', methods=['POST'])
+@limiter.limit('60/minute')
+def api_annotation_save(hw_id):
+    """教师 upsert 某份提交的批注图层（纯叠加，不改判分/总分/账本）。"""
+    user, err = require_teacher()
+    if err:
+        return err
+    hw, err = _get_own_homework(user, hw_id)
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    sub_id = data.get('submission_id')
+    sub = db.session.get(HomeworkSubmission, sub_id) if sub_id else None
+    if not sub or sub.homework_id != hw.id:
+        return jsonify({'message': '提交不存在'}), 404
+    shapes = data.get('shapes')
+    if not isinstance(shapes, list):
+        return jsonify({'message': 'shapes 必须为列表'}), 400
+    if len(shapes) > 500:
+        return jsonify({'message': '批注图形过多（上限 500）'}), 400
+    clean = [c for c in (_clean_shape(s) for s in shapes) if c]
+    ann = HomeworkAnnotation.query.filter_by(submission_id=sub.id).first()
+    if ann is None:
+        ann = HomeworkAnnotation(submission_id=sub.id, homework_id=hw.id,
+                                 author_id=user.id, shapes_json=clean)
+        db.session.add(ann)
+    else:
+        ann.shapes_json = clean
+        ann.author_id = user.id
+    db.session.commit()
+    return jsonify({'message': '批注已保存', 'count': len(clean), 'shapes': clean})
+
+
 @homework_bp.route('/homeworks/<int:hw_id>/grade/<int:sub_id>/ai_suggest', methods=['POST'])
 @limiter.limit('10/minute')
 def api_grade_ai(hw_id, sub_id):
@@ -1820,6 +1921,10 @@ def api_attachment(hw_id):
     att = sub.attachment_json or {}
     if not att.get('stored_name'):
         return jsonify({'message': '无附件'}), 404
+    # v5.20 批注画布需内联显示图片/PDF：?inline=1 时不强制下载（mimetype 由扩展名推断）
+    inline = request.args.get('inline', type=int) == 1
+    if inline:
+        return send_from_directory(_UPLOAD_DIR, att['stored_name'])
     return send_from_directory(_UPLOAD_DIR, att['stored_name'],
                                as_attachment=True, download_name=att.get('filename'))
 

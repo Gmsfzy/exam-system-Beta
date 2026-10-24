@@ -1815,3 +1815,46 @@ def test_homework_showcase_http(ctx):
     # 展示邀请仅学生（教师 403）
     assert c.get('/api/homeworks/showcase/invitations', headers=_auth(ctx['t1'])).status_code == 403
 
+
+def test_homework_annotation_http(ctx):
+    """v5.20 批改批注 HTTP 全链：教师存批注/学生只读、鉴权、脏数据过滤、与判分正交。"""
+    c = ctx['_client']
+    hw = c.post('/api/homeworks', json={'title': '批注作业',
+             'student_ids': [ctx['s1_id'], ctx['s2_id']],
+             'questions': [{'question_id': ctx['question_id'], 'score': 10}]},
+             headers=_auth(ctx['t1'])).get_json()['homework']['id']
+    c.post(f'/api/homeworks/{hw}/publish', headers=_auth(ctx['t1']))
+    sid = c.post(f'/api/homeworks/{hw}/submit',
+                 json={'answers': {str(ctx['question_id']): 'B'}},
+                 headers=_auth(ctx['s1'])).get_json()['submission']['id']
+    # 批改取基线分数
+    c.post(f'/api/homeworks/{hw}/grade/{sid}', json={'answers': []}, headers=_auth(ctx['t1']))
+    base = c.get(f'/api/homeworks/{hw}/grade/{sid}', headers=_auth(ctx['t1'])).get_json()['submission']
+    base_score, base_status = base['total_score'], base['status']
+
+    # 保存前读取：空图层，教师可编辑
+    g0 = c.get(f'/api/homeworks/{hw}/annotation?submission_id={sid}', headers=_auth(ctx['t1'])).get_json()
+    assert g0['shapes'] == [] and g0['can_edit'] is True
+    # 教师存批注：1 合法 + 1 非法类型 → 过滤后仅保留合法
+    save = c.post(f'/api/homeworks/{hw}/annotation', json={'submission_id': sid, 'shapes': [
+        {'type': 'pen', 'page': 0, 'points': [[0.1, 0.2], [0.3, 0.4]], 'color': '#ef4444', 'width': 3},
+        {'type': 'bogus', 'points': [[0, 0]]}]}, headers=_auth(ctx['t1']))
+    assert save.status_code == 200 and save.get_json()['count'] == 1
+    # 再存两条 → upsert 覆盖
+    c.post(f'/api/homeworks/{hw}/annotation', json={'submission_id': sid, 'shapes': [
+        {'type': 'pen', 'points': [[0.1, 0.2]]},
+        {'type': 'text', 'x': 0.5, 'y': 0.5, 'text': '此处需注意'}]}, headers=_auth(ctx['t1']))
+    g1 = c.get(f'/api/homeworks/{hw}/annotation?submission_id={sid}', headers=_auth(ctx['t1'])).get_json()
+    assert len(g1['shapes']) == 2
+    # 提交本人（s1）可读、不可编辑
+    gs = c.get(f'/api/homeworks/{hw}/annotation?submission_id={sid}', headers=_auth(ctx['s1'])).get_json()
+    assert gs['can_edit'] is False and len(gs['shapes']) == 2
+    # 名单内他人（s2）读取 → 403；跨教师（t2）保存 → 403
+    assert c.get(f'/api/homeworks/{hw}/annotation?submission_id={sid}',
+                 headers=_auth(ctx['s2'])).status_code == 403
+    assert c.post(f'/api/homeworks/{hw}/annotation', json={'submission_id': sid, 'shapes': []},
+                  headers=_auth(ctx['t2'])).status_code == 403
+    # 正交：批注不改判分/总分
+    after = c.get(f'/api/homeworks/{hw}/grade/{sid}', headers=_auth(ctx['t1'])).get_json()['submission']
+    assert after['total_score'] == base_score and after['status'] == base_status
+

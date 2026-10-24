@@ -113,7 +113,11 @@
           <input type="file" @change="onFile" />
           <span v-if="pickedFile" class="picked">已选：{{ pickedFile.name }}</span>
         </template>
-        <a v-else-if="attachment" :href="attUrl" target="_blank">{{ attachment.filename }}</a>
+        <template v-else-if="attachment">
+          <a :href="attUrl" target="_blank">{{ attachment.filename }}</a>
+          <el-button v-if="canAnnotate(attachment) && submission?.status === 'graded'" size="small" plain
+                     type="primary" style="margin-left: 8px" @click="annDialog = true">查看批注</el-button>
+        </template>
         <span v-else class="muted">无</span>
       </div>
     </div>
@@ -171,6 +175,12 @@
       </template>
       <HomeworkDiscussion :homework-id="hwId" />
     </el-card>
+
+    <!-- v5.20 教师批注（只读回放） -->
+    <el-dialog v-model="annDialog" title="教师批注" width="820px" top="6vh" destroy-on-close>
+      <AnnotationCanvas v-if="annDialog && submission" readonly
+                        :hw-id="hwId" :sub-id="submission.id" :attachment="attachment" />
+    </el-dialog>
   </div>
 </template>
 
@@ -182,10 +192,16 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import request from '../utils/request'
 import AiReviewContent from '../components/AiReviewContent.vue'
 import HomeworkDiscussion from '../components/HomeworkDiscussion.vue'
+import AnnotationCanvas from '../components/AnnotationCanvas.vue'
 
 const route = useRoute()
 const hwId = route.params.id
 const LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+
+// v5.20 教师批注只读回放：仅图片/PDF 附件
+const annDialog = ref(false)
+const canAnnotate = (att) => ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.pdf']
+  .includes((att?.ext || '').toLowerCase())
 
 const loading = ref(false)
 const savingDraft = ref(false)

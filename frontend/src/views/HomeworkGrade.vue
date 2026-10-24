@@ -65,6 +65,8 @@
           <pre class="content-box">{{ grade.submission.content || '（无正文）' }}</pre>
           <div v-if="grade.submission.attachment" class="attach">
             附件：<a :href="attachUrl(grade.submission.id)" target="_blank">{{ grade.submission.attachment.filename }}</a>
+            <el-button v-if="canAnnotate(grade.submission.attachment)" size="small" type="primary" plain
+                       :icon="EditPen" style="margin-left: 8px" @click="openAnnotation">批注</el-button>
           </div>
           <div class="score-row" style="margin-top: 12px">
             <span>总分 / 满分</span>
@@ -362,6 +364,13 @@
         <el-button @click="plagDialog = false">关闭</el-button>
       </template>
     </el-dialog>
+
+    <!-- v5.20 批改批注（图片/PDF 画线） -->
+    <el-dialog v-model="annDialog" title="批改批注" width="860px" top="6vh" destroy-on-close>
+      <AnnotationCanvas v-if="annDialog && grade"
+                        :hw-id="hwId" :sub-id="grade.submission.id"
+                        :attachment="grade.submission.attachment" />
+    </el-dialog>
   </div>
 </template>
 
@@ -373,6 +382,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import request from '../utils/request'
 import AiReviewContent from '../components/AiReviewContent.vue'
 import HomeworkDiscussion from '../components/HomeworkDiscussion.vue'
+import AnnotationCanvas from '../components/AnnotationCanvas.vue'
 
 const route = useRoute()
 const hwId = route.params.id
@@ -510,6 +520,14 @@ const openGrade = async (row) => {
 }
 
 const attachUrl = (subId) => `/api/homeworks/${hwId}/attachment?submission_id=${subId}`
+
+// v5.20 批改批注：仅图片/PDF 附件可批注
+const annDialog = ref(false)
+const canAnnotate = (att) => {
+  const ext = (att?.ext || '').toLowerCase()
+  return ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.pdf'].includes(ext)
+}
+const openAnnotation = () => { annDialog.value = true }
 
 const askAi = async () => {
   aiLoading.value = true

@@ -47,6 +47,22 @@ class ShowcaseStatusEnum:
     ALL = (NONE, NOMINATED, FEATURED)
 
 
+class AnnotationTypeEnum:
+    """v5.20 批改批注图形类型（纯叠加层，与批改状态/总分/ledger 正交）。
+
+    教师在学生提交的图片/PDF 上绘制的图形类别；坐标以归一化比例（0~1）存储，
+    以适配不同显示尺寸；`page` 支持 PDF 多页（图片恒为 0）。"""
+    PEN = 'pen'              # 自由手绘（多点折线）
+    LINE = 'line'            # 直线
+    ARROW = 'arrow'          # 箭头
+    RECT = 'rect'            # 矩形
+    ELLIPSE = 'ellipse'      # 椭圆
+    HIGHLIGHT = 'highlight'  # 高亮（半透粗手绘）
+    TEXT = 'text'            # 文字旁批
+
+    ALL = (PEN, LINE, ARROW, RECT, ELLIPSE, HIGHLIGHT, TEXT)
+
+
 class Homework(db.Model):
     __tablename__ = 'homework'
 
@@ -264,6 +280,9 @@ class HomeworkSubmission(db.Model):
     group = db.relationship('HomeworkGroup', foreign_keys=[group_id])
     answers = db.relationship('HomeworkAnswer', backref='submission', lazy=True,
                               cascade='all, delete-orphan')
+    # v5.20 批改批注图层：一份提交一条（upsert），随提交级联删除
+    annotation = db.relationship('HomeworkAnnotation', backref='submission', uselist=False,
+                                 lazy=True, cascade='all, delete-orphan')
 
     def attachment_meta(self):
         """仅披露文件名/大小/扩展名（stored_name 不外泄，下载走鉴权端点）。"""
@@ -721,4 +740,31 @@ class HomeworkProctorEvent(db.Model):
         return {'id': self.id, 'homework_id': self.homework_id,
                 'submission_id': self.submission_id, 'student_id': self.student_id,
                 'type': self.type, 'at': iso_local(self.at)}
+
+
+class HomeworkAnnotation(db.Model):
+    """v5.20 批改批注图层：教师在学生提交的图片/PDF 上的画线批注，一份提交一条（upsert）。
+
+    纯叠加层，与批改状态/total_score/ledger 完全正交（不改任何成绩字段）；
+    `shapes_json` 存图形列表 [{id,type,page,points|x,y,color,width,size,text}]，
+    坐标按归一化比例（0~1）记录以适配不同显示尺寸；`page` 支持 PDF 多页（图片恒 0）。
+    写权限仅创建教师，学生/回评人只读回放。
+    """
+    __tablename__ = 'homework_annotation'
+
+    id = db.Column(db.Integer, primary_key=True)
+    submission_id = db.Column(db.Integer, db.ForeignKey('homework_submission.id'),
+                              nullable=False, unique=True, index=True)
+    homework_id = db.Column(db.Integer, db.ForeignKey('homework.id'), nullable=False, index=True)
+    author_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)   # 批注教师
+    shapes_json = db.Column(JSONType)   # 图形列表；空=无批注
+    created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
+    updated_at = db.Column(UTCDateTime, nullable=False, default=utcnow, onupdate=utcnow)
+
+    author = db.relationship('User', foreign_keys=[author_id])
+
+    def to_dict(self):
+        return {'submission_id': self.submission_id, 'homework_id': self.homework_id,
+                'author_id': self.author_id, 'shapes': self.shapes_json or [],
+                'updated_at': iso_local(self.updated_at)}
 

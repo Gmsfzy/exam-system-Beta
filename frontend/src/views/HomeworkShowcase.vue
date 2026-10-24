@@ -165,7 +165,7 @@ onMounted(reload)
 .work-score b { font-size: 20px; }
 .work-score .of { color: #909399; font-size: 13px; }
 .work-excerpt { font-size: 13px; color: #4b5563; line-height: 1.5; margin-bottom: 6px;
-  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+  display: -webkit-box; -webkit-line-clamp: 3; line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .work-comment { font-size: 12px; color: #6b7280; background: #f9fafb; border-radius: 6px;
   padding: 6px 8px; margin-bottom: 8px; }
 .work-foot { display: flex; justify-content: space-between; align-items: center; }
