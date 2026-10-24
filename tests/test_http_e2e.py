@@ -1929,3 +1929,42 @@ def test_gradebook_http(ctx):
     assert c.get(f'/api/homeworks/{hw_id}/result', headers=_auth(ctx['s1'])).get_json(
         )['submission']['total_score'] == 10.0
 
+
+# ─────────────────────────── v5.23 题目标签 ───────────────────────────
+
+def test_question_tags_http(ctx):
+    '''v5.23 题目标签端到端：建题带标签→列表回显→?tag= 筛选→协同加/权限删→标签云。'''
+    c = ctx['_client']
+    major_id = ctx['major_id']
+    # 1) t1 建题带标签（ASCII + 中文混合）
+    r = c.post('/api/questions', json={
+        'content': 'v523带标签题', 'type': 'single_choice', 'difficulty': 'easy',
+        'major_id': major_id, 'answer': 'B', 'options': ['A. 1', 'B. 2'],
+        'tags': ['hot', '易错']}, headers=_auth(ctx['t1']))
+    assert r.status_code == 200, r.get_json()
+    qid = r.get_json()['id']
+    lst = c.get(f'/api/questions?major_id={major_id}&scope=mine', headers=_auth(ctx['t1'])).get_json()
+    row = next(x for x in lst if x['id'] == qid)
+    assert row['tags'] == ['hot', '易错']
+    # 2) 非法标签（单项 > 20 字）→ 400
+    bad = c.post('/api/questions', json={
+        'content': 'x', 'type': 'single_choice', 'difficulty': 'easy',
+        'major_id': major_id, 'answer': 'A', 'tags': ['超' * 21]}, headers=_auth(ctx['t1']))
+    assert bad.status_code == 400
+    # 3) ?tag= 精确筛选命中含该标签题
+    filt = c.get('/api/questions?tag=hot', headers=_auth(ctx['t1'])).get_json()
+    assert any(x['id'] == qid for x in filt)
+    # 4) 协同贴标签：非创建者 t2 对私有题 → 403；转公共后可加
+    assert c.post(f'/api/questions/{qid}/tags', json={'tag': 'collab'},
+                  headers=_auth(ctx['t2'])).status_code == 403
+    assert c.post(f'/api/questions/{qid}/toggle_public', headers=_auth(ctx['t1'])).status_code == 200
+    add = c.post(f'/api/questions/{qid}/tags', json={'tag': 'collab'}, headers=_auth(ctx['t2']))
+    assert add.status_code == 200 and 'collab' in add.get_json()['tags']
+    # 5) 删除：非创建者 t2 → 403；创建者 t1 → 200
+    assert c.delete(f'/api/questions/{qid}/tags/collab', headers=_auth(ctx['t2'])).status_code == 403
+    rm = c.delete(f'/api/questions/{qid}/tags/collab', headers=_auth(ctx['t1']))
+    assert rm.status_code == 200 and 'collab' not in rm.get_json()['tags']
+    # 6) 标签云含聚合计数
+    cloud = c.get('/api/questions/tags', headers=_auth(ctx['t1'])).get_json()['tags']
+    assert any(item['tag'] == 'hot' for item in cloud)
+

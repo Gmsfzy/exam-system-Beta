@@ -71,6 +71,43 @@ def _normalize_options(value):
         return json.dumps([value], ensure_ascii=False)
     return None
 
+TAG_MAX_LEN = 20
+TAG_MAX_COUNT = 10
+
+def _clean_tag(raw, allow_empty=False):
+    """单个标签清洗（v5.23）：strip 后非空（allow_empty 时空→''）、≤20字、不含斜杠（保证 URL path 安全）。非法抛 ValueError。"""
+    s = str(raw if raw is not None else '').strip()
+    if not s:
+        if allow_empty:
+            return ''
+        raise ValueError('标签不能为空')
+    if len(s) > TAG_MAX_LEN:
+        raise ValueError(f'单个标签长度不能超过{TAG_MAX_LEN}字')
+    if '/' in s or '\\' in s:
+        raise ValueError('标签不能包含斜杠')
+    return s
+
+def _normalize_tags(value):
+    """标签数组归一（v5.23）：兼容 JSON 字符串或数组；逐项清洗、去空、去重、数量上限；非法抛 ValueError。
+    与 knowledge（知识点）正交，仅组织/检索用途，不参与掌握度/判分/推荐。空数组返回 []。"""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value) if value.strip() else []
+        except (ValueError, TypeError):
+            raise ValueError('tags 必须为标签数组')
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError('tags 必须为标签数组')
+    seen = []
+    for t in value:
+        s = _clean_tag(t, allow_empty=True)
+        if s and s not in seen:
+            seen.append(s)
+    if len(seen) > TAG_MAX_COUNT:
+        raise ValueError(f'标签数量不能超过{TAG_MAX_COUNT}个')
+    return seen
+
 api_question_bp = Blueprint('api_question', __name__)
 
 @api_question_bp.route('/questions', methods=['GET'])
@@ -86,6 +123,7 @@ def api_list_questions():
     course_id = request.args.get('course_id')
     q_type = request.args.get('type')
     scope = request.args.get('scope')  # all / mine / public（仅教师有意义）
+    tag = request.args.get('tag')  # v5.23 按标签筛选（对 JSON 数组按 "标签" 包含匹配）
 
     # scope 仅教师可用；学生始终看全部（传统行为）
     if not is_teacher:
@@ -95,6 +133,8 @@ def api_list_questions():
     cache_key = CacheKey.questions_key(major_id, course_id, q_type) + (':t' if is_teacher else ':s')
     if scope:
         cache_key += f':{scope}'
+    if tag:
+        cache_key += f':tag={tag}'
     cached_data = get_cache(cache_key)
     if cached_data is not None:
         return jsonify(cached_data)
@@ -106,6 +146,9 @@ def api_list_questions():
         query = query.filter(Question.course_id == int(course_id))
     if q_type:
         query = query.filter(Question.type == q_type)
+    if tag:
+        # tags 底层为 JSON TEXT（如 ["易错","高频"]），按带引号的 "标签" 精确包含匹配，避免子串误命中
+        query = query.filter(Question.tags.like('%."{}"%.'.replace('.', '%').format(tag)))
 
     if scope == 'mine':
         query = query.filter(Question.creator_id == user.id)
@@ -129,6 +172,7 @@ def api_list_questions():
         'answer': q.answer if is_teacher else '',
         'analysis': q.analysis if is_teacher else '',
         'knowledge': q.knowledge,
+        'tags': q.tags or [],                     # v5.23 自由标签数组（与知识点正交）
         'material': q.material,                  # v4.3 材料题共享材料
         'material_group': q.material_group,      # v4.3 同组题共享同一材料
         # v4.7 OJ 用例含预期输出，仅教师可见
@@ -151,6 +195,10 @@ def api_add_question():
     data = request.get_json(silent=True) or {}
     if not data.get('content') or not data.get('type') or not data.get('difficulty') or data.get('major_id') is None:
         return jsonify({'message': '缺少必要参数（content/type/difficulty/major_id）'}), 400
+    try:
+        tags_val = _normalize_tags(data.get('tags'))
+    except ValueError as e:
+        return jsonify({'message': str(e)}), 400
     q = Question(
         content=data['content'],
         options=_normalize_options(data.get('options')),
@@ -166,6 +214,7 @@ def api_add_question():
         material=(data.get('material') or None),           # v4.3 材料题
         material_group=(data.get('material_group') or None),
         test_cases=_normalize_cases(data.get('test_cases')),  # v4.7 OJ 用例
+        tags=tags_val or None,                                # v5.23 自由标签
     )
     db.session.add(q)
     db.session.commit()
@@ -186,6 +235,10 @@ def api_update_question(id):
     data = request.get_json(silent=True) or {}
     if not data.get('content') or not data.get('type') or not data.get('difficulty') or data.get('major_id') is None:
         return jsonify({'message': '缺少必要参数（content/type/difficulty/major_id）'}), 400
+    try:
+        tags_val = _normalize_tags(data.get('tags')) if 'tags' in data else None
+    except ValueError as e:
+        return jsonify({'message': str(e)}), 400
     q.content = data['content']
     q.options = _normalize_options(data.get('options'))
     q.answer = data.get('answer', '')
@@ -195,6 +248,8 @@ def api_update_question(id):
     q.type = data['type']
     q.difficulty = data['difficulty']
     q.source = data.get('source', q.source)
+    if 'tags' in data:                            # v5.23 自由标签（创建者可整体替换）
+        q.tags = tags_val or None
     if 'material' in data:                       # v4.3 材料题
         q.material = data.get('material') or None
         q.material_group = (data.get('material_group') or None) if q.material else None
@@ -262,6 +317,63 @@ def api_toggle_public(id):
     db.session.commit()
     invalidate_question_cache(major_id=q.major_id, course_id=q.course_id)
     return jsonify({'message': '已加入公共题库' if q.is_public else '已移出公共题库', 'is_public': q.is_public})
+
+@api_question_bp.route('/questions/<int:id>/tags', methods=['POST'])
+def api_add_question_tag(id):
+    """v5.23 协同贴标签：创建者可为自己的题加标签；非创建教师仅可为公共题库(is_public)题加标签。幂等去重。"""
+    user, err = _require_teacher()
+    if err:
+        return err
+    q = Question.query.get_or_404(id)
+    is_creator = q.creator_id is None or q.creator_id == user.id
+    if not is_creator and not q.is_public:
+        return jsonify({'message': '只能为自己创建或公共题库的题目贴标签'}), 403
+    data = request.get_json(silent=True) or {}
+    try:
+        tag = _clean_tag(data.get('tag'))
+    except ValueError as e:
+        return jsonify({'message': str(e)}), 400
+    cur = list(q.tags or [])
+    if tag not in cur:
+        if len(cur) >= TAG_MAX_COUNT:
+            return jsonify({'message': f'标签数量已达上限（{TAG_MAX_COUNT} 个）'}), 400
+        cur.append(tag)
+        q.tags = cur
+        db.session.commit()
+        invalidate_question_cache(major_id=q.major_id, course_id=q.course_id)
+    return jsonify({'message': '标签已添加', 'tags': q.tags or []})
+
+@api_question_bp.route('/questions/<int:id>/tags/<string:tag>', methods=['DELETE'])
+def api_remove_question_tag(id, tag):
+    """v5.23 移除标签：仅创建者（或历史无主 NULL creator）可删。"""
+    user, err = _require_teacher()
+    if err:
+        return err
+    q = Question.query.get_or_404(id)
+    if q.creator_id is not None and q.creator_id != user.id:
+        return jsonify({'message': '只能移除自己创建的题目的标签'}), 403
+    cur = list(q.tags or [])
+    tag = (tag or '').strip()
+    if tag in cur:
+        cur.remove(tag)
+        q.tags = cur or None
+        db.session.commit()
+        invalidate_question_cache(major_id=q.major_id, course_id=q.course_id)
+    return jsonify({'message': '标签已移除', 'tags': q.tags or []})
+
+@api_question_bp.route('/questions/tags', methods=['GET'])
+def api_question_tag_cloud():
+    """v5.23 标签云：聚合当前题库全部标签及题数，按题数降序。"""
+    user, err = _require_teacher()
+    if err:
+        return err
+    from collections import Counter
+    counter = Counter()
+    for (tags,) in db.session.query(Question.tags).all():
+        for t in (tags or []):
+            counter[t] += 1
+    cloud = [{'tag': t, 'count': c} for t, c in counter.most_common()]
+    return jsonify({'tags': cloud})
 
 MAX_FILE_SIZE = 50 * 1024 * 1024
 

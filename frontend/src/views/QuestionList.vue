@@ -40,6 +40,9 @@
         <el-select v-model="filter.difficulty" placeholder="全部难度" clearable class="filter-select">
           <el-option v-for="d in DIFFICULTY_OPTIONS" :key="d.value" :label="d.label" :value="d.value" />
         </el-select>
+        <el-select v-model="filter.tag" placeholder="全部标签" clearable class="filter-select">
+          <el-option v-for="t in tagCloud" :key="t.tag" :label="`${t.tag} (${t.count})`" :value="t.tag" />
+        </el-select>
       </div>
       <div class="action-buttons">
         <el-button type="success" class="import-btn" @click="openImportDialog">
@@ -101,6 +104,15 @@
       </template>
     </el-dialog>
 
+    <div v-if="tagCloud.length" class="tag-cloud">
+      <span class="tag-cloud-label">标签云</span>
+      <el-tag v-for="t in tagCloud" :key="t.tag" size="small" effect="plain" class="cloud-tag"
+              :class="{ 'cloud-tag-active': filter.tag === t.tag }"
+              @click="filter.tag = (filter.tag === t.tag ? '' : t.tag)">
+        {{ t.tag }} · {{ t.count }}
+      </el-tag>
+    </div>
+
     <div v-if="filteredQuestions.length" class="question-grid">
       <div
         v-for="q in filteredQuestions"
@@ -124,6 +136,7 @@
                 <el-dropdown-item command="toggle_public" v-if="q.is_owner">
                   <el-icon><Share /></el-icon>{{ q.is_public ? '移出公共题库' : '加入公共题库' }}
                 </el-dropdown-item>
+                <el-dropdown-item command="add_tag" :disabled="!q.is_owner && !q.is_public"><el-icon><Collection /></el-icon>贴标签</el-dropdown-item>
                 <el-dropdown-item command="delete" divided :disabled="!q.is_owner"><el-icon><Delete /></el-icon>删除</el-dropdown-item>
               </el-dropdown-menu>
             </template>
@@ -160,6 +173,9 @@
           <el-tag v-for="(tag, idx) in q.knowledge.split(',').filter(t => t.trim())" :key="idx" size="small" effect="plain">
             {{ tag.trim() }}
           </el-tag>
+        </div>
+        <div v-if="q.tags && q.tags.length" class="free-tags">
+          <el-tag v-for="(t, i) in q.tags" :key="'ft' + i" size="small" type="warning" effect="light" class="free-tag">#{{ t }}</el-tag>
         </div>
       </div>
     </div>
@@ -443,6 +459,14 @@
           <el-switch v-model="form.is_public" />
           <span class="form-tip" style="margin-left: 10px;">开启后其他教师可在「公共题库」中查看本题</span>
         </el-form-item>
+
+        <el-form-item label="标签">
+          <el-select v-model="form.tags" multiple filterable allow-create default-first-option
+                     placeholder="输入后回车创建标签，最多 10 个" style="width: 100%;">
+            <el-option v-for="t in tagCloud" :key="t.tag" :label="t.tag" :value="t.tag" />
+          </el-select>
+          <span class="form-tip">自由标签用于组织/检索，与知识点无关；非创建者可对公共题补充标签</span>
+        </el-form-item>
       </el-form>
 
       <template #footer>
@@ -543,7 +567,7 @@ const searchKeyword = ref('')
 const detailQuestion = ref(null)
 const uploadedFiles = ref([])
 
-const filter = ref({ major_id: '', course_id: '', type: '', difficulty: '' })
+const filter = ref({ major_id: '', course_id: '', type: '', difficulty: '', tag: '' })
 const scope = ref('')
 
 // v4.6.1 枚举收敛：题型/难度单一来源 frontend/src/utils/enums.js
@@ -582,6 +606,7 @@ const filteredQuestions = computed(() => {
     if (filter.value.course_id && q.course_id !== filter.value.course_id) return false
     if (filter.value.type && q.type !== filter.value.type) return false
     if (filter.value.difficulty && q.difficulty !== filter.value.difficulty) return false
+    if (filter.value.tag && !(Array.isArray(q.tags) && q.tags.includes(filter.value.tag))) return false
     if (searchKeyword.value && !q.content.includes(searchKeyword.value)) return false
     return true
   })
@@ -615,7 +640,7 @@ const handleTypeChange = () => {
 const form = ref({
   id: null, content: '', type: 'single_choice', difficulty: 'medium',
   major_id: '', course_id: '', options: '', answer: '', analysis: '', source: 'manual',
-  material: '', material_group: ''
+  material: '', material_group: '', tags: []
 })
 
 // v4.7 编程题 OJ 用例编辑态
@@ -697,7 +722,7 @@ const fetchCourses = async () => {
 
 const openAddDialog = () => {
   isEdit.value = false
-  form.value = { id: null, content: '', type: 'single_choice', difficulty: 'medium', major_id: majors.value[0]?.id || '', course_id: '', options: '', answer: '', analysis: '', source: 'manual', is_public: false, material: '', material_group: '' }
+  form.value = { id: null, content: '', type: 'single_choice', difficulty: 'medium', major_id: majors.value[0]?.id || '', course_id: '', options: '', answer: '', analysis: '', source: 'manual', is_public: false, tags: [], material: '', material_group: '' }
   optionList.value = ['', '', '', '']
   uploadedFiles.value = []
   syncOjCases(null)
@@ -814,11 +839,14 @@ const handleCardAction = (cmd, q) => {
     syncOptions()
     syncOjCases(q)
     uploadedFiles.value = []
+    if (!Array.isArray(form.value.tags)) form.value.tags = []
     dialogVisible.value = true
   } else if (cmd === 'delete') {
     deleteQuestion(q.id)
   } else if (cmd === 'toggle_public') {
     togglePublic(q)
+  } else if (cmd === 'add_tag') {
+    addTagDialog(q)
   }
 }
 
@@ -828,6 +856,31 @@ const togglePublic = async (q) => {
     ElMessage.success(res.data.message)
     fetchQuestions()
   } catch (e) { /* 拦截器已处理 */ }
+}
+
+// v5.23 题目标签：标签云 + 协同贴标签
+const tagCloud = ref([])
+const fetchTagCloud = async () => {
+  try {
+    const res = await request.get('/api/questions/tags')
+    tagCloud.value = res.data.tags || []
+  } catch (e) { /* 拦截器已处理 */ }
+}
+const addTagDialog = async (q) => {
+  try {
+    const { value } = await ElMessageBox.prompt('请输入要添加的标签（≤ 20 字）', '贴标签', {
+      confirmButtonText: '添加', cancelButtonText: '取消',
+      inputPattern: /\S/, inputErrorMessage: '标签不能为空'
+    })
+    const tag = (value || '').trim()
+    if (!tag) return
+    const res = await request.post(`/api/questions/${q.id}/tags`, { tag })
+    ElMessage.success(res.data.message || '标签已添加')
+    fetchQuestions()
+    fetchTagCloud()
+  } catch (e) {
+    if (e !== 'cancel') console.error(e)
+  }
 }
 
 const insertFormat = (before, after, textareaId) => {
@@ -951,6 +1004,7 @@ const saveQuestion = async () => {
     }
     dialogVisible.value = false
     fetchQuestions()
+    fetchTagCloud()
   } catch (e) {
     console.error(e)
   } finally {
@@ -973,6 +1027,7 @@ onMounted(() => {
   fetchQuestions()
   fetchMajors()
   fetchCourses()
+  fetchTagCloud()
 })
 </script>
 
@@ -1075,6 +1130,44 @@ onMounted(() => {
 }
 .filter-select {
   width: 160px;
+}
+/* v5.23 题目标签：标签云 + 卡片自由标签 */
+.tag-cloud {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0 16px;
+  padding: 12px 16px;
+  background: var(--bg-card, #fff);
+  border: 1px solid var(--border-color, #ebeef5);
+  border-radius: 14px;
+}
+.tag-cloud-label {
+  font-size: 13px;
+  color: var(--text-light, #909399);
+  margin-right: 4px;
+}
+.cloud-tag {
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.cloud-tag:hover {
+  transform: translateY(-1px);
+}
+.cloud-tag-active {
+  color: #fff;
+  background: #409eff;
+  border-color: #409eff;
+}
+.free-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.free-tag {
+  border-radius: 10px;
 }
 .filter-select :deep(.el-input__wrapper) {
   border-radius: 14px;

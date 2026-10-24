@@ -182,7 +182,8 @@ class Question(db.Model):
     options = db.Column(JSONType)  # JSON 选项列表
     answer = db.Column(db.Text, nullable=False)
     analysis = db.Column(db.Text)
-    knowledge = db.Column(db.Text)  # 知识点标签，逗号分隔
+    knowledge = db.Column(db.Text)  # 知识点标签，逗号分隔（旧兜底；知识点主数据源见 question_knowledge_point）
+    tags = db.Column(JSONType)  # v5.23 题目自由标签：字符串数组，多维组织/检索；与知识点正交，不进掌握度/判分/推荐口径
     major_id = db.Column(db.Integer, db.ForeignKey('major.id'), nullable=False)
     course_id = db.Column(db.Integer, db.ForeignKey('course.id'))
     chapter_id = db.Column(db.Integer, db.ForeignKey('chapter.id'))
