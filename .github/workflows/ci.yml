@@ -1,0 +1,70 @@
+# 持续集成回归门（v5.22）
+# 目标：把本地门禁（全量 pytest + 前端 vite build）搬到 CI，
+# 用 Python 3.10 + 3.12 双版本矩阵拦截「开发机 3.12 写出 3.12-only 语法」类环境漂移
+# （见 环境兼容说明.md 三、CI/回归门建议）。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  backend:
+    name: Backend pytest (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.10', '3.12']
+    env:
+      # config.py 在非 DEBUG 下对 SECRET_KEY fail-fast；CI 提供固定测试密钥，
+      # 保持 DEBUG=false 的生产校验路径被真正执行。测试走临时/内存库，不触碰真实 DB。
+      SECRET_KEY: ci-test-secret-key-not-for-production
+      FLASK_DEBUG: 'false'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Syntax compile check (catch version-only syntax early)
+        run: python -m compileall -q api homework competition bounty ledger dsci database utils ai_service config.py app.py
+
+      - name: Run pytest
+        run: python -m pytest -q
+
+  frontend:
+    name: Frontend build (Node 20)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
