@@ -5,6 +5,7 @@ import random
 from database.models import (
     User, Exam, ExamQuestion, ExamStudent, ExamSession, Answer, Result,
     Question, Notification, ExamStatusEnum, KnowledgePoint, question_knowledge_point,
+    Course,
 )
 from database import db
 
@@ -62,6 +63,19 @@ def _apply_exam_config(exam, data):
         exam.multi_score_rule = data['multi_score_rule']
     if 'anonymous_grading' in data:
         exam.anonymous_grading = bool(data['anonymous_grading'])
+    # v5.21 课程归属（可空，成绩册聚合用）
+    if 'course_id' in data:
+        cid = data.get('course_id')
+        if cid in (None, ''):
+            exam.course_id = None
+        else:
+            try:
+                cid = int(cid)
+            except (TypeError, ValueError):
+                raise ValueError('course_id 须为整数或留空')
+            if not db.session.get(Course, cid):
+                raise ValueError('所选课程不存在')
+            exam.course_id = cid
 
 
 def _exam_config(exam):
@@ -75,6 +89,7 @@ def _exam_config(exam):
         'shuffle_options': bool(exam.shuffle_options),
         'multi_score_rule': exam.multi_score_rule or 'all_or_nothing',
         'anonymous_grading': bool(exam.anonymous_grading),
+        'course_id': exam.course_id,
     }
 
 

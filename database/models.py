@@ -12,6 +12,19 @@ class ExamStatusEnum:
     PUBLISHED = "published"
     ENDED = "ended"
 
+class GradeComponentTypeEnum:
+    """v5.21 课程成绩册计分组件类型（String 承载、无 DB CHECK）。"""
+    HOMEWORK = "homework"
+    EXAM = "exam"
+    ALL = (HOMEWORK, EXAM)
+
+class GradeAggregateEnum:
+    """v5.21 计分组件聚合策略：mean 仅计已完成项 / all 未做按 0 计入分母 / best 取最高得分率。"""
+    MEAN = "mean"
+    ALL = "all"
+    BEST = "best"
+    VALUES = (MEAN, ALL, BEST)
+
 class QuestionTypeEnum:
     SINGLE_CHOICE = "single_choice"
     MULTIPLE_CHOICE = "multiple_choice"
@@ -129,6 +142,26 @@ class Course(db.Model):
 
     chapters = db.relationship('Chapter', backref='course', lazy=True, cascade='all, delete-orphan')
     questions = db.relationship('Question', backref='course', lazy=True)
+    grade_schemes = db.relationship('CourseGradeScheme', backref='course', lazy=True,
+                                    cascade='all, delete-orphan')
+
+class CourseGradeScheme(db.Model):
+    """v5.21 课程成绩册权重方案：一个教师对一门课的一条计分组件（作业/考试）。
+
+    仅驱动只读加权视图，不改任何判分/total_score/ledger 口径；序列化在 gradebook_routes。"""
+    __tablename__ = 'course_grade_scheme'
+    id = db.Column(db.Integer, primary_key=True)
+    course_id = db.Column(db.Integer, db.ForeignKey('course.id'), nullable=False, index=True)
+    created_by = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False, index=True)  # 建方案的教师
+    component_type = db.Column(db.String(20), nullable=False, default=GradeComponentTypeEnum.HOMEWORK)  # homework/exam
+    name = db.Column(db.String(100), nullable=False, default='')
+    weight = db.Column(db.Float, nullable=False, default=0.0)   # 0~100，视图按 Σ权重归一，不强制和为 100
+    aggregate = db.Column(db.String(10), nullable=False, default=GradeAggregateEnum.MEAN)  # mean/all/best
+    created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
+    updated_at = db.Column(UTCDateTime, nullable=False, default=utcnow, onupdate=utcnow)
+
+    # 同表仅 created_by 一个 user 外键，显式 foreign_keys 规避歧义崩溃历史坑
+    author = db.relationship('User', foreign_keys=[created_by])
 
 class Chapter(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -176,6 +209,7 @@ class Exam(db.Model):
     duration = db.Column(db.Integer, nullable=False)  # 分钟
     status = db.Column(db.String(20), nullable=False, default=ExamStatusEnum.DRAFT)
     creator_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    course_id = db.Column(db.Integer, db.ForeignKey('course.id'), nullable=True, index=True)  # v5.21 课程归属（可空，成绩册聚合用）
     created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
     invitation_code = db.Column(db.String(20), unique=True)
     invitation_url = db.Column(db.String(500))
@@ -191,6 +225,7 @@ class Exam(db.Model):
     anonymous_grading = db.Column(db.Boolean, nullable=False, default=False)  # 批改盲评（隐学生名）
 
     creator = db.relationship('User', backref='exams', lazy=True)
+    course = db.relationship('Course', backref='exams')
     # 删除考试时 ORM 级联清理题目配置/受邀学生/会话/成绩（依赖记录无独立存在意义）
     exam_questions = db.relationship('ExamQuestion', backref='exam', lazy=True,
                                      cascade='all, delete-orphan')

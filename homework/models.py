@@ -71,6 +71,7 @@ class Homework(db.Model):
     description = db.Column(db.Text, nullable=False, default='')   # 作业说明（开放式即题面）
     hw_type = db.Column(db.String(20), nullable=False, default=HomeworkTypeEnum.QUESTION_SET)
     teacher_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False, index=True)
+    course_id = db.Column(db.Integer, db.ForeignKey('course.id'), nullable=True, index=True)  # v5.21 课程归属（可空，成绩册聚合用）
     status = db.Column(db.String(20), nullable=False, default=HomeworkStatusEnum.DRAFT)
     deadline = db.Column(UTCDateTime, nullable=True)              # 时效：截止时间（None=不设截止，永不过期）
     allow_late = db.Column(db.Boolean, nullable=False, default=True)     # 逾期是否可交（记 late）
@@ -105,6 +106,7 @@ class Homework(db.Model):
     allow_revision = db.Column(db.Boolean, nullable=False, default=False)
 
     teacher = db.relationship('User', foreign_keys=[teacher_id], backref='homeworks')
+    course = db.relationship('Course', backref='homeworks')
     hw_questions = db.relationship('HomeworkQuestion', backref='homework', lazy=True,
                                    cascade='all, delete-orphan')
     hw_students = db.relationship('HomeworkStudent', backref='homework', lazy=True,
@@ -184,6 +186,7 @@ class Homework(db.Model):
     def to_dict(self, for_teacher=False, stats=None):
         d = {'id': self.id, 'title': self.title, 'description': self.description or '',
              'hw_type': self.hw_type, 'teacher_id': self.teacher_id, 'status': self.status,
+             'course_id': self.course_id,
              'deadline': iso_local(self.deadline) if self.deadline else None,
              'has_deadline': self.deadline is not None,
              'allow_late': bool(self.allow_late),

@@ -1858,3 +1858,74 @@ def test_homework_annotation_http(ctx):
     after = c.get(f'/api/homeworks/{hw}/grade/{sid}', headers=_auth(ctx['t1'])).get_json()['submission']
     assert after['total_score'] == base_score and after['status'] == base_status
 
+
+def test_gradebook_http(ctx):
+    """v5.21 课程成绩册：scheme CRUD/鉴权/校验 + 只读加权视图 + 学生本人可见性 + 404。"""
+    c = ctx['_client']
+    # 建课程（教师）
+    r = c.post('/api/courses', json={'name': 'GB课程', 'major_id': ctx['major_id']},
+               headers=_auth(ctx['t1']))
+    assert r.status_code == 200, r.get_json()
+    course_id = r.get_json()['id']
+
+    # 挂课作业（单选满分 10）→ 发布名单 s1,s2 → s1 作答满分（自动判分即 graded）
+    r = c.post('/api/homeworks', json={
+        'title': 'GB 作业', 'course_id': course_id, 'student_ids': [ctx['s1_id'], ctx['s2_id']],
+        'questions': [{'question_id': ctx['question_id'], 'score': 10}]},
+        headers=_auth(ctx['t1']))
+    assert r.status_code == 201, r.get_json()
+    hw_id = r.get_json()['homework']['id']
+    assert r.get_json()['homework']['course_id'] == course_id
+    assert c.post(f'/api/homeworks/{hw_id}/publish', headers=_auth(ctx['t1'])).status_code == 200
+    r = c.post(f'/api/homeworks/{hw_id}/submit',
+               json={'answers': {str(ctx['question_id']): 'B'}}, headers=_auth(ctx['s1']))
+    assert r.status_code == 201, r.get_json()
+    sub_id = r.get_json()['submission']['id']
+    # 客观题自动得分但需教师终态收尾（空批改→pending=0→graded）
+    gr = c.post(f'/api/homeworks/{hw_id}/grade/{sub_id}', json={'answers': [], 'comment': ''},
+                headers=_auth(ctx['t1']))
+    assert gr.get_json()['graded'] is True and gr.get_json()['submission']['total_score'] == 10.0
+
+    # 课程不存在 → 404
+    assert c.get('/api/courses/999999/gradebook', headers=_auth(ctx['t1'])).status_code == 404
+    # 学生无权建方案 → 403
+    assert c.post(f'/api/courses/{course_id}/gradebook/schemes', json={
+        'component_type': 'homework', 'weight': 100}, headers=_auth(ctx['s1'])).status_code == 403
+
+    # 合法建方案
+    r = c.post(f'/api/courses/{course_id}/gradebook/schemes', json={
+        'component_type': 'homework', 'weight': 100, 'aggregate': 'mean', 'name': '平时作业'},
+        headers=_auth(ctx['t1']))
+    assert r.status_code == 201, r.get_json()
+    scheme_id = r.get_json()['scheme']['id']
+    # 校验：非法类型 / 越界权重 → 400
+    assert c.post(f'/api/courses/{course_id}/gradebook/schemes', json={
+        'component_type': 'quiz', 'weight': 10}, headers=_auth(ctx['t1'])).status_code == 400
+    assert c.post(f'/api/courses/{course_id}/gradebook/schemes', json={
+        'component_type': 'homework', 'weight': 150}, headers=_auth(ctx['t1'])).status_code == 400
+
+    # 鉴权：t2 不可改/删 t1 的方案 → 403
+    assert c.put(f'/api/gradebook/schemes/{scheme_id}', json={
+        'component_type': 'homework', 'weight': 50}, headers=_auth(ctx['t2'])).status_code == 403
+    assert c.delete(f'/api/gradebook/schemes/{scheme_id}', headers=_auth(ctx['t2'])).status_code == 403
+
+    # 成绩册（教师）：s1 得分率 1.0→总评 100；s2 名单内未交，mean 口径无数据→总评 None
+    body = c.get(f'/api/courses/{course_id}/gradebook', headers=_auth(ctx['t1'])).get_json()
+    assert body['course']['id'] == course_id and len(body['groups']) == 1
+    rows = {x['student_id']: x for x in body['groups'][0]['rows']}
+    assert rows[ctx['s1_id']]['total'] == 100.0
+    assert rows[ctx['s2_id']]['total'] is None
+
+    # 学生本人：s1 只见自己，总评 100；s2 本人总评 None
+    me1 = c.get(f'/api/courses/{course_id}/gradebook/me', headers=_auth(ctx['s1'])).get_json()
+    assert len(me1['gradebooks']) == 1 and me1['gradebooks'][0]['total'] == 100.0
+    me2 = c.get(f'/api/courses/{course_id}/gradebook/me', headers=_auth(ctx['s2'])).get_json()
+    assert me2['gradebooks'][0]['total'] is None
+
+    # 删除方案后成绩册分组清空（只读聚合不残留、不改判分）
+    assert c.delete(f'/api/gradebook/schemes/{scheme_id}', headers=_auth(ctx['t1'])).status_code == 200
+    assert c.get(f'/api/courses/{course_id}/gradebook', headers=_auth(ctx['t1'])).get_json()['groups'] == []
+    # 作业总分不受影响（正交红线）
+    assert c.get(f'/api/homeworks/{hw_id}/result', headers=_auth(ctx['s1'])).get_json(
+        )['submission']['total_score'] == 10.0
+

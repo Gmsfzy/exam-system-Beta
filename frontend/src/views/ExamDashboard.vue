@@ -170,6 +170,11 @@
           <el-input-number v-model="createForm.duration" :min="5" :max="480" />
           <span style="margin-left: 8px">分钟</span>
         </el-form-item>
+        <el-form-item label="所属课程">
+          <el-select v-model="createForm.course_id" clearable filterable placeholder="不关联（仅成绩册需要）" style="width: 240px">
+            <el-option v-for="cs in courses" :key="cs.id" :label="cs.name" :value="cs.id" />
+          </el-select>
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="showCreateModal = false">取消</el-button>
@@ -536,8 +541,10 @@ const createForm = ref({
   description: '',
   start_time: null,
   end_time: null,
-  duration: 60
+  duration: 60,
+  course_id: null
 })
+const courses = ref([])
 
 const smartForm = ref({
   major_id: '',
@@ -603,6 +610,10 @@ const filteredExams = computed(() => {
 onMounted(async () => {
   await loadExams()
   await loadMajors()
+  try {
+    const res = await request.get('/api/courses')
+    courses.value = Array.isArray(res.data) ? res.data : []
+  } catch (e) { /* 课程列表加载失败不阻断 */ }
 })
 
 const loadExams = async () => {
@@ -639,7 +650,8 @@ const createExam = async () => {
       description: createForm.value.description,
       start_time: createForm.value.start_time.toISOString(),
       end_time: createForm.value.end_time.toISOString(),
-      duration: createForm.value.duration
+      duration: createForm.value.duration,
+      course_id: createForm.value.course_id ?? null
     })
     ElMessage.success('创建成功')
     showCreateModal.value = false
@@ -656,7 +668,8 @@ const resetForm = () => {
     description: '',
     start_time: '',
     end_time: '',
-    duration: 60
+    duration: 60,
+    course_id: null
   }
 }
 

@@ -43,6 +43,7 @@ const routes = [
       { path: 'results', name: 'ResultList', component: () => import('../views/ResultList.vue'), meta: { module: 'exam' } },
       { path: 'results/exam/:examId', name: 'ExamResults', component: () => import('../views/ExamResults.vue'), meta: { module: 'exam' } },
       { path: 'results/analysis', name: 'ResultAnalysis', component: () => import('../views/ResultAnalysis.vue'), meta: { module: 'exam', requiresTeacher: true } },
+      { path: 'gradebook', name: 'CourseGradebook', component: () => import('../views/CourseGradebook.vue'), meta: { module: 'exam' } },
       { path: 'profile', name: 'UserProfile', component: () => import('../views/UserProfile.vue'), meta: { module: 'exam' } },
       { path: 'settings', name: 'SystemSettings', component: () => import('../views/SystemSettings.vue'), meta: { module: 'exam', requiresTeacher: true } },
 

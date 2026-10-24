@@ -391,10 +391,12 @@ const moduleMenus = {
       { path: '/exams', label: '考试管理', icon: iconMap.Calendar },
       { path: '/results', label: '成绩管理', icon: iconMap.TrendCharts },
       { path: '/results/analysis', label: '成绩分析', icon: iconMap.Medal },
+      { path: '/gradebook', label: '课程成绩册', icon: iconMap.Tickets },
     ],
     student: [
       { path: '/student', label: '我的考试', icon: iconMap.VideoPlay },
       { path: '/results', label: '成绩查询', icon: iconMap.Medal },
+      { path: '/gradebook', label: '我的成绩册', icon: iconMap.Tickets },
     ]
   },
   competition: {

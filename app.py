@@ -53,6 +53,7 @@ bcrypt.init_app(app)
 from api.auth_routes import api_auth_bp
 from api.question_routes import api_question_bp
 from api.course_routes import api_course_bp
+from api.gradebook_routes import api_gradebook_bp
 from api.major_routes import api_major_bp
 from api.chapter_routes import api_chapter_bp
 from api.ai_routes import api_ai_bp
@@ -76,6 +77,7 @@ from homework.routes import homework_bp
 api_bps = [api_auth_bp,
            api_question_bp,
            api_course_bp,
+           api_gradebook_bp,
            api_major_bp,
            api_chapter_bp,
            api_ai_bp,

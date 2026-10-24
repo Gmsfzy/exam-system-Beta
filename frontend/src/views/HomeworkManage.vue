@@ -170,6 +170,12 @@
             <el-radio-button value="open">开放式</el-radio-button>
           </el-radio-group>
         </el-form-item>
+        <el-form-item label="所属课程">
+          <el-select v-model="form.course_id" clearable filterable placeholder="不关联（仅成绩册需要）" style="width: 240px">
+            <el-option v-for="cs in courses" :key="cs.id" :label="cs.name" :value="cs.id" />
+          </el-select>
+          <span class="hint">挂课后该作业会计入课程成绩册的加权总评</span>
+        </el-form-item>
         <el-form-item label="作业模式">
           <el-switch v-model="form.is_group" active-text="小组作业" inactive-text="个人作业" />
           <span class="hint">小组作业：组内共用一份提交，一人提交全组得分</span>
@@ -517,6 +523,7 @@ const saving = ref(false)
 const majors = ref([])
 const students = ref([])
 const rubrics = ref([])
+const courses = ref([])
 const questionPool = ref([])
 const pickMajor = ref(null)
 const randDifficulty = ref('')
@@ -844,6 +851,7 @@ const form = reactive({
   remind_levels: [],
   grade_mode: 'numeric', grade_scale: [], rubric_id: null,
   enable_monitor: false, allow_revision: false,
+  course_id: null,
   questions: [], student_ids: [], is_group: false, groups: []
 })
 
@@ -860,12 +868,14 @@ const load = async () => {
 }
 
 const loadMeta = async () => {
-  const [m, s, r] = await Promise.all([
-    request.get('/api/majors'), request.get('/api/students'), request.get('/api/homeworks/rubrics')
+  const [m, s, r, cs] = await Promise.all([
+    request.get('/api/majors'), request.get('/api/students'), request.get('/api/homeworks/rubrics'),
+    request.get('/api/courses')
   ])
   majors.value = Array.isArray(m.data) ? m.data : (m.data.items || [])
   students.value = Array.isArray(s.data) ? s.data : (s.data.items || [])
   rubrics.value = r.data.items || []
+  courses.value = Array.isArray(cs.data) ? cs.data : []
 }
 
 const loadQuestions = async () => {
@@ -887,6 +897,7 @@ const openCreate = () => {
     remind_levels: [],
     grade_mode: 'numeric', grade_scale: [], rubric_id: null,
     enable_monitor: false, allow_revision: false,
+    course_id: null,
     questions: [], student_ids: [], is_group: false, groups: []
   })
   pickMajor.value = null
@@ -910,6 +921,7 @@ const openEdit = async (row) => {
     grade_mode: hw.grade_mode || 'numeric',
     grade_scale: Array.isArray(hw.grade_scale) ? hw.grade_scale.map(x => ({ label: x.label, min: Number(x.min) })) : [],
     rubric_id: hw.rubric_id ?? null,
+    course_id: hw.course_id ?? null,
     questions: (hw.questions || []).map(q => ({ question_id: q.question_id, content: q.content, score: q.score })),
     student_ids: hw.student_ids || [],
     is_group: !!hw.is_group,
@@ -944,6 +956,7 @@ const save = async () => {
       deadline: form.has_deadline ? form.deadline : '', allow_late: form.allow_late,
       allow_resubmit: form.allow_resubmit, remind_before: form.has_deadline ? form.remind_before : 0,
       pass_score: form.pass_score, is_group: form.is_group,
+      course_id: form.course_id ?? null,
       blind_grading: form.blind_grading,
       shuffle_questions: form.hw_type === 'question_set' ? !!form.shuffle_questions : false,
       shuffle_options: form.hw_type === 'question_set' ? !!form.shuffle_options : false,

@@ -16,7 +16,7 @@ import uuid
 from flask import Blueprint, Response, jsonify, request, send_from_directory
 
 from database import db
-from database.models import Question, User
+from database.models import Question, User, Course
 from utils.logger import logger
 from utils.permissions import require_teacher, require_login
 from utils.security import limiter
@@ -154,6 +154,19 @@ def _apply_common_fields(hw, data):
         hw.title = title[:200]
     if 'description' in data:
         hw.description = str(data.get('description') or '')[:20000]
+    # v5.21 课程归属（可空，成绩册聚合用）
+    if 'course_id' in data:
+        cid = data.get('course_id')
+        if cid in (None, ''):
+            hw.course_id = None
+        else:
+            try:
+                cid = int(cid)
+            except (TypeError, ValueError):
+                return 'course_id 须为整数或留空'
+            if not db.session.get(Course, cid):
+                return '所选课程不存在'
+            hw.course_id = cid
     for flag in ('allow_late', 'allow_resubmit', 'allow_revision'):
         if flag in data:
             setattr(hw, flag, bool(data[flag]))
