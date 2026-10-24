@@ -53,7 +53,7 @@
     <template #footer>
       <div class="video-footer">
         <h4>智汇学场 · Smart Learning Arena</h4>
-        <p>AI 驱动，融合考试 · 竞赛 · 悬赏 · 自学的一体化智能学习平台</p>
+        <p>AI 驱动，融合考试 · 作业 · 竞赛 · 悬赏 · 自学的一体化智能学习平台</p>
       </div>
     </template>
   </el-dialog>
@@ -118,6 +118,12 @@ const slides = [
     gradient: ['#ec4899', '#f43f5e', '#ef4444'],
   },
   {
+    name: '作业练习', scene: 'homework', dur: 5600,
+    title: '作业练习', desc: '题集/开放 · AI 讲评 · 互评量规 · 订正展示',
+    features: ['题集式 / 开放式双形态', 'AI 初评 + 班级讲评', '匿名互评与评分量规', '查重监测预警', '退回订正 · 展示墙'],
+    gradient: ['#0f766e', '#14b8a6', '#06b6d4'],
+  },
+  {
     name: '闭环总结', scene: 'summary', dur: 5200,
     gradient: ['#0f172a', '#4f46e5', '#06b6d4'],
   },
@@ -131,7 +137,7 @@ const totalDuration = computed(() => starts[starts.length - 1] + slides[slides.l
 const progressPercent = computed(() => (currentTime.value / totalDuration.value) * 100)
 
 const HIGHLIGHTS = [
-  { emoji: '🧩', title: '四位一体', sub: '考试·竞赛·悬赏·自学' },
+  { emoji: '🧩', title: '五位一体', sub: '考试·作业·竞赛·悬赏·自学' },
   { emoji: '🤖', title: 'AI 全流程', sub: '组卷·批改·答疑·推荐' },
   { emoji: '⚔️', title: '实时竞技', sub: '1v1 PK·段位排位' },
   { emoji: '🏅', title: '赛季证书', sub: '金银铜·分档颁发' },
@@ -301,12 +307,13 @@ function drawBrandScene(ctx, w, h, p, t) {
   ctx.stroke()
   ctx.restore()
 
-  // 四模块光点
+  // 五模块光点（均匀环排）
   const mods = [
     { emoji: '📝', a: -Math.PI / 2, c: ['#a5b4fc', '#6366f1'] },
-    { emoji: '🏆', a: 0, c: ['#fdba74', '#f97316'] },
-    { emoji: '💰', a: Math.PI / 2, c: ['#6ee7b7', '#10b981'] },
-    { emoji: '📚', a: Math.PI, c: ['#f9a8d4', '#ec4899'] },
+    { emoji: '🏆', a: -Math.PI / 2 + 2 * Math.PI / 5, c: ['#fdba74', '#f97316'] },
+    { emoji: '💰', a: -Math.PI / 2 + 4 * Math.PI / 5, c: ['#6ee7b7', '#10b981'] },
+    { emoji: '📚', a: -Math.PI / 2 + 6 * Math.PI / 5, c: ['#f9a8d4', '#ec4899'] },
+    { emoji: '📒', a: -Math.PI / 2 + 8 * Math.PI / 5, c: ['#5eead4', '#14b8a6'] },
   ]
   mods.forEach((m, i) => {
     const appear = easeOut((p - 0.25 - i * 0.08) * 4)
@@ -335,7 +342,7 @@ function drawBrandScene(ctx, w, h, p, t) {
   drawText(ctx, 'Smart Learning Arena', cx, cy + 24, 15, 600, e, 'rgba(224,231,255,0.9)')
   const sub = easeOut((p - 0.35) * 2.2)
   drawText(ctx, 'AI 驱动 · 一体化智能学习平台', cx, cy + 56, 16, 500, sub, 'rgba(255,255,255,0.92)')
-  drawText(ctx, '考试 · 竞赛 · 悬赏 · 自学  四大场域环环相扣', cx, cy + 82, 12.5, 400, sub, 'rgba(226,232,240,0.75)')
+  drawText(ctx, '考试 · 作业 · 竞赛 · 悬赏 · 自学  五大场域环环相扣', cx, cy + 82, 12.5, 400, sub, 'rgba(226,232,240,0.75)')
 }
 
 // ========== 场景 1：系统亮点 ==========
@@ -600,6 +607,65 @@ function drawStudyScene(ctx, w, h, progress) {
   ctx.restore()
 }
 
+// ========== 场景 5.5：作业练习 ==========
+function drawHomeworkScene(ctx, w, h, progress) {
+  const fade = Math.min(progress * 1.5, 1)
+  const slide = Math.max(0, (progress - 0.3) / 0.7)
+  ctx.save()
+  ctx.globalAlpha = fade
+  const lx = 40 + slide * 20, ly = 54
+  drawGlassCard(ctx, lx, ly, 330, 300, 16, { shadowColor: 'rgba(20,184,166,0.35)' })
+  drawGradText(ctx, '📒 作业批改工作台', lx + 16, ly + 14, 15, 700, ['#0f766e', '#14b8a6'])
+  ctx.fillStyle = '#64748b'; ctx.font = '500 11px sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'top'
+  ctx.fillText('已交 48 · 待批改 12 · AI 已初评 30', lx + 16, ly + 40)
+  const rows = [
+    { n: '高数第一章 · 课后习题', s: '批改中', c: '#10b981', p: 0.75 },
+    { n: '数据结构 · 链表编程题', s: '待复核', c: '#8b5cf6', p: 0.62 },
+    { n: '大学英语 · 作文 Unit3', s: '互评中', c: '#f59e0b', p: 0.40 },
+    { n: '线性代数 · 证明题', s: '已批改', c: '#06b6d4', p: 1.0 },
+  ]
+  rows.forEach((r, i) => {
+    const ry = ly + 64 + i * 44
+    ctx.fillStyle = '#334155'; ctx.font = '600 12px sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle'
+    ctx.fillText(r.n, lx + 16, ry + 6)
+    roundRect(ctx, lx + 16, ry + 22, 200, 8, 4); ctx.fillStyle = '#e2e8f0'; ctx.fill()
+    drawGradientBar(ctx, lx + 16, ry + 22, 200 * r.p, 8, 4, [r.c, r.c], null)
+    ctx.save(); setShadow(ctx, r.c + '55', 5, 0, 1)
+    roundRect(ctx, lx + 232, ry - 6, 84, 24, 12); ctx.fillStyle = r.c; ctx.fill(); clearShadow(ctx); ctx.restore()
+    ctx.fillStyle = '#fff'; ctx.font = '700 11px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
+    ctx.fillText(r.s, lx + 274, ry + 6)
+  })
+
+  const rx = 396 - slide * 10, ry2 = 70
+  drawGlassCard(ctx, rx, ry2, 300, 210, 14, { shadowColor: 'rgba(20,184,166,0.3)', shadowY: 5 })
+  drawGradText(ctx, '🤖 AI 智能讲评', rx + 16, ry2 + 14, 13, 700, ['#0f766e', '#14b8a6'])
+  const ccx = rx + 64, ccy = ry2 + 100, cr = 36
+  ctx.strokeStyle = 'rgba(148,163,184,0.35)'; ctx.lineWidth = 9
+  ctx.beginPath(); ctx.arc(ccx, ccy, cr, 0, Math.PI * 2); ctx.stroke()
+  ctx.save(); setShadow(ctx, 'rgba(20,184,166,0.5)', 8, 0, 0)
+  ctx.strokeStyle = '#14b8a6'; ctx.lineCap = 'round'
+  ctx.beginPath(); ctx.arc(ccx, ccy, cr, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * 0.82); ctx.stroke(); clearShadow(ctx); ctx.restore()
+  ctx.fillStyle = '#0f766e'; ctx.font = '800 18px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
+  ctx.fillText('82%', ccx, ccy)
+  ctx.fillStyle = '#64748b'; ctx.font = '500 10px sans-serif'; ctx.fillText('班级得分率', ccx, ccy + cr + 14)
+  ctx.fillStyle = '#334155'; ctx.font = '600 12px sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'top'
+  ctx.fillText('AI 讲评要点', rx + 132, ry2 + 40)
+  ctx.font = '500 11px sans-serif'; ctx.fillStyle = '#475569'
+  ctx.fillText('· 多数同学漏写定义域', rx + 132, ry2 + 66)
+  ctx.fillText('· 步骤分按量规拆解', rx + 132, ry2 + 88)
+  ctx.fillText('· 一键退回订正重交', rx + 132, ry2 + 110)
+
+  const chips = ['题集/开放', '匿名互评', '评分量规', '展示墙']
+  chips.forEach((t, i) => {
+    const bx = rx + 8 + i * 74, bby = ry2 + 160
+    ctx.save(); setShadow(ctx, 'rgba(20,184,166,0.4)', 5, 0, 1)
+    roundRect(ctx, bx, bby, 68, 24, 12); ctx.fillStyle = 'rgba(20,184,166,0.12)'; ctx.fill(); clearShadow(ctx); ctx.restore()
+    ctx.fillStyle = '#0f766e'; ctx.font = '600 10px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
+    ctx.fillText(t, bx + 34, bby + 12)
+  })
+  ctx.restore()
+}
+
 // ========== 场景 6：闭环总结 ==========
 function drawSummaryScene(ctx, w, h, progress, t) {
   const fade = Math.min(progress * 1.5, 1)
@@ -612,9 +678,10 @@ function drawSummaryScene(ctx, w, h, progress, t) {
 
   const nodes = [
     { label: '在线考试', a: -Math.PI / 2, c: ['#a5b4fc', '#6366f1', '#4338ca'], e: '📝' },
-    { label: '答题竞赛', a: 0, c: ['#fdba74', '#f97316', '#c2410c'], e: '🏆' },
-    { label: '征集悬赏', a: Math.PI / 2, c: ['#6ee7b7', '#10b981', '#047857'], e: '💰' },
-    { label: '自主学习', a: Math.PI, c: ['#f9a8d4', '#ec4899', '#be185d'], e: '📚' },
+    { label: '答题竞赛', a: -Math.PI / 2 + 2 * Math.PI / 5, c: ['#fdba74', '#f97316', '#c2410c'], e: '🏆' },
+    { label: '征集悬赏', a: -Math.PI / 2 + 4 * Math.PI / 5, c: ['#6ee7b7', '#10b981', '#047857'], e: '💰' },
+    { label: '自主学习', a: -Math.PI / 2 + 6 * Math.PI / 5, c: ['#f9a8d4', '#ec4899', '#be185d'], e: '📚' },
+    { label: '作业练习', a: -Math.PI / 2 + 8 * Math.PI / 5, c: ['#5eead4', '#14b8a6', '#0f766e'], e: '📒' },
   ]
   nodes.forEach((n, i) => {
     const ap = easeOut((progress - 0.1 - i * 0.08) * 4)
@@ -637,8 +704,8 @@ function drawSummaryScene(ctx, w, h, progress, t) {
   ctx.font = '800 17px sans-serif'; ctx.shadowColor = 'rgba(0,0,0,0.2)'; ctx.shadowBlur = 4
   ctx.fillText('智汇学场', cx, cy - 6); ctx.shadowBlur = 0
   ctx.font = '500 10.5px sans-serif'; ctx.fillStyle = 'rgba(255,255,255,0.92)'
-  ctx.fillText('AI 驱动 · 四模块闭环', cx, cy + 14)
-  drawText(ctx, '从测评到竞技，从众创到自学 · 一站式成长', cx, h - 40, 14, 600, easeOut((progress - 0.4) * 2.5), 'rgba(255,255,255,0.95)')
+  ctx.fillText('AI 驱动 · 五模块闭环', cx, cy + 14)
+  drawText(ctx, '从测评、作业到竞技，从众创到自学 · 一站式成长', cx, h - 40, 14, 600, easeOut((progress - 0.4) * 2.5), 'rgba(255,255,255,0.95)')
   ctx.restore()
 }
 
@@ -707,6 +774,7 @@ function drawFrame(t) {
   else if (slide.scene === 'competition') drawCompetitionScene(ctx, W, H, Math.min(slideTime / animationDuration, 1))
   else if (slide.scene === 'bounty') drawBountyScene(ctx, W, H, Math.min(slideTime / animationDuration, 1))
   else if (slide.scene === 'study') drawStudyScene(ctx, W, H, Math.min(slideTime / animationDuration, 1))
+  else if (slide.scene === 'homework') drawHomeworkScene(ctx, W, H, Math.min(slideTime / animationDuration, 1))
   else if (slide.scene === 'summary') drawSummaryScene(ctx, W, H, p, t)
 
   drawCaptionBand(ctx, slide, slideTime, W, H)

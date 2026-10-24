@@ -16,7 +16,7 @@
           <span class="brand-text">智汇学场</span>
         </div>
         <div class="navbar-links">
-          <a href="#modules" class="nav-link" @click.prevent="scrollTo('modules')">四大模块</a>
+          <a href="#modules" class="nav-link" @click.prevent="scrollTo('modules')">五大模块</a>
           <a href="#ai" class="nav-link" @click.prevent="scrollTo('ai')">AI 引擎</a>
           <a href="#panorama" class="nav-link" @click.prevent="scrollTo('panorama')">全景能力</a>
           <a href="#voices" class="nav-link" @click.prevent="scrollTo('voices')">用户心声</a>
@@ -39,15 +39,15 @@
         <div class="hero-copy">
           <div class="hero-badge rise" style="--d:.05s">
             <span class="pulse-dot"></span>
-            AI 驱动 · 四模块一体化学习平台
+            AI 驱动 · 五模块一体化学习平台
           </div>
           <h1 class="hero-title">
             <span class="line rise" style="--d:.12s">让每一次学习，</span>
             <span class="line rise" style="--d:.22s">都有<span class="grad-text">场域</span>可依</span>
           </h1>
           <p class="hero-sub rise" style="--d:.34s">
-            在线考试夯实测评、答题竞赛点燃热情、征集悬赏众创题库、自主学习闭环提升——
-            四大场域环环相扣，AI 全程赋能。
+            在线考试夯实测评、作业练习闭环批改、答题竞赛点燃热情、征集悬赏众创题库、自主学习持续提升——
+            五大场域环环相扣，AI 全程赋能。
           </p>
           <div class="hero-btns rise" style="--d:.44s">
             <router-link to="/register" class="btn btn-xl btn-primary btn-glow">
@@ -80,7 +80,7 @@
           </div>
         </div>
 
-        <!-- Hero 右侧：四模块轨道浮标 -->
+        <!-- Hero 右侧：五模块轨道浮标 -->
         <div class="hero-orbit rise" style="--d:.3s">
           <div class="orbit-core">
             <el-icon :size="34"><School /></el-icon>
@@ -114,12 +114,12 @@
       </div>
     </div>
 
-    <!-- ══ 四大模块 · 体验台 ══ -->
+    <!-- ══ 五大模块 · 体验台 ══ -->
     <section class="section" id="modules" ref="modulesRef">
       <div class="container">
         <div class="sec-head reveal">
-          <div class="sec-badge"><el-icon :size="13"><Grid /></el-icon> 四大场域</div>
-          <h2 class="sec-title">一个平台，<span class="grad-text">四种玩法</span></h2>
+          <div class="sec-badge"><el-icon :size="13"><Grid /></el-icon> 五大场域</div>
+          <h2 class="sec-title">一个平台，<span class="grad-text">五种玩法</span></h2>
           <p class="sec-sub">点击左侧模块，右侧即时预览该模块的真实工作界面</p>
         </div>
 
@@ -207,7 +207,7 @@
               </div>
 
               <!-- 自主学习 -->
-              <div v-else class="mock-body mb-learn">
+              <div v-else-if="active === 3" class="mock-body mb-learn">
                 <div class="mb-title">学习计划 <em>时间轴视图</em></div>
                 <div class="tl-plan">
                   <div class="tl-name">三角函数冲刺</div>
@@ -222,6 +222,26 @@
                 <div class="learn-chips">
                   <span class="x-chip">AI 拆计划</span><span class="x-chip">智能错题本</span>
                   <span class="x-chip">遗忘曲线复习</span><span class="x-chip">知识图谱路径</span>
+                </div>
+              </div>
+
+              <!-- 作业练习 -->
+              <div v-else class="mock-body mb-homework">
+                <div class="mb-title">作业批改工作台 <em>教师视角</em></div>
+                <div class="hw-list">
+                  <div class="hw-row" v-for="h in mockData.homeworks" :key="h.name">
+                    <div class="hw-info">
+                      <div class="hw-name">{{ h.name }}</div>
+                      <div class="hw-meta">{{ h.meta }}</div>
+                    </div>
+                    <div class="hw-bar"><i :style="{ width: h.pct + '%', background: h.color }"></i></div>
+                    <div class="hw-state" :style="{ color: h.color, borderColor: h.color }">{{ h.state }}</div>
+                  </div>
+                </div>
+                <div class="hw-flow">布置 → 作答 → AI 初评 → 教师复核 → 讲评订正</div>
+                <div class="learn-chips">
+                  <span class="x-chip">题集/开放双形态</span><span class="x-chip">匿名互评</span>
+                  <span class="x-chip">评分量规</span><span class="x-chip">查重监测</span><span class="x-chip">优秀展示墙</span>
                 </div>
               </div>
             </div>
@@ -253,7 +273,7 @@
       <div class="container">
         <div class="sec-head reveal">
           <div class="sec-badge"><el-icon :size="13"><MagicStick /></el-icon> AI 引擎</div>
-          <h2 class="sec-title">四大模块背后，<span class="grad-text">同一颗 AI 大脑</span></h2>
+          <h2 class="sec-title">五大模块背后，<span class="grad-text">同一颗 AI 大脑</span></h2>
           <p class="sec-sub">从出题、批改到答疑与规划，AI 贯穿教与学的每个环节</p>
         </div>
         <div class="ai-grid reveal">
@@ -344,8 +364,8 @@
       <div class="container">
         <div class="sec-head reveal">
           <div class="sec-badge"><el-icon :size="13"><Refresh /></el-icon> 成长闭环</div>
-          <h2 class="sec-title">测评 → 攻克 → 竞技 → <span class="grad-text">共创</span></h2>
-          <p class="sec-sub">四个模块环环相扣，你的每一步都有去处</p>
+          <h2 class="sec-title">测评 → 巩固 → 攻克 → 竞技 → <span class="grad-text">共创</span></h2>
+          <p class="sec-sub">五个模块环环相扣，你的每一步都有去处</p>
         </div>
         <div class="loop-steps reveal">
           <div v-for="(s, i) in steps" :key="i" class="loop-step" :style="{ '--d': i * 0.12 + 's' }">
@@ -414,7 +434,7 @@
     <!-- ══ CTA ══ -->
     <section class="section cta-section" ref="ctaRef">
       <div class="container cta-box reveal">
-        <h2>四种场域，<span class="grad-text">一个账号</span></h2>
+        <h2>五种场域，<span class="grad-text">一个账号</span></h2>
         <p>注册即享全部功能，把学习交给智汇学场</p>
         <div class="cta-btns">
           <router-link to="/register" class="btn btn-xl btn-primary btn-glow">免费注册 <el-icon :size="17"><ArrowRight /></el-icon></router-link>
@@ -436,7 +456,7 @@
             <div class="brand-logo"><el-icon :size="20"><School /></el-icon></div>
             <span class="brand-text">智汇学场</span>
           </div>
-          <p>融合考试、竞赛、悬赏、自学的一体化智能学习平台。以 AI 赋能教与学，让每个进步都看得见。</p>
+          <p>融合考试、作业、竞赛、悬赏、自学的一体化智能学习平台。以 AI 赋能教与学，让每个进步都看得见。</p>
           <div class="foot-badges">
             <span class="x-chip">Flask 3.1</span><span class="x-chip">Vue 3</span>
             <span class="x-chip">WebSocket 实时对战</span><span class="x-chip">AI 大模型</span>
@@ -462,7 +482,7 @@ import { useRoute } from 'vue-router'
 import {
   School, Moon, Sunny, ArrowRight, VideoPlay, MagicStick, Check, Grid, Refresh,
   Calendar, Trophy, Coin, Reading, EditPen, DataAnalysis, ChatDotRound, Compass,
-  Document, QuestionFilled, User
+  Document, QuestionFilled, User, Notebook
 } from '@element-plus/icons-vue'
 import VideoModal from '../components/VideoModal.vue'
 
@@ -493,7 +513,7 @@ const tickerItems = [
   '8 种题型全覆盖', '积分排行榜', '错题自动沉淀', 'AI 苏格拉底式答疑', '赛季结算晋升',
 ]
 
-// ── 四大模块数据（与登录后 Portal 渐变一致）──
+// ── 五大模块数据（与登录后 Portal 渐变一致）──
 const modules = [
   {
     key: 'exam', short: '考试', title: '在线考试', tagline: '智能组卷 · 自动批改',
@@ -531,6 +551,15 @@ const modules = [
     points: ['智能错题本 · 间隔复习', 'AI 拆解学习计划', '甘特视图 · 时间轴', '知识图谱学习路径', 'AI 答疑 · 每日报告'],
     figures: [{ num: '5 轮', label: '间隔复习' }, { num: '1 句', label: '话拆出计划' }, { num: '24/7', label: 'AI 陪学' }],
   },
+  {
+    key: 'homework', short: '作业', title: '作业练习', tagline: '全链批改 · AI 讲评',
+    icon: markRaw(Notebook), hex: '#10b981',
+    gradient: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
+    mockUrl: 'arena/homework/manage',
+    desc: '贯穿「布置 → 作答 → 批改 → 订正 → 讲评」的作业全链路。题集式与开放式双形态，客观题自动判分、主观题 AI 初评加人工复核，支持匿名互评、评分量规、查重检测与过程监测；退回可订正重交，优秀作业上展示墙，成绩还能汇入课程成绩册。',
+    points: ['题集式 / 开放式双形态', 'AI 批改建议 + 班级讲评', '匿名互评 · 评分量规', '查重检测 · 过程监测', '退回订正 · 优秀展示墙'],
+    figures: [{ num: '2 形态', label: '题集/开放' }, { num: 'AI', label: '初评+讲评' }, { num: '全链', label: '布置到讲评' }],
+  },
 ]
 
 // ── 仿真窗口内的假数据 ──
@@ -549,6 +578,11 @@ const mockData = {
     { title: '补强「二叉树遍历」代码题', meta: '数据结构 · 已收 3 份投稿', reward: 80, state: '待审', cls: 'wait' },
     { title: '英语六级阅读长难句解析题', meta: '大学英语 · 已收 12 份投稿', reward: 45, state: '已结束', cls: 'end' },
   ],
+  homeworks: [
+    { name: '高数第一章 · 课后习题', meta: '题集式 · 已交 48 人待批 12', pct: 75, color: '#10b981', state: '批改中' },
+    { name: '数据结构 · 链表编程题', meta: '开放式 · AI 已初评 30 份', pct: 62, color: '#8b5cf6', state: '待复核' },
+    { name: '大学英语 · 作文 Unit 3', meta: '互评进行中 · 已收 20 份', pct: 40, color: '#f59e0b', state: '互评中' },
+  ],
 }
 
 // ── AI 引擎 ──
@@ -556,7 +590,7 @@ const aiPowers = [
   { title: 'AI 智能出题', hex: '#8b5cf6', icon: markRaw(EditPen), gradient: 'linear-gradient(135deg,#6366f1,#8b5cf6)',
     desc: '按知识点、难度、题型描述需求，秒级生成整卷题目，自动查重去歧义。', mods: ['在线考试', '征集悬赏'] },
   { title: 'AI 语义批改', hex: '#06b6d4', icon: markRaw(DataAnalysis), gradient: 'linear-gradient(135deg,#06b6d4,#0891b2)',
-    desc: '主观题不再逐字苦啃——AI 理解题意给分、标注失分点，教师复核一键确认。', mods: ['在线考试', '自主学习'] },
+    desc: '主观题不再逐字批改——AI 理解题意给分、标注失分点，教师复核一键确认；作业批改同样智能省时。', mods: ['在线考试', '作业练习', '自主学习'] },
   { title: 'AI 学习答疑', hex: '#10b981', icon: markRaw(ChatDotRound), gradient: 'linear-gradient(135deg,#10b981,#059669)',
     desc: '苏格拉底式引导对话，不直接给答案；错题可追问，卡点随时拆解。', mods: ['自主学习'] },
   { title: 'AI 路径规划', hex: '#f59e0b', icon: markRaw(Compass), gradient: 'linear-gradient(135deg,#f59e0b,#d97706)',
@@ -567,10 +601,10 @@ const aiPowers = [
 const roles = [
   { title: '教师 · 教得省心', sub: '出题批改全托管', hex: '#8b5cf6', icon: markRaw(User),
     gradient: 'linear-gradient(135deg,#6366f1,#8b5cf6)',
-    items: ['题库 / 章节 / 知识点三级管理', 'AI 一句话生成整卷试题', '考试发布与切屏监考', '主观题 AI 初评 + 人工复核', '班级成绩知识点失分透视', '发布悬赏补齐题目缺口'] },
+    items: ['题库 / 章节 / 知识点三级管理', 'AI 一句话生成整卷试题', '作业布置 · AI 初评与讲评', '考试发布与切屏监考', '主观题 AI 初评 + 人工复核', '班级成绩知识点失分透视', '发布悬赏补齐题目缺口'] },
   { title: '学生 · 学得带劲', sub: '从测评到逆袭', hex: '#06b6d4', icon: markRaw(Reading),
     gradient: 'linear-gradient(135deg,#06b6d4,#0891b2)',
-    items: ['参加考试并即时查看解析', '错题本自动归集 + 间隔复习', 'AI 拆解学习计划并打卡', '自由刷题按知识点突破', '知识图谱指引学习路径', '答悬赏赚积分冲排行榜'] },
+    items: ['参加考试并即时查看解析', '完成作业并订正重交', '错题本自动归集 + 间隔复习', 'AI 拆解学习计划并打卡', '自由刷题按知识点突破', '知识图谱指引学习路径', '答悬赏赚积分冲排行榜'] },
   { title: '战队队长 · 赛得热血', sub: '带队冲击赛季榜', hex: '#f59e0b', icon: markRaw(Trophy),
     gradient: 'linear-gradient(135deg,#f59e0b,#d97706)',
     items: ['创建 / 加入战队', '战队内部战绩贡献', '团队赛协同作战', '赛季段位晋升结算', '段位勋章墙收藏荣誉'] },
@@ -582,6 +616,7 @@ const dimTags = ['班级均分趋势', '知识点得分率', '题目区分度', 
 // ── 成长闭环 ──
 const steps = [
   { title: '测评摸底', desc: '考试 / 刷题定位当前水平，暴露薄弱知识点', icon: markRaw(Calendar), hex: '#8b5cf6', from: '在线考试', gradient: 'linear-gradient(135deg,#6366f1,#8b5cf6)' },
+  { title: '作业巩固', desc: '课后作业逐个巩固，AI 初评 + 教师反馈精准补齐', icon: markRaw(Notebook), hex: '#10b981', from: '作业练习', gradient: 'linear-gradient(135deg,#10b981,#059669)' },
   { title: '攻克提升', desc: '错题本间隔复习 + AI 学习计划逐个击破', icon: markRaw(Reading), hex: '#06b6d4', from: '自主学习', gradient: 'linear-gradient(135deg,#06b6d4,#0891b2)' },
   { title: '竞技检验', desc: 'PK 与排位赛实战检验，能力段位双晋升', icon: markRaw(Trophy), hex: '#f59e0b', from: '答题竞赛', gradient: 'linear-gradient(135deg,#f59e0b,#d97706)' },
   { title: '共创反哺', desc: '答悬赏、投稿题目赚积分，反哺社区题库', icon: markRaw(Coin), hex: '#ec4899', from: '征集悬赏', gradient: 'linear-gradient(135deg,#ec4899,#db2777)' },
@@ -605,7 +640,7 @@ const voices = [
 
 // ── FAQ ──
 const faqs = [
-  { q: '智汇学场和普通考试系统有什么不同？', a: '普通系统只管「考」，智汇学场把「考 → 学 → 赛 → 创」连成闭环：考试暴露的薄弱知识点自动流入错题本与学习计划，学完可以去 PK 和竞赛检验，还能通过悬赏投稿把你会的题沉淀给社区，积分在四个模块间流通。' },
+  { q: '智汇学场和普通考试系统有什么不同？', a: '普通系统只管「考」，智汇学场把「考 → 学 → 赛 → 创」连成闭环：考试暴露的薄弱知识点自动流入错题本与学习计划，学完可以去 PK 和竞赛检验，还能通过悬赏投稿把你会的题沉淀给社区，积分在五个模块间流通。' },
   { q: 'AI 批改靠谱吗？会不会乱给分？', a: '客观题由系统精确判分；主观题采用 AI 语义评分，按得分点给分并标注失分原因，最终成绩支持教师一键复核调整。AI 是初评助手，打分权始终在教师手里。' },
   { q: '学生和教师账号有什么区别？', a: '教师账号拥有题库管理、组卷、考试发布、批改与成绩分析等教务能力；学生账号可以参加考试、错题复习、自由刷题、参与 PK/竞赛/悬赏。' },
   { q: 'PK 对战和竞赛是怎么匹配的？', a: '实时 PK 通过 WebSocket 毫秒级同步，AI 按答题水平与段位就近匹配；积分竞赛为限时全员同场，按得分与用时实时排行，赛季结束后按名次结算段位并发放勋章。' },
@@ -614,7 +649,7 @@ const faqs = [
 ]
 
 const footCols = [
-  { title: '模块', links: [{ t: '在线考试', to: '/login' }, { t: '答题竞赛', to: '/login' }, { t: '征集悬赏', to: '/login' }, { t: '自主学习', to: '/login' }] },
+  { title: '模块', links: [{ t: '在线考试', to: '/login' }, { t: '作业练习', to: '/login' }, { t: '答题竞赛', to: '/login' }, { t: '征集悬赏', to: '/login' }, { t: '自主学习', to: '/login' }] },
   { title: '能力', links: [{ t: 'AI 智能出题', to: '/login' }, { t: 'AI 语义批改', to: '/login' }, { t: '知识图谱路径', to: '/login' }, { t: '段位勋章体系', to: '/login' }] },
   { title: '开始', links: [{ t: '注册新账号', to: '/register' }, { t: '登录', to: '/login' }, { t: '常见问题', to: '/home' }] },
 ]
@@ -684,7 +719,7 @@ onMounted(() => {
       if (!e.isIntersecting) return
       e.target.classList.add('in')
       if (e.target === heroRef.value) {
-        countUp(s1.value, 10000); countUp(s2.value, 4); countUp(s3.value, 8); countUp(s4.value, 30)
+        countUp(s1.value, 10000); countUp(s2.value, 5); countUp(s3.value, 8); countUp(s4.value, 30)
       }
     })
   }, { threshold: 0.12 })
@@ -823,6 +858,7 @@ onUnmounted(() => {
 .oc2 { right: 0; top: 32%; animation-delay: -1.5s; }
 .oc3 { left: 10%; bottom: 14%; animation-delay: -3s; }
 .oc4 { right: 6%; bottom: 30%; animation-delay: -4.5s; }
+.oc5 { left: 38%; bottom: -1%; animation-delay: -6s; }
 @keyframes float { 50% { transform: translateY(-12px); } }
 
 .scroll-hint { position: absolute; left: 50%; bottom: 26px; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; gap: 8px; color: var(--txt3); font-size: .75rem; cursor: pointer; }
@@ -937,6 +973,17 @@ onUnmounted(() => {
 .tl-task.overdue em { font-style: normal; margin-left: auto; font-size: .7rem; color: #f87171; background: rgba(248,113,113,.12); padding: 2px 8px; border-radius: 99px; }
 .learn-chips { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
 
+/* mock: 作业练习 */
+.mb-homework .hw-list { display: flex; flex-direction: column; gap: 12px; }
+.hw-row { display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: 12px; border: 1px solid var(--line); border-radius: 12px; padding: 12px 16px; background: var(--card); }
+.hw-info { min-width: 0; }
+.hw-name { font-size: .9rem; font-weight: 600; color: var(--txt); }
+.hw-meta { font-size: .74rem; color: var(--txt3); margin-top: 2px; }
+.hw-bar { width: 110px; height: 8px; border-radius: 99px; background: var(--line); overflow: hidden; }
+.hw-bar i { display: block; height: 100%; border-radius: 99px; }
+.hw-state { font-size: .74rem; font-weight: 600; border: 1px solid; border-radius: 99px; padding: 3px 12px; white-space: nowrap; }
+.hw-flow { margin-top: 14px; text-align: center; font-size: .8rem; color: var(--txt2); border: 1px dashed var(--line); border-radius: 10px; padding: 10px; }
+
 /* 模块详情 */
 .mod-detail { border-radius: 18px; border: 1px solid var(--line); background: var(--card); backdrop-filter: blur(14px); padding: 26px 28px; animation: mockIn .55s cubic-bezier(.2,.7,.2,1) .12s backwards; }
 .mod-desc { color: var(--txt2); line-height: 1.85; font-size: .96rem; margin-bottom: 18px; }
@@ -1009,7 +1056,7 @@ onUnmounted(() => {
 .light .mx-chip.alt { color: #0e7490; }
 
 /* ── 成长闭环 ── */
-.loop-steps { display: grid; grid-template-columns: repeat(4, 1fr); gap: 18px; }
+.loop-steps { display: grid; grid-template-columns: repeat(5, 1fr); gap: 16px; }
 .loop-step { position: relative; text-align: center; padding: 34px 20px 28px; border-radius: 18px; border: 1px solid var(--line); background: var(--card); backdrop-filter: blur(12px); transition: all .35s ease; }
 .loop-step:hover { transform: translateY(-6px); border-color: rgba(139,92,246,.45); box-shadow: 0 18px 44px rgba(0,0,0,.3); }
 .loop-num { position: absolute; top: 14px; left: 18px; font-size: 1.5rem; font-weight: 900; color: transparent; -webkit-text-stroke: 1px var(--txt3); opacity: .5; }
