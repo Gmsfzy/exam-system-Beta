@@ -63,6 +63,9 @@
 <script setup>
 import { ref, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
+import { useThemeStore } from '../stores/theme'
+
+const theme = useThemeStore()
 
 const themes = [
   { value: 'light', label: '亮色模式', preview: 'linear-gradient(135deg, #ffffff 0%, #f8fafc 100%)' },
@@ -70,7 +73,7 @@ const themes = [
   { value: 'auto', label: '跟随系统', preview: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)' }
 ]
 
-const currentTheme = ref('dark')
+const currentTheme = ref(theme.isDark ? 'dark' : 'light')
 const saving = ref(false)
 
 const aiSettings = ref({
@@ -85,15 +88,15 @@ const examSettings = ref({
   autoGrade: true
 })
 
-const setTheme = (theme) => {
-  currentTheme.value = theme
-  localStorage.setItem('theme', theme)
-  if (theme === 'dark') {
-    document.documentElement.classList.add('dark')
-  } else if (theme === 'light') {
-    document.documentElement.classList.remove('dark')
-  }
-  ElMessage.success(`已切换到${themes.find(t => t.value === theme)?.label}`)
+const setTheme = (val) => {
+  currentTheme.value = val
+  // 单一真值：委托 theme store（其内部 watch 会同步 localStorage + html.dark），
+  // 不再在本页直接操作 classList，避免与顶栏切换按钮失步
+  const dark = val === 'auto'
+    ? !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches)
+    : val === 'dark'
+  theme.setTheme(dark)
+  ElMessage.success(`已切换到${themes.find(t => t.value === val)?.label}`)
 }
 
 const saveSettings = async () => {

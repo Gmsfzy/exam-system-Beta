@@ -485,8 +485,10 @@ import {
   Document, QuestionFilled, User, Notebook
 } from '@element-plus/icons-vue'
 import VideoModal from '../components/VideoModal.vue'
+import { useThemeStore } from '../stores/theme'
 
 const route = useRoute()
+const theme = useThemeStore()
 const isDark = ref(true)
 const isScrolled = ref(false)
 const showVideoModal = ref(false)
@@ -669,7 +671,9 @@ const scrollToTop = () => window.scrollTo({ top: 0, behavior: 'smooth' })
 
 function toggleTheme() {
   isDark.value = !isDark.value
-  localStorage.setItem('theme', isDark.value ? 'dark' : 'light')
+  // 单一真值：委托 theme store 同步 html.dark + localStorage，
+  // 避免本页只改 localStorage 而 store/DOM 落后，导致进入内页后主题失步（表格深底等）
+  theme.setTheme(isDark.value)
 }
 
 // 数字滚动
