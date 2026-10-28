@@ -203,9 +203,8 @@ const authFetch = (url, options = {}) => {
   })
 }
 
-const unreadCount = computed(() => {
-  return notifications.value.filter(n => !n.read).length
-})
+const unreadCount = ref(0)             // 角标以服务端计数为真值，推送/标记乐观更新，轮询对账纠偏
+const lastListUnread = ref(null)       // 上次对账时的服务端未读数，仅在变化时才拉全量列表
 
 const fetchNotifications = async () => {
   if (!auth.user) return
@@ -225,8 +224,10 @@ const markAsRead = async (notificationId) => {
       method: 'PUT'
     })
     const notification = notifications.value.find(n => n.id === notificationId)
-    if (notification) {
+    if (notification && !notification.read) {
       notification.read = true
+      unreadCount.value = Math.max(0, unreadCount.value - 1)
+      if (lastListUnread.value != null) lastListUnread.value = Math.max(0, lastListUnread.value - 1)
     }
   } catch (error) {
     console.error('标记已读失败:', error)
@@ -241,6 +242,8 @@ const markAllAsRead = async () => {
       method: 'PUT',
     })
     notifications.value.forEach(n => n.read = true)
+    unreadCount.value = 0
+    lastListUnread.value = 0
     ElMessage.success('所有通知已标记为已读')
   } catch (error) {
     console.error('标记全部已读失败:', error)
@@ -255,6 +258,8 @@ const clearAllNotifications = async () => {
       method: 'DELETE'
     })
     notifications.value = []
+    unreadCount.value = 0
+    lastListUnread.value = 0
     ElMessage.success('已清空所有通知')
   } catch (error) {
     console.error('清空通知失败:', error)
@@ -266,6 +271,10 @@ const deleteNotification = async (notification) => {
     await authFetch(`/api/notifications/${notification.id}`, {
       method: 'DELETE'
     })
+    if (!notification.read) {
+      unreadCount.value = Math.max(0, unreadCount.value - 1)
+      if (lastListUnread.value != null) lastListUnread.value = Math.max(0, lastListUnread.value - 1)
+    }
     notifications.value = notifications.value.filter(n => n.id !== notification.id)
   } catch (error) {
     console.error('删除通知失败:', error)
@@ -293,9 +302,46 @@ const startNotificationPolling = () => {
   if (notificationPolling.value) {
     clearInterval(notificationPolling.value)
   }
-  notificationPolling.value = setInterval(() => {
-    fetchNotifications()
-  }, 30000)
+  // 定时器仍 30s 一拍，但 tick 内部按连接状态/页面可见性决定是否真正发请求
+  notificationPolling.value = setInterval(pollTick, 30000)
+}
+
+// 对账：只取未读数（单列 COUNT），仅在数值变化时拉全量列表；旧逻辑每 30s 全量拉列表
+const syncUnread = async (force = false) => {
+  try {
+    const response = await authFetch('/api/notifications/unread')
+    const data = await response.json()
+    const serverUnread = data.unread_count ?? 0
+    unreadCount.value = serverUnread
+    if (force || serverUnread !== lastListUnread.value) {
+      lastListUnread.value = serverUnread
+      await fetchNotifications()
+    }
+  } catch (error) {
+    console.error('未读数对账失败:', error)
+  }
+}
+
+// 推送链路在线时 5 分钟对账一次即可（实时性由 new_notification 保证）；
+// 断线退回 30s 对账；后台标签页直接跳过，回到前台立即补一次
+const RECONCILE_ONLINE_MS = 300000
+const RECONCILE_OFFLINE_MS = 30000
+let reconcileTs = 0
+const pollTick = () => {
+  if (!auth.user || document.hidden) return
+  let connected = false
+  try { connected = getSocket().connected } catch (e) { /* socket 不可用则纯对账模式 */ }
+  const now = Date.now()
+  if (now - reconcileTs < (connected ? RECONCILE_ONLINE_MS : RECONCILE_OFFLINE_MS)) return
+  reconcileTs = now
+  syncUnread()
+}
+
+const onVisibilityChange = () => {
+  if (!document.hidden) {
+    reconcileTs = 0
+    pollTick()
+  }
 }
 
 const stopNotificationPolling = () => {
@@ -309,9 +355,10 @@ onMounted(() => {
   checkMobile()
   window.addEventListener('resize', checkMobile)
   if (auth.user) {
-    fetchNotifications()
+    syncUnread(true)
     startNotificationPolling()
     setupRealtimeProfile()
+    document.addEventListener('visibilitychange', onVisibilityChange)
   }
 })
 
@@ -343,6 +390,10 @@ const setupRealtimeProfile = () => {
       if (!data || data.id == null) return
       if (notifications.value.some(n => n.id === data.id)) return
       notifications.value.unshift(data)
+      if (!data.read) {
+        unreadCount.value += 1
+        if (lastListUnread.value != null) lastListUnread.value += 1
+      }
       const map = { success: 'success', error: 'error', warning: 'warning' }
       ElNotification({
         title: data.title || '新消息',
@@ -370,6 +421,7 @@ const teardownRealtimeProfile = () => {
 
 onUnmounted(() => {
   window.removeEventListener('resize', checkMobile)
+  document.removeEventListener('visibilitychange', onVisibilityChange)
   stopNotificationPolling()
   teardownRealtimeProfile()
 })
