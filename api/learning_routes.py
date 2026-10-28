@@ -39,6 +39,7 @@ from utils.timeutil import utcnow, iso_local, parse_dt
 from utils.logger import logger
 from utils.notify import create_notification
 from api import learning_engine as eng
+from api.exam_engine import check_objective
 from utils.permissions import require_teacher
 from ai_service.gate import (check_ai_quota, charge_ai_quota, log_ai_usage,
                              get_quota_info)
@@ -1264,21 +1265,18 @@ def _question_min_dict(q):
     }
 
 
+# 客观题白名单：仅此四类可自动判对错，其余（主观/编程无 OJ）返回 None 走人工/自评链路
+_OBJECTIVE_TYPES = ('single_choice', 'true_false', 'multiple_choice', 'fill_blank')
+
+
 def _check_answer(q_type, student_answer, correct_answer):
-    """客观题判分：返回 True/False；主观题返回 None（无法自动判对/错）"""
-    if q_type in ('single_choice', 'true_false'):
-        # 单项/判断：直接比对（去空格、统一大小写）
-        return (student_answer or '').strip().upper() == (correct_answer or '').strip().upper()
-    if q_type == 'multiple_choice':
-        # 多项：排序后比对
-        s = ''.join(sorted((student_answer or '').strip().upper()))
-        c = ''.join(sorted((correct_answer or '').strip().upper()))
-        return s == c
-    if q_type == 'fill_blank':
-        # 填空：大小写不敏感
-        return (student_answer or '').strip().lower() == (correct_answer or '').strip().lower()
-    # 主观题无法自动判对错（返回 None，错题收录时跳过）
-    return None
+    """客观题判分：返回 True/False；主观题返回 None（无法自动判对/错）。
+    v5.26 起统一委托 exam_engine.check_objective，与考试/作业判分口径一致
+    （多选提取字母+去重归一，脏格式存量答案不再误判），不另一套实现。"""
+    if q_type not in _OBJECTIVE_TYPES:
+        return None
+    ok, _ratio = check_objective(q_type, student_answer, correct_answer)
+    return ok
 
 
 # ── 专业学习路径 + 知识图谱（一期 MVP） ─────────────────────────────
@@ -2315,7 +2313,7 @@ def api_resource_delete(res_id):
 #  学习闭环：今日学习 / 复习调度 / 节点小测 / 知识库 / 证书
 # ══════════════════════════════════════════════════════════════════
 
-_OBJECTIVE_TYPES = ('single_choice', 'multiple_choice', 'true_false', 'fill_blank')
+# 客观题白名单复用文件前部的 _OBJECTIVE_TYPES（v5.26 收敛，不再重复定义）
 
 
 # ── 今日学习聚合页 ────────────────────────────────────────────────
