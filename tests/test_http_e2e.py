@@ -1968,3 +1968,28 @@ def test_question_tags_http(ctx):
     cloud = c.get('/api/questions/tags', headers=_auth(ctx['t1'])).get_json()['tags']
     assert any(item['tag'] == 'hot' for item in cloud)
 
+
+# ── 前端日志上报（v5.28 克制上报接线，锁定 /api/logs/vue 契约）──
+
+def test_log_vue_requires_login(ctx):
+    """未登录上报拒 401：日志入口需 JWT，防匿名灌日志。"""
+    c = ctx['_client']
+    r = c.post('/api/logs/vue', json={'level': 'ERROR', 'message': 'anon-boom'})
+    assert r.status_code == 401
+
+
+def test_log_vue_accepts_error_report(ctx):
+    """登录态 ERROR 上报返 200（经 vue3_logger 落盘），前端只回传 ERROR 级与此契约一致。"""
+    c = ctx['_client']
+    r = c.post('/api/logs/vue', headers=_auth(ctx['t1']), json={
+        'level': 'ERROR', 'message': 'ChunkLoadError', 'component': 'main',
+        'url': 'http://localhost/homeworks/analytics'})
+    assert r.status_code == 200
+
+
+def test_log_vue_level_fallback(ctx):
+    """白名单外级别不报错，降级 INFO 落盘（后端护栏：前端滥用不会打爆服务）。"""
+    c = ctx['_client']
+    r = c.post('/api/logs/vue', headers=_auth(ctx['t1']), json={'level': 'FATAL', 'message': 'x'})
+    assert r.status_code == 200
+

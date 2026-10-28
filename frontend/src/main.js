@@ -10,11 +10,17 @@ import { FontAwesomeIcon } from '@fortawesome/vue-fontawesome'
 import './style.css'
 import App from './App.vue'
 import router from './router'
+import { logger } from './utils/logger'
 
 
 
 const app = createApp(App)
 const pinia = createPinia()
+
+// v5.28：Vue 渲染/生命周期异常统一进克制上报（仅 ERROR 回传，去重+限流已内置）
+app.config.errorHandler = (err, _instance, info) => {
+  logger.error(`Vue error (${info})`, err instanceof Error ? err : new Error(String(err)))
+}
 
 for (const [key, component] of Object.entries(ElementPlusIconsVue)) {
   app.component(key, component)
