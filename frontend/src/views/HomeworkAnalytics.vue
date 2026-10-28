@@ -102,6 +102,7 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { DataAnalysis, Refresh } from '@element-plus/icons-vue'
+import { useThemeStore } from '../stores/theme'
 import { Chart as ChartJS, LinearScale, CategoryScale, PointElement, LineElement, Filler, Tooltip, Legend } from 'chart.js'
 import { Line } from 'vue-chartjs'
 import { ElMessage } from 'element-plus'
@@ -110,6 +111,7 @@ import request from '../utils/request'
 ChartJS.register(LinearScale, CategoryScale, PointElement, LineElement, Filler, Tooltip, Legend)
 
 const homeworks = ref([])
+const theme = useThemeStore()
 const hwId = ref(null)
 const loading = ref(false)
 const summary = ref({})
@@ -136,11 +138,20 @@ const trendData = computed(() => {
     ],
   }
 })
-const trendOptions = {
-  responsive: true, maintainAspectRatio: false,
-  scales: { y: { min: 0, max: 100, title: { display: true, text: '百分比 %' } } },
-  plugins: { legend: { display: true, position: 'bottom' } },
-}
+const trendOptions = computed(() => {
+  // 坐标轴/图例/标题文字色随暗色主题切换（否则框变暗后默认深灰刻度看不清）
+  const axis = theme.isDark ? '#a3a9b5' : '#606266'
+  const grid = theme.isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)'
+  return {
+    responsive: true, maintainAspectRatio: false,
+    scales: {
+      x: { ticks: { color: axis }, grid: { color: grid } },
+      y: { min: 0, max: 100, ticks: { color: axis }, grid: { color: grid },
+           title: { display: true, text: '百分比 %', color: axis } },
+    },
+    plugins: { legend: { display: true, position: 'bottom', labels: { color: axis } } },
+  }
+})
 
 const loadHomeworks = async () => {
   const res = await request.get('/api/homeworks')
@@ -175,7 +186,7 @@ onMounted(async () => { await loadHomeworks(); await load() })
 .title-icon { vertical-align: middle; margin-right: 6px; color: #6366f1; }
 .sub { font-size: 12px; color: #909399; }
 .toolbar { display: flex; align-items: center; gap: 10px; }
-.label { font-weight: 500; color: #4b5563; font-size: 14px; }
+.label { font-weight: 500; color: var(--el-text-color-regular, #4b5563); font-size: 14px; }
 .stat-cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 16px; }
 .stat-card { border-radius: 12px; padding: 16px 18px; color: #fff; }
 .stat-card .num { font-size: 26px; font-weight: 700; line-height: 1.2; }
@@ -185,13 +196,13 @@ onMounted(async () => { await loadHomeworks(); await load() })
 .stat-card.c2 { background: linear-gradient(135deg, #0ea5e9, #38bdf8); }
 .stat-card.c3 { background: linear-gradient(135deg, #f59e0b, #fbbf24); }
 .stat-card.c4 { background: linear-gradient(135deg, #10b981, #34d399); }
-.pane { background: #fff; border: 1px solid #ebeef5; border-radius: 12px; padding: 16px 18px; margin-bottom: 16px; }
-.pane-title { font-weight: 600; color: #303133; margin-bottom: 12px; font-size: 15px; }
+.pane { background: var(--el-bg-color, #fff); border: 1px solid var(--el-border-color-lighter, #ebeef5); border-radius: 12px; padding: 16px 18px; margin-bottom: 16px; }
+.pane-title { font-weight: 600; color: var(--el-text-color-primary, #303133); margin-bottom: 12px; font-size: 15px; }
 .chart-box { height: 280px; }
 .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
 .heat-list { display: flex; flex-direction: column; gap: 10px; }
 .heat-row { display: flex; align-items: center; gap: 10px; }
-.heat-name { width: 120px; font-size: 13px; color: #4b5563; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.heat-name { width: 120px; font-size: 13px; color: var(--el-text-color-regular, #4b5563); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .heat-bar { flex: 1; }
 .heat-meta { width: 92px; font-size: 12px; color: #909399; text-align: right; }
 .muted { color: #c0c4cc; font-size: 12px; }
