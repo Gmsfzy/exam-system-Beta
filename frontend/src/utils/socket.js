@@ -13,7 +13,12 @@ export const getSocket = () => {
     // 导致 /socket.io 路径无法被 Vite 的 ws:true 规则正确转发，现在已修正
     const serverUrl = import.meta.env.VITE_API_BASE_URL || window.location.origin
     socket = io(serverUrl, {
-      transports: ['websocket', 'polling'],
+      // polling 优先（socket.io 官方默认顺序）：连接后自动升级 websocket。
+      // 不能写成 ['websocket','polling']：engine.io-client 首连只试 transports[0]，
+      // tryAllTransports 默认 false 不会降级回退——waitress 生产模式无 ws 时
+      // 会重连耗尽直接放弃（v5.30 浏览器复验实测）。轮询优先在 dev（Vite ws 代理）
+      // 和生产（waitress 纯轮询）两种形态下都能工作。
+      transports: ['polling', 'websocket'],
       reconnectionAttempts: 5,
       timeout: 5000,
     })

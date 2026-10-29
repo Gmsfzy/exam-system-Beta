@@ -1,7 +1,8 @@
-# 持续集成回归门（v5.22）
-# 目标：把本地门禁（全量 pytest + 前端 vite build）搬到 CI，
-# 用 Python 3.10 + 3.12 双版本矩阵拦截「开发机 3.12 写出 3.12-only 语法」类环境漂移
-# （见 环境兼容说明.md 三、CI/回归门建议）。
+# 持续集成回归门（v5.22 建立，v5.30 修订矩阵）
+# 目标：把本地门禁（全量 pytest + 前端 vite build）搬到 CI。
+# 矩阵演进：v5.22 建门时依赖支持 3.10+3.12 双版本；后 numpy==2.5.3（requires_python>=3.12，
+# PyPI 实测）与 pandas==3.0.5（>=3.11）抬高了地板，3.10/3.11 在 pip install 即失败，
+# 故收敛为 3.12 单版本（与本地开发/部署基线一致）。语法漂移拦截由 compileall 步骤承担。
 name: CI
 
 on:
@@ -18,7 +19,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ['3.10', '3.12']
+        python-version: ['3.12']
     env:
       # config.py 在非 DEBUG 下对 SECRET_KEY fail-fast；CI 提供固定测试密钥，
       # 保持 DEBUG=false 的生产校验路径被真正执行。测试走临时/内存库，不触碰真实 DB。
