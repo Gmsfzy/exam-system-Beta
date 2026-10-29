@@ -184,11 +184,13 @@ def test_option_shuffle_only_choice(hw_env):
         shuffle_options=True)
     sub = hw_env['make_sub'](hw, hw_env['s1'], {})
     _, option_map = ensure_submission_paper(hw, sub)
-    # 仅选择题可能有映射；简答题一定不在；且未乱序（恒等）的选择题不入库
+    # 仅选择题参与记账；简答题一定不在。
+    # v5.37 口径：每道选择题都有 key（不乱＝空列表），旧断言「恒等不落库」会造成
+    # 跨请求重抽排列、把正确作答反归成错字母，已由 test_option_map_stability_v5_37 钉死。
     assert str(hw_env['q_short'].id) not in option_map
+    assert {str(hw_env['q_single'].id), str(hw_env['q_multi'].id)} == set(option_map)
     for qid, perm in option_map.items():
-        assert sorted(perm) == [0, 1, 2, 3]        # 4 选项的合法置换
-        assert perm != [0, 1, 2, 3]                 # 恒等置换不落库
+        assert perm == [] or sorted(perm) == [0, 1, 2, 3]   # 空=不乱，非空=4 选项的合法置换
 
 
 def test_option_answer_roundtrip(hw_env):
@@ -198,7 +200,7 @@ def test_option_answer_roundtrip(hw_env):
     sub = hw_env['make_sub'](hw, hw_env['s1'], {})
     _, option_map = ensure_submission_paper(hw, sub)
     perm = option_map.get(str(hw_env['q_single'].id))
-    if not perm:   # 极端：抽到恒等置换未落库，视为原样，往返仍成立
+    if not perm:   # v5.37：空列表＝这题不乱，等价恒等排列，往返同样成立
         perm = [0, 1, 2, 3]
     # 正确答案原始为 B（索引1）。学生看到的显示位 = 原始 B 落在哪个显示字母
     display = map_letters('B', perm, reverse=True)   # 原始→显示

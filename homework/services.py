@@ -175,11 +175,16 @@ def ensure_submission_paper(hw, sub):
                 opts = q.options if isinstance(q.options, list) else []
                 if len(opts) < 2:
                     continue
-                perm = list(range(len(opts)))
+                identity = list(range(len(opts)))
+                perm = identity[:]
                 random.shuffle(perm)
-                if perm != list(range(len(opts))):
-                    option_map[str(qid)] = perm
-                    dirty = True
+                # v5.37 恒等排列也必须记账（空列表 = 「这题不乱」的决策已定）：
+                # 本函数在 take / 保存 / 提交上都会被调用，只记非恒等排列时，
+                # 抽中恒等那一档（1/n!）不落库 → 下一次调用重抽新排列并按它反归，
+                # 学生在原序里选的 C 被换成 A/B，正确答案判 0 分（偶发、难复现）。
+                # 读取侧一律以「perm 是否 falsy」判乱序，空列表即原样显示/存答。
+                option_map[str(qid)] = [] if perm == identity else perm
+                dirty = True
             if dirty:
                 sub.option_map_json = option_map
 
