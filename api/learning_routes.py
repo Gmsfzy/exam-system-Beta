@@ -3407,6 +3407,33 @@ def api_checkin_calendar():
 
 _NOTE_CONTENT_MAX = 20000
 
+_MD_LINK_RE = re.compile(r'!?\[([^\]]*)\]\(([^)\s]*)\)')
+
+
+def _md_excerpt(text, limit=100):
+    """把 Markdown 正文压成卡片摘要：去图片/链接语法（保留链接文字）、代码块、
+    标题/列表/引用符号与强调星号，公式折叠为「[公式]」，并压缩空白。
+
+    旧实现 `re.sub('[#*`>-]', '')` 会把正文里的连字符一并删掉，却管不住
+    `![图](/uploads/x.png)` 与 `$$\\lim\\dots$$` 这种源码噪声直接露到卡片上，故收敛为专用函数。
+    """
+    s = text or ''
+    s = re.sub(r'```[\s\S]*?```', ' ', s)                    # 代码块整体去掉
+    # 公式（先于行内码处理，统一折叠为一个标记，不致摘要被 LaTeX 源码占满）
+    s = re.sub(r'\$\$[\s\S]+?\$\$', '[公式]', s)
+    s = re.sub(r'\\\([\s\S]+?\\\)', '[公式]', s)
+    s = re.sub(r'\\\[([\s\S]+?)\\\]', '[公式]', s)
+    # 行内 $...$：沿用 RichContent 的严格口径（首尾不得为空白），避免「$10 与 $20」这类金额被误折叠
+    s = re.sub(r'\$([^\s$](?:[^$]*?[^\s$])?)\$', '[公式]', s)
+    s = _MD_LINK_RE.sub(lambda m: m.group(1) or ' ', s)      # [文字](链) / ![](链) → 文字
+    s = re.sub(r'`([^`]*)`', r'\1', s)                       # 行内码
+    s = re.sub(r'^\s{0,3}#{1,6}\s*', '', s, flags=re.M)      # 标题
+    s = re.sub(r'^\s{0,3}(?:[-*+]|\d+[.、])\s+', '', s, flags=re.M)  # 列表符号
+    s = re.sub(r'^\s{0,3}>\s?', '', s, flags=re.M)           # 引用
+    s = re.sub(r'\*\*|\*|~~|==', '', s)                      # 强调/删除线（不动下划线，避免碎标识符）
+    s = re.sub(r'\s+', ' ', s).strip()
+    return s[:limit]
+
 
 def _note_to_dict(n, brief=False):
     d = {'id': n.id, 'title': n.title, 'category': n.category,
@@ -3415,7 +3442,7 @@ def _note_to_dict(n, brief=False):
                          for a in (n.attachment_json or [])],
          'created_at': iso_local(n.created_at), 'updated_at': iso_local(n.updated_at)}
     if brief:
-        d['excerpt'] = re.sub(r'[#*`>\-]', '', n.content or '')[:100]
+        d['excerpt'] = _md_excerpt(n.content, 100)
     else:
         d['content'] = n.content
     return d
@@ -3746,7 +3773,7 @@ def _material_to_dict(m, with_content=False, current_user_id=None):
          'status': m.status, 'knowledge_point_id': m.knowledge_point_id,
          'author': m.user.username if m.user else None, 'owner_id': m.user_id,
          'fav_count': len(m.favorites),
-         'excerpt': re.sub(r'[#*`>\-\n]', '', m.content or '')[:80],
+         'excerpt': _md_excerpt(m.content, 80),
          'created_at': iso_local(m.created_at), 'updated_at': iso_local(m.updated_at)}
     if current_user_id is not None:
         d['is_favorited'] = any(f.user_id == current_user_id for f in m.favorites)

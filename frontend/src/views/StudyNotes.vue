@@ -32,7 +32,9 @@
     <el-empty v-if="!loading && !notes.length" description="还没有笔记，写一篇或让 AI 讲一个知识点转存吧" />
 
     <div class="note-grid">
-      <div v-for="n in notes" :key="n.id" class="note-card" :class="{ pinned: n.pinned }" @click="openEditor(n)">
+      <!-- 单击卡片进阅读视图；编辑入口在阅读视图内（不绑双击，避免 click+dblclick 连发弹两层） -->
+      <div v-for="n in notes" :key="n.id" class="note-card" :class="{ pinned: n.pinned }"
+           @click="openViewer(n)">
         <div class="note-card-head">
           <span class="note-title">{{ n.title }}</span>
           <el-icon v-if="n.pinned" class="pin-icon" title="已置顶" @click.stop="togglePin(n)"><Top /></el-icon>
@@ -48,6 +50,32 @@
         </div>
       </div>
     </div>
+
+    <!-- 笔记阅读视图（单击卡片：直接看渲染后的正文） -->
+    <el-dialog v-model="viewerVisible" :title="viewer.title || '笔记'" width="760px" top="6vh">
+      <div v-loading="viewerLoading" class="viewer-body">
+        <div class="viewer-meta">
+          <el-tag v-if="viewer.category" size="small" effect="plain">{{ viewer.category }}</el-tag>
+          <el-tag v-for="t in (viewer.tags || [])" :key="t" size="small" type="info" effect="plain">{{ t }}</el-tag>
+          <el-tag v-if="viewer.source === 'explain'" size="small" type="warning" effect="plain">AI 讲解</el-tag>
+          <span class="note-time">{{ fmtTime(viewer.updated_at) }}</span>
+        </div>
+        <el-scrollbar max-height="60vh">
+          <RichContent :content="viewer.content || '（空白笔记）'" class="viewer-content" />
+        </el-scrollbar>
+        <div v-if="(viewer.attachments || []).length" class="viewer-attach">
+          <span class="img-label">附件：</span>
+          <a v-for="(a, i) in viewer.attachments" :key="i" class="att-link" @click="downloadFromViewer(i, a)">
+            {{ a.filename }}（{{ fmtSize(a.size) }}）
+          </a>
+        </div>
+      </div>
+      <template #footer>
+        <el-button type="danger" plain @click="removeNoteFromViewer">删除</el-button>
+        <el-button @click="viewerVisible = false">关闭</el-button>
+        <el-button type="primary" @click="editFromViewer">编辑</el-button>
+      </template>
+    </el-dialog>
 
     <!-- 笔记编辑抽屉 -->
     <el-drawer v-model="editorVisible" :title="editor.id ? '编辑笔记' : '新建笔记'" size="46%">
@@ -85,8 +113,19 @@
                      @click="removeAttachment(i)">删{{ i + 1 }}</el-button>
         </div>
         <div v-else-if="!editor.id" class="attach-hint">附件可传文档/表格(含csv)/压缩包/图片/视频/代码，≤50MB；新建笔记需先保存后再上传附件</div>
-        <el-input v-model="editor.content" type="textarea" :rows="14" maxlength="20000" show-word-limit
-                  placeholder="支持 Markdown 语法；插入的图片以链接形式嵌入，点击链接可查看" />
+        <div class="editor-mode">
+          <el-radio-group v-model="editMode" size="small">
+            <el-radio-button value="write">编写</el-radio-button>
+            <el-radio-button value="preview">预览</el-radio-button>
+          </el-radio-group>
+          <span class="mode-hint">正文支持 Markdown 与 LaTeX 公式（$...$），预览即最终阅读效果</span>
+        </div>
+        <el-input v-show="editMode === 'write'" v-model="editor.content" type="textarea" :rows="14"
+                  maxlength="20000" show-word-limit
+                  placeholder="支持 Markdown 语法；插入的图片以链接形式嵌入，保存后可在阅读视图直接看到" />
+        <el-scrollbar v-if="editMode === 'preview'" max-height="42vh" class="editor-preview">
+          <RichContent :content="editor.content || '（暂无内容）'" />
+        </el-scrollbar>
         <div v-if="editorImages.length" class="editor-images">
           <span class="img-label">已插入图片：</span>
           <a v-for="(u, i) in editorImages" :key="i" :href="u" target="_blank" class="img-link">图 {{ i + 1 }}</a>
@@ -132,6 +171,7 @@ import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Search, Plus, Top, Picture, Paperclip, MagicStick } from '@element-plus/icons-vue'
 import request from '../utils/request'
+import RichContent from '../components/RichContent.vue'
 
 const notes = ref([])
 const allTags = ref([])
@@ -163,17 +203,74 @@ async function load() {
 }
 onMounted(load)
 
+// ── 阅读视图（单击卡片）：正文走全站统一 RichContent 渲染，不直接进编辑器 ──
+const viewerVisible = ref(false)
+const viewerLoading = ref(false)
+const viewer = reactive({ id: null, title: '', content: '', category: '', tags: [], source: '', pinned: false, attachments: [], updated_at: '' })
+
+async function openViewer(n) {
+  viewer.id = n.id
+  viewer.title = n.title
+  viewer.content = ''
+  viewer.category = n.category || ''
+  viewer.tags = [...(n.tags || [])]
+  viewer.source = n.source || ''
+  viewer.pinned = !!n.pinned
+  viewer.attachments = [...(n.attachments || [])]
+  viewer.updated_at = n.updated_at || ''
+  viewerVisible.value = true
+  viewerLoading.value = true
+  try {
+    // 列表只给 excerpt，正文需拉详情
+    const res = await request.get(`/api/learning/notes/${n.id}`)
+    const d = res.data
+    viewer.content = d.content || ''
+    viewer.attachments = [...(d.attachments || [])]
+    viewer.updated_at = d.updated_at || viewer.updated_at
+  } catch (e) { /* 拦截器已提示 */ }
+  viewerLoading.value = false
+}
+
+function editFromViewer() {
+  const n = { ...viewer, attachments: viewer.attachments }
+  viewerVisible.value = false
+  openEditor(n)
+}
+
+async function removeNoteFromViewer() {
+  try {
+    await ElMessageBox.confirm('确定删除这篇笔记？', '确认')
+    await request.delete(`/api/learning/notes/${viewer.id}`)
+    ElMessage.success('已删除')
+    viewerVisible.value = false
+    await load()
+  } catch (e) { /* 取消或失败 */ }
+}
+
+async function downloadFromViewer(idx, a) {
+  try {
+    const res = await request.get(`/api/learning/attachments/${viewer.id}/${idx}/download`, { responseType: 'blob' })
+    const link = document.createElement('a')
+    link.href = URL.createObjectURL(res.data)
+    link.download = a.filename || 'download'
+    link.click()
+    URL.revokeObjectURL(link.href)
+  } catch (e) { /* ignore */ }
+}
+
 // ── 编辑器 ──
 const editorVisible = ref(false)
 const saving = ref(false)
 const uploading = ref(false)
 const fileInput = ref(null)
+const editMode = ref('write')
 const editor = reactive({ id: null, title: '', content: '', category: '', tags: [], pinned: false })
 
 const editorImages = computed(() =>
   (editor.content.match(/\/uploads\/[\w.\-/]+/g) || []))
 
 function openEditor(n) {
+  editMode.value = 'write'
   editor.id = n ? n.id : null
   editor.title = n ? n.title : ''
   editor.content = ''
@@ -343,8 +440,8 @@ async function cardToNote(card) {
     explainVisible.value = false
     await load()
     if (res.data.note) {
-      // 打开刚转存的笔记确认
-      openEditor({ id: res.data.note.id, title: res.data.note.title, category: res.data.note.category, tags: res.data.note.tags, pinned: false })
+      // 打开刚转存的笔记确认（转存结果以阅读视图呈现，不直接进编辑态）
+      openViewer({ id: res.data.note.id, title: res.data.note.title, category: res.data.note.category, tags: res.data.note.tags, pinned: false, attachments: [] })
     }
   } catch (e) { /* ignore */ }
   toNoteLoading.value = false
@@ -393,6 +490,14 @@ async function removeCard(cid) {
 .editor-body { display: flex; flex-direction: column; gap: 12px; }
 .editor-row { display: flex; gap: 10px; }
 .editor-tools { display: flex; align-items: center; gap: 14px; }
+.editor-mode { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.mode-hint { font-size: 12px; color: var(--text-muted); }
+.editor-preview { border: 1px solid var(--border-color); border-radius: 8px; padding: 12px 14px; min-height: 180px; }
+
+.viewer-body { display: flex; flex-direction: column; gap: 10px; }
+.viewer-meta { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.viewer-content { font-size: 14px; color: var(--text-primary); padding-right: 12px; }
+.viewer-attach { font-size: 12px; color: var(--text-muted); display: flex; align-items: center; flex-wrap: wrap; gap: 6px; border-top: 1px solid var(--border-color); padding-top: 10px; }
 .editor-images { font-size: 12px; color: var(--text-muted); }
 .img-label { margin-right: 6px; }
 .img-link { color: #0891b2; margin-right: 10px; }

@@ -35,8 +35,10 @@ const PURIFY_CONFIG = {
              'controls', 'autoplay', 'loop', 'muted', 'poster', 'preload',
              'frameborder', 'allow', 'allowfullscreen', 'referrerpolicy',
              'colspan', 'rowspan', 'align', 'loading', 'decoding', 'style', 'class', 'id'],
-  // 仅放行 http(s)/mailto/tel，以及「data:image/*」内联图片；其余 data:/javascript: 一律拒绝
-  ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto|tel):|data:image\/)/i,
+  // 放行 http(s)/mailto/tel、「data:image/*」内联图片，以及站内相对路径（/uploads/...）。
+  // 笔记/资料插图与链接常写为 `/uploads/xxx.png`，不给放行会被剔掉 src 变成碎图；
+  // 但必须排除协议相对写法 `//host/...`（等价于站外跳板），故用 (?!/) 卡住第二个斜杠。
+  ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto|tel):|data:image\/|\/(?!\/))/i,
 }
 
 // 一次性钩子：外链安全化 + iframe 收敛 + KaTeX class 保留
