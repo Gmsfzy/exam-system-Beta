@@ -1,6 +1,7 @@
 from flask import Blueprint, request, jsonify, send_from_directory, Response
 from database.models import Question, Major, Course, Department, QuestionTypeEnum, QUESTION_TYPE_LABELS, DifficultyEnum
 from database import db
+from config import Config
 import os
 import uuid
 import io
@@ -9,7 +10,8 @@ import json
 
 from utils.timeutil import iso_local
 
-UPLOAD_FOLDER = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'uploads')
+# 与 app.py 的 UPLOAD_FOLDER 保持同源：统一使用 Config.APP_DIR（frozen = exe 旁；dev = 项目根）
+UPLOAD_FOLDER = os.path.join(Config.APP_DIR, 'uploads')
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'mp4', 'webm', 'avi', 'mov'}
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)

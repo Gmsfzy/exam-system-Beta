@@ -1,10 +1,28 @@
 import logging
 import os
+import sys
 from logging.handlers import RotatingFileHandler
 
 # 单文件大小上限 10MB，保留 30 个轮转文件
 _MAX_BYTES = 10 * 1024 * 1024
 _BACKUP_COUNT = 30
+
+
+def _get_log_dir():
+    """日志目录：frozen 模式下放在 exe 同级 logs/（用户可写）；
+    开发模式下放在项目根 logs/。绝对不能用 __file__ 往上拼，frozen 时 __file__ 指
+    向只读临时解压目录 _MEIPASS。"""
+    if getattr(sys, 'frozen', False):
+        app_dir = os.path.dirname(os.path.abspath(sys.executable))
+    else:
+        app_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+    log_dir = os.path.join(app_dir, 'logs')
+    os.makedirs(log_dir, exist_ok=True)
+    return log_dir
+
+
+def _log_dir():
+    return _get_log_dir()
 
 
 class SafeRotatingFileHandler(RotatingFileHandler):
@@ -49,8 +67,7 @@ def setup_logger():
     """root logger：只负责 app.log（全量）+ error.log（错误）。
     access / vue3 由各自独立 logger 处理，避免同一文件被多个 handler 打开。
     """
-    log_dir = os.path.join(os.path.dirname(__file__), '..', 'logs')
-    os.makedirs(log_dir, exist_ok=True)
+    log_dir = _log_dir()
 
     logger = logging.getLogger()
     logger.setLevel(logging.DEBUG)
@@ -93,7 +110,7 @@ def get_access_logger():
     if access_logger.handlers:
         return access_logger
 
-    log_dir = os.path.join(os.path.dirname(__file__), '..', 'logs')
+    log_dir = _log_dir()
     h = _make_file_handler(os.path.join(log_dir, 'access.log'), logging.INFO)
     h.setFormatter(logging.Formatter('%(asctime)s - access - %(levelname)s - %(message)s'))
     access_logger.addHandler(h)
@@ -107,7 +124,7 @@ def get_vue3_logger():
     if vue3_logger.handlers:
         return vue3_logger
 
-    log_dir = os.path.join(os.path.dirname(__file__), '..', 'logs')
+    log_dir = _log_dir()
     h = _make_file_handler(os.path.join(log_dir, 'vue3.log'), logging.DEBUG)
     h.setFormatter(logging.Formatter('%(asctime)s - vue3 - %(levelname)s - %(message)s'))
     vue3_logger.addHandler(h)

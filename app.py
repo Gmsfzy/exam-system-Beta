@@ -166,6 +166,62 @@ def _error_response(code, title, message):
         return jsonify({"message": message}), code
     return _static_error_page(code, title, message)
 
+
+@app.route('/healthz', methods=['GET'])
+def healthz():
+    """轻量健康检查端点（K8s / 负载均衡 / 运维探针通用）。
+
+    仅返回关键依赖的可达性状态，不查库（数据库 ping 由更深层探针处理）：
+    - ok          : 服务整体健康，可接受流量
+    - db_ok       : SQLAlchemy engine 能执行 SELECT 1
+    - redis       : 缓存层连接状态（None=未配置，True=可达，False=不可达）
+    - socketio    : 实时推送是否已启用
+    - scheduler   : 后台调度线程是否存活
+    - spa_hosting : 前端托管开关
+    - app_dir     : 应用根目录（方便 frozen/开发模式对比）
+    """
+    import threading as _threading
+
+    # DB 轻量探针：SELECT 1，不触发 ORM session 初始化
+    db_ok = True
+    try:
+        with db.engine.connect() as conn:
+            conn.execute(db.text('SELECT 1'))
+    except Exception as e:
+        db_ok = False
+
+    # 缓存后端类型（None=完全未启用，'real'=真实 Redis 服务，'fake'=Fakeredis）
+    # 不再只给布尔值，生产部署时能一眼看出是哪种后端
+    try:
+        from utils.redis_cache import current_backend
+        redis_status = current_backend()   # None / 'real' / 'fake'
+    except Exception:
+        redis_status = None
+
+    # scheduler 线程
+    try:
+        from utils.scheduler import _thread as _sched_thread
+        scheduler_alive = bool(_sched_thread and _sched_thread.is_alive())
+    except Exception:
+        scheduler_alive = False
+
+    # Socket.IO
+    socketio_alive = socketio is not None
+
+    payload = {
+        'ok': db_ok,                       # 以 DB 可达性为准的核心健康
+        'db_ok': db_ok,
+        'redis': redis_status,             # None=未配置
+        'socketio': socketio_alive,
+        'scheduler': scheduler_alive,
+        'spa_hosting': Config.ENABLE_SPA_HOSTING,
+        'app_dir': Config.APP_DIR,
+        'frozen': getattr(sys, 'frozen', False),
+    }
+    status_code = 200 if db_ok else 503
+    return jsonify(payload), status_code
+
+
 def _is_browser_route(path):
     """浏览器前端路由：GET 且最后一段无文件后缀，且不属于后端保留前缀"""
     if request.method != 'GET':
@@ -215,7 +271,7 @@ def internal_error(error):
 # - /socket.io Socket.IO 轮询/握手，请求频率极高
 # - /api/csrf-token 前端高频获取
 # - SPA 静态资源（js/css/图片/字体等）
-_LOG_SILENT_PREFIXES = ('/api/logs', '/socket.io', '/api/csrf-token', '/assets/')
+_LOG_SILENT_PREFIXES = ('/healthz', '/api/logs', '/socket.io', '/api/csrf-token', '/assets/')
 _LOG_SILENT_SUFFIXES = ('.js', '.css', '.ico', '.png', '.jpg', '.jpeg', '.gif',
                         '.svg', '.woff', '.woff2', '.ttf', '.eot', '.map')
 
@@ -343,13 +399,30 @@ def auto_end_expired_exams():
 # 开发时页面由 Vite(5173) 提供并代理 /api 到本服务；生产/单文件部署时 Flask 直接
 # 托管 dist：/assets/* 为带哈希的长缓存资源，其余 GET 浏览器路径统一回退
 # index.html，由 vue-router 接管（支持深层路由刷新/分享链接直达）。
-if getattr(sys, 'frozen', False):
-    _BUNDLE_ROOT = getattr(sys, '_MEIPASS', os.path.dirname(sys.executable))
-else:
-    _BUNDLE_ROOT = os.path.dirname(os.path.abspath(__file__))
-FRONTEND_DIST = os.path.join(_BUNDLE_ROOT, 'frontend', 'dist')
+#
+# 启用条件：Config.ENABLE_SPA_HOSTING = true（默认）
+#   - 前端独立部署到 CDN/Nginx 时设为 false，不注册 SPA 路由
+#
+# dist 目录解析顺序（FRONTEND_DIST 最终值）：
+#   1. Config.FRONTEND_DIST 显式覆盖（环境变量）
+#   2. frozen 模式：_MEIPASS/frontend/dist 或 APP_DIR/frontend/dist
+#   3. 开发模式：__file__ 所在目录的 frontend/dist
+if Config.ENABLE_SPA_HOSTING:
+    if Config.FRONTEND_DIST:
+        # 环境变量显式指定了 dist 路径
+        FRONTEND_DIST = Config.FRONTEND_DIST
+    elif getattr(sys, 'frozen', False):
+        _bundle_candidates = [
+            os.path.join(getattr(sys, '_MEIPASS', ''), 'frontend', 'dist'),
+            os.path.join(Config.APP_DIR, 'frontend', 'dist'),
+        ]
+        # 找到第一个含 index.html 的候选；都没有就用 _MEIPASS 里的那个（会走到"前端未构建"占位）
+        FRONTEND_DIST = next((p for p in _bundle_candidates if os.path.isfile(os.path.join(p, 'index.html'))),
+                             _bundle_candidates[0])
+    else:
+        FRONTEND_DIST = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'frontend', 'dist')
 
-_SPA_MISSING_HTML = """<!DOCTYPE html>
+    _SPA_MISSING_HTML = """<!DOCTYPE html>
 <html lang="zh-CN">
 <head><meta charset="UTF-8"><title>前端未构建</title>
 <style>body{font-family:"Microsoft YaHei",sans-serif;background:#f3f4f6;display:flex;
@@ -360,35 +433,42 @@ box-shadow:0 10px 40px rgba(0,0,0,.08)}code{background:#f3f4f6;padding:2px 6px;b
 <body><div class="card"><h2>前端页面尚未构建</h2>
 <p>开发模式请运行 <code>npm run dev</code> 访问 Vite 开发服务器（默认 5173 端口）；</p>
 <p>生产部署请在 <code>frontend</code> 目录执行 <code>npm run build</code> 生成 dist 后重启服务。</p>
+<p>若前端已独立部署（CDN/Nginx），请在 .env 中设 <code>ENABLE_SPA_HOSTING=false</code>。</p>
 </div></body></html>"""
 
-def _spa_index_response():
-    index_path = os.path.join(FRONTEND_DIST, 'index.html')
-    if os.path.isfile(index_path):
-        resp = send_from_directory(FRONTEND_DIST, 'index.html')
-        # 入口文档禁止长缓存，确保发版后立即拿到最新哈希资源引用
-        resp.headers['Cache-Control'] = 'no-cache'
+    def _spa_index_response():
+        index_path = os.path.join(FRONTEND_DIST, 'index.html')
+        if os.path.isfile(index_path):
+            resp = send_from_directory(FRONTEND_DIST, 'index.html')
+            # 入口文档禁止长缓存，确保发版后立即拿到最新哈希资源引用
+            resp.headers['Cache-Control'] = 'no-cache'
+            return resp
+        return _SPA_MISSING_HTML, 200, {'Content-Type': 'text/html; charset=utf-8'}
+
+    @app.route('/assets/<path:filename>')
+    def spa_assets(filename):
+        resp = send_from_directory(os.path.join(FRONTEND_DIST, 'assets'), filename)
+        resp.headers['Cache-Control'] = 'public, max-age=31536000, immutable'
         return resp
-    return _SPA_MISSING_HTML, 200, {'Content-Type': 'text/html; charset=utf-8'}
 
-@app.route('/assets/<path:filename>')
-def spa_assets(filename):
-    resp = send_from_directory(os.path.join(FRONTEND_DIST, 'assets'), filename)
-    resp.headers['Cache-Control'] = 'public, max-age=31536000, immutable'
-    return resp
+    @app.route('/', defaults={'path': ''})
+    @app.route('/<path:path>')
+    def spa_entry(path):
+        # 后端保留前缀未被各自路由匹配时，不做 SPA 回退
+        if path.startswith(('api/', 'socket.io', 'uploads/')):
+            abort(404)
+        # 带文件后缀的路径不属于前端路由（如 favicon.ico），不回退
+        if '.' in path.rsplit('/', 1)[-1]:
+            abort(404)
+        return _spa_index_response()
+else:
+    # SPA 托管关闭：定义空的 FRONTEND_DIST 供其他模块引用（避免 ImportError）
+    FRONTEND_DIST = None
 
-@app.route('/', defaults={'path': ''})
-@app.route('/<path:path>')
-def spa_entry(path):
-    # 后端保留前缀未被各自路由匹配时，不做 SPA 回退
-    if path.startswith(('api/', 'socket.io', 'uploads/')):
-        abort(404)
-    # 带文件后缀的路径不属于前端路由（如 favicon.ico），不回退
-    if '.' in path.rsplit('/', 1)[-1]:
-        abort(404)
-    return _spa_index_response()
-
-UPLOAD_FOLDER = os.path.join(os.path.dirname(__file__), 'uploads')
+# 用户可写资源根目录（frozen = exe 所在目录；dev = 项目根）
+# uploads/ 存放用户上传的图片/视频附件；与 instance/ 一样必须落在 APP_DIR 下
+# （PyInstaller _MEIPASS 只读且进程退出即清理，绝不能用作上传目录）
+UPLOAD_FOLDER = os.path.join(Config.APP_DIR, 'uploads')
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 @app.route('/uploads/<path:filename>')
@@ -527,11 +607,17 @@ if __name__ == '__main__':
     host = app.config['HOST']
     port = app.config['PORT']
 
-    if os.path.isfile(os.path.join(FRONTEND_DIST, 'index.html')):
-        print(f'[SPA] Vue3 构建产物托管于: {FRONTEND_DIST}')
+    # ── SPA 托管状态打印 ──
+    if Config.ENABLE_SPA_HOSTING:
+        if FRONTEND_DIST and os.path.isfile(os.path.join(FRONTEND_DIST, 'index.html')):
+            print(f'[SPA] Vue3 构建产物托管于: {FRONTEND_DIST}')
+        else:
+            dist_info = FRONTEND_DIST or '(未配置)'
+            print(f'[SPA] 托管已启用但未发现前端构建产物 ({dist_info})：'
+                  f'开发请用 Vite(5173)，生产请先在 frontend 目录执行 npm run build；'
+                  f'若前端已独立部署，可在 .env 中设 ENABLE_SPA_HOSTING=false')
     else:
-        print(f'[SPA] 未发现 {FRONTEND_DIST}\\index.html：'
-              f'开发请用 Vite(5173)，生产请先在 frontend 目录执行 npm run build')
+        print('[SPA] 前端托管已关闭（ENABLE_SPA_HOSTING=false），请确保前端从 Nginx/CDN 独立提供')
 
     if app.config['DEBUG']:
         # 开发模式：Werkzeug 开发服务器（threading 模式下 Socket.IO 经 simple-websocket 支持 WebSocket）

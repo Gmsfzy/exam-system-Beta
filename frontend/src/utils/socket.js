@@ -8,7 +8,11 @@ let socket = null
  */
 export const getSocket = () => {
   if (!socket) {
-    socket = io(import.meta.env.VITE_API_BASE_URL || window.location.origin.replace(/:\d+$/, ':5000'), {
+    // 服务器 URL：显式配置则直连，否则走同源（Vite 代理会把 /socket.io 转发到后端）
+    // 之前的 origin.replace(/:\d+$/, ':5000') 会在 dev 模式下绕过 Vite 代理直连后端，
+    // 导致 /socket.io 路径无法被 Vite 的 ws:true 规则正确转发，现在已修正
+    const serverUrl = import.meta.env.VITE_API_BASE_URL || window.location.origin
+    socket = io(serverUrl, {
       transports: ['websocket', 'polling'],
       reconnectionAttempts: 5,
       timeout: 5000,

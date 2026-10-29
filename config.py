@@ -1,12 +1,31 @@
 import os
+import sys
 from urllib.parse import quote_plus
 from dotenv import load_dotenv
 
-load_dotenv()
 
-# 项目根目录与 instance 目录（数据库真实存放位置）
-_BASE_DIR = os.path.abspath(os.path.dirname(__file__))
-_INSTANCE_DIR = os.path.join(_BASE_DIR, 'instance')
+def _get_app_dir():
+    """返回应用真实根目录。
+
+    - PyInstaller frozen 模式下，sys.executable 所在目录是用户可写目录，
+      数据文件（instance/、uploads/、.env）必须落在这里；
+      sys._MEIPASS 是临时解压目录（只读、进程退出即清理），仅用于 SPA dist 等资源。
+    - 开发模式下 __file__ 所在目录就是项目根。
+    """
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.abspath(os.path.dirname(__file__))
+
+
+# 应用根目录（frozen = exe 所在目录；dev = 项目根）
+APP_DIR = _get_app_dir()
+
+# .env 加载：优先从 exe/项目根读取；frozen 模式下 PyInstaller 打包的 .env
+# 若放在 _MEIPASS 里也会被 dotenv 搜索到，但 exe 旁的同名文件优先级更高
+load_dotenv(os.path.join(APP_DIR, '.env'), override=True)
+
+# instance 目录（数据库真实存放位置，可写）
+_INSTANCE_DIR = os.path.join(APP_DIR, 'instance')
 os.makedirs(_INSTANCE_DIR, exist_ok=True)
 
 
@@ -20,6 +39,17 @@ def _build_sqlite_uri(db_path):
 
 
 class Config:
+    # 应用根目录（frozen = exe 所在目录；dev = 项目根）—— instance/uploads/.env 均基于此
+    APP_DIR = _get_app_dir()
+
+    # ── 前端 SPA 托管（可选）──
+    # 默认启用：Flask 直接托管 frontend/dist 构建产物；
+    # 设 ENABLE_SPA_HOSTING=false 时关闭 SPA 路由，适合前端独立部署到 CDN/Nginx 的场景。
+    ENABLE_SPA_HOSTING = os.getenv('ENABLE_SPA_HOSTING', 'true').lower() == 'true'
+    # SPA dist 目录覆盖：生产部署时如需覆盖默认路径可在此显式指定，
+    # 例如 FRONTEND_DIST=/var/www/exam-frontend/dist
+    FRONTEND_DIST = os.getenv('FRONTEND_DIST', '')
+
     # 调试模式：生产必须为 false（Werkzeug 调试器可致远程代码执行）
     # 本地开发在 .env 中设 FLASK_DEBUG=true 开启
     DEBUG = os.getenv('FLASK_DEBUG', 'false').lower() == 'true'
@@ -102,6 +132,14 @@ class Config:
     REDIS_PASSWORD = os.getenv('REDIS_PASSWORD', '')
     REDIS_DB = int(os.getenv('REDIS_DB', 0))
     REDIS_TIMEOUT = int(os.getenv('REDIS_TIMEOUT', 10))
+    # ── 缓存后端选择 ──
+    # auto       : 先试真实 Redis（localhost:6379），连不上再试 Fakeredis
+    #              （pip install fakeredis 即启用，纯 Python 无服务进程），
+    #              都没有则完全降级 DB 穿透。推荐开发机/其他电脑。
+    # real       : 必须真实 Redis，连不上直接告警 + 降级 DB。推荐生产。
+    # fakeredis  : 强制用 Fakeredis（不连真实 Redis），用于离线/测试环境。
+    # disabled   : 完全关闭缓存，所有 @cached 装饰器直接穿透 DB。
+    REDIS_BACKEND = os.getenv('REDIS_BACKEND', 'auto').lower()
 
     # CSRF 防护配置
     CSRF_ENABLED = True

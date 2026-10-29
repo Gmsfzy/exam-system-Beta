@@ -2,11 +2,15 @@
 """v4.6.1 中危修复回归门：限流存储 URI 派生（显式优先 → 跟随 Redis → 回落 memory）。
 
 Config 在 import 时求值，用 importlib.reload + monkeypatch env 验证三种组合。
+v5.29 起 config 会 load_dotenv(override=True) 强读项目 .env：本机存在 .env（如
+REDIS_HOST=127.0.0.1）时会覆盖测试意图，故 reload 前空转 dotenv，只测派生逻辑。
 """
 import importlib
 
 
 def _reload_with(monkeypatch, env):
+    import dotenv
+    monkeypatch.setattr(dotenv, 'load_dotenv', lambda *a, **k: False)
     for k in ('RATE_LIMIT_STORAGE_URI', 'REDIS_HOST', 'REDIS_PORT',
               'REDIS_PASSWORD', 'REDIS_DB'):
         monkeypatch.delenv(k, raising=False)
