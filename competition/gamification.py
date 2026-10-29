@@ -7,7 +7,7 @@
 """
 from sqlalchemy.exc import IntegrityError
 from database import db
-from utils.timeutil import utcnow, season_of
+from utils.timeutil import utcnow, season_of, local_today
 from utils.timeutil import current_season as _current_season
 from competition.models import (
     Competition, CompetitionParticipant, PkBattle, PkBattleStatusEnum,
@@ -349,7 +349,7 @@ def upsert_points_history(user_id, season, points, elo=None):
     """按天 upsert 当前赛季积分/Elo 快照（同一天覆盖为最新值）。"""
     if is_bot_user(user_id):
         return
-    day = utcnow().strftime('%Y-%m-%d')
+    day = local_today().isoformat()   # 快照按上海日历日切（与 season 的本地月口径一致）
     elo_val = elo if elo is not None else get_or_create_rating(user_id).elo
     row = PointsHistory.query.filter_by(user_id=user_id, season=season, day=day).first()
     if row is None:

@@ -3,7 +3,7 @@
 并发安全：CAS 抢锁 + 唯一约束 + 重查三重兜底
 """
 from database import db
-from utils.timeutil import utcnow, aware_min
+from utils.timeutil import utcnow, aware_min, local_today
 from utils.notify import create_notification
 from competition.models import (
     SeasonMeta, SeasonArchive, UserPointsProfile,
@@ -105,7 +105,7 @@ def _issue_season_certificates(season, total):
             total_players=total,
             summary={'season_label': season, 'grade_label': label,
                      'pk_total': a.pk_total, 'timed_finished': a.timed_finished,
-                     'earned_date': utcnow().date().isoformat()},
+                     'earned_date': local_today().isoformat()},
         )
         db.session.add(cert)
         db.session.flush()  # 暴露唯一约束竞态

@@ -16,7 +16,7 @@ from database.models import (
     question_knowledge_point,
 )
 from utils.logger import logger
-from utils.timeutil import utcnow
+from utils.timeutil import utcnow, local_today
 from utils.notify import create_notification
 
 # ── 算法常量 ──────────────────────────────────────────────────────
@@ -220,7 +220,7 @@ def due_review_count(user_id, now=None):
 
 def touch_checkin(user_id, minutes=0, tasks_delta=0):
     """记录当日有效学习：累加分钟数与完成任务数（幂等 upsert）；顺带检查学习徽章"""
-    today = utcnow().date()
+    today = local_today()
     c = StudyCheckin.query.filter_by(user_id=user_id, day=today).first()
     if not c:
         c = StudyCheckin(user_id=user_id, day=today, minutes=0, tasks_done=0)
@@ -237,7 +237,7 @@ def touch_checkin(user_id, minutes=0, tasks_delta=0):
 
 def compute_streak(user_id, today=None):
     """从今天（或昨天，若今天未打卡则从今天往前连续）回溯连续打卡天数"""
-    today = today or utcnow().date()
+    today = today or local_today()
     days = {r[0] for r in db.session.query(StudyCheckin.day)
             .filter(StudyCheckin.user_id == user_id).all()}
     if not days:
@@ -253,7 +253,7 @@ def compute_streak(user_id, today=None):
 
 def week_checkin_days(user_id, today=None):
     """近 7 天（含今天）的打卡日期集合，供前端日历条渲染"""
-    today = today or utcnow().date()
+    today = today or local_today()
     start = today - timedelta(days=6)
     rows = StudyCheckin.query.filter(
         StudyCheckin.user_id == user_id,
@@ -381,7 +381,7 @@ def learning_daily_tick():
     """
     global _last_tick_day
     now = utcnow()
-    today = now.date()
+    today = local_today()
     if _last_tick_day == today:
         return
     _last_tick_day = today

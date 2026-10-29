@@ -37,6 +37,33 @@ def iso_local(dt):
     return localtime(dt).replace(tzinfo=None).isoformat()
 
 
+def local_date(dt):
+    """存储值（aware/naive 按 UTC 解释）-> Asia/Shanghai 日历日。
+
+    凡是要与用户日历（due_date / day / reset_date 这类 db.Date）比较或写入的，
+    一律走这里；`dt.date()` 取到的是 UTC 日，会在本地 00:00–07:59 错归前一天。"""
+    local = localtime(dt)
+    return local.date() if local else None
+
+
+def local_today():
+    """业务「今天」的唯一来源：Asia/Shanghai 日历日。
+
+    打卡/连击/每日任务/AI 日配额/逾期标红/每日巡查判重均按本地日历切，
+    与 current_season() 的「赛季不能按 UTC 月切」同一口径。绝不能用
+    utcnow().date()（那是 UTC 日，日界落在本地 08:00）。"""
+    return localtime(utcnow()).date()
+
+
+def local_day_start(day=None):
+    """本地日历日 -> 该日 00:00 对应的 aware UTC 时刻（日窗口统计的下界）。
+
+    day 缺省为今天；上界为返回值 + 1 天。用于「今日专注时长」这类需要
+    datetime 区间却按本地日切聚合的场景。"""
+    d = day if day is not None else local_today()
+    return datetime(d.year, d.month, d.day, tzinfo=LOCAL_TZ).astimezone(timezone.utc)
+
+
 def fmt_local(dt, fmt='%Y-%m-%d %H:%M'):
     """存储值 -> 本地时间字符串（API 序列化 / 前端展示用）"""
     local = localtime(dt)

@@ -11,9 +11,9 @@
 import os
 import glob
 import sqlite3
-from datetime import datetime
 
 from utils.logger import logger
+from utils.timeutil import utcnow, localtime
 
 # 自动备份文件名前缀，与手工 .bak_* 区分，轮转只删本模块产物
 _AUTO_PREFIX = 'exam_system_auto_'
@@ -78,7 +78,7 @@ def database_backup_tick():
         return
 
     backup_dir = _backup_dir(src_path)
-    now = datetime.now()  # 本地日期判重（备份是本地运维动作，按墙上日历日）
+    now = localtime(utcnow())  # 文件名与当日判重按上海墙上时间（不随部署机时区漂移）
     day_tag = now.strftime('%Y-%m-%d')
 
     # 当日已有自动备份则跳过

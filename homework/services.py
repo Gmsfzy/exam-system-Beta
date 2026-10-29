@@ -13,7 +13,7 @@ import random
 from database import db
 from database.models import Question, QuestionTypeEnum, User
 from utils.logger import logger
-from utils.timeutil import utcnow, iso_local
+from utils.timeutil import utcnow, iso_local, local_today
 from utils.notify import create_notification
 from homework.models import (
     Homework, HomeworkStatusEnum, HomeworkTypeEnum, HomeworkSubmission,
@@ -980,7 +980,7 @@ def _ensure_peer_daily_task(hw, reviewer_id):
     """互评分配后为评审人建当日 DailyTask（source='peer_review'，幂等）。"""
     try:
         from database.models import DailyTask
-        today = utcnow().date()
+        today = local_today()
         title = f'互评：{hw.title[:80]}'
         exists = DailyTask.query.filter_by(user_id=reviewer_id, day=today,
                                            title=title).first()
@@ -995,7 +995,7 @@ def complete_peer_review_daily_task(hw, student_id):
     """学生提交互评后，把对应的互评 DailyTask 标记为完成。"""
     try:
         from database.models import DailyTask
-        today = utcnow().date()
+        today = local_today()
         task = DailyTask.query.filter_by(user_id=student_id, day=today,
                                          title=f'互评：{hw.title[:80]}').first()
         if task and task.status == 'pending':
@@ -1416,7 +1416,7 @@ def _create_daily_tasks_for_homework(hw):
     """作业发布时，为名单内每个学生在发布当日创建一条 DailyTask（source='manual' 对应 CHECK 枚举）。"""
     try:
         from database.models import DailyTask
-        today = utcnow().date()
+        today = local_today()
         for hs in hw.hw_students:
             # 幂等：同作业同日不重复建
             exists = DailyTask.query.filter_by(

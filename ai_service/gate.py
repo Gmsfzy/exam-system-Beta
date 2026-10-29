@@ -8,7 +8,7 @@
 """
 from database import db
 from database.models import AiQuota, AiUsageLog
-from utils.timeutil import utcnow
+from utils.timeutil import local_today
 
 DEFAULT_DAILY_LIMIT = 30
 
@@ -17,7 +17,7 @@ def check_ai_quota(user):
     """用户今日是否还有 AI 调用额度。返回 (allowed, quota)。教师恒放行。"""
     if user.is_teacher():
         return True, None
-    today = utcnow().date()
+    today = local_today()
     quota = db.session.get(AiQuota, user.id)
     if quota is None:
         quota = AiQuota(user_id=user.id, daily_limit=DEFAULT_DAILY_LIMIT,
@@ -50,7 +50,7 @@ def get_quota_info(user):
     """前端展示的当日额度信息"""
     if user.is_teacher():
         return {'daily_limit': None, 'used_today': None, 'remaining': None, 'unlimited': True}
-    today = utcnow().date()
+    today = local_today()
     quota = db.session.get(AiQuota, user.id)
     if quota is None or quota.reset_date != today:
         limit = quota.daily_limit if quota else DEFAULT_DAILY_LIMIT

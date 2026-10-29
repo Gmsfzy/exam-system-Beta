@@ -35,7 +35,8 @@ from database.models import (
 )
 from utils.security import limiter, RateLimitConfig, verify_token
 from utils.uploads import save_upload, UPLOAD_DIR, ALLOWED_EXTENSIONS as _UPLOAD_EXTS
-from utils.timeutil import utcnow, iso_local, parse_dt
+from utils.timeutil import (utcnow, iso_local, parse_dt, local_today, local_date,
+                           local_day_start, fmt_local)
 from utils.logger import logger
 from utils.notify import create_notification
 from api import learning_engine as eng
@@ -204,7 +205,7 @@ def api_practice_start():
     picked = random.sample(available, picked_count)
 
     session = PracticeSession(
-        user_id=user.id, title=title or f'练习 {utcnow().strftime("%m-%d %H:%M")}',
+        user_id=user.id, title=title or f'练习 {fmt_local(utcnow(), "%m-%d %H:%M")}',
         major_id=major_id, course_id=course_id,
         questions_count=picked_count,
     )
@@ -468,7 +469,7 @@ def _task_to_dict(t):
         'auto_done': bool(t.auto_done),
         'estimated_minutes': t.estimated_minutes,
         'due_date': t.due_date.isoformat() if t.due_date else None,
-        'overdue': bool(t.due_date and t.status != 'done' and t.due_date < utcnow().date()),
+        'overdue': bool(t.due_date and t.status != 'done' and t.due_date < local_today()),
         'status': t.status,
         'done_at': iso_local(t.done_at) if t.done_at else None,
         'order_num': t.order_num,
@@ -485,7 +486,7 @@ def _plan_to_dict(p):
     elif total and done < total and p.status == 'completed':
         p.status = 'active'
     # 时间进度（供前端时间轴双条对比）与落后预警：时间进度超出完成率 30 个百分点以上
-    today = utcnow().date()
+    today = local_today()
     time_pct = None
     if p.start_date and p.end_date:
         span = (p.end_date - p.start_date).days
@@ -498,7 +499,7 @@ def _plan_to_dict(p):
     overdue_count = 0
     for t in tasks:
         if t.status == 'done' and t.done_at:
-            d = t.done_at.date()
+            d = local_date(t.done_at)
             if today - timedelta(days=13) <= d <= today:
                 key = d.isoformat()
                 heat[key] = heat.get(key, 0) + 1
@@ -553,9 +554,9 @@ def api_plan_create():
     data = request.get_json(silent=True) or {}
     start_raw = data.get('start_date')
     try:
-        start_date = date.fromisoformat(start_raw) if start_raw else date.today()
+        start_date = date.fromisoformat(start_raw) if start_raw else local_today()
     except (ValueError, TypeError):
-        start_date = date.today()
+        start_date = local_today()
     end_date = None
     if data.get('end_date'):
         try:
@@ -811,7 +812,7 @@ def api_plan_from_path():
         title=(data.get('title') or '').strip() or f'路径计划：{path.title}'[:100],
         description=(data.get('description') or '').strip() or
         f'由学习路径「{path.title}」生成的任务清单，共 {len(nodes)} 个节点',
-        start_date=date.today(),
+        start_date=local_today(),
         status='active',
     )
     db.session.add(plan)
@@ -975,9 +976,9 @@ def api_plan_ai_suggest_tasks():
     if not goal:
         return jsonify({'message': '请先填写计划标题或目标描述'}), 400
     try:
-        start = date.fromisoformat(data['start_date']) if data.get('start_date') else date.today()
+        start = date.fromisoformat(data['start_date']) if data.get('start_date') else local_today()
     except (ValueError, TypeError):
-        start = date.today()
+        start = local_today()
     days = 14
     if data.get('end_date'):
         try:
@@ -2324,17 +2325,17 @@ def api_today():
         return jsonify({'message': '未登录'}), 401
 
     now = utcnow()
-    today = now.date()
+    today = local_today()
 
     # 1) 打卡与连击
     streak = eng.compute_streak(user.id, today)
     week = eng.week_checkin_days(user.id, today)
     today_ci = StudyCheckin.query.filter_by(user_id=user.id, day=today).first()
 
-    # 1.1) v4.4 今日专注计时概览（进行中会话 + 今日完成总时长，UTC 日口径与打卡一致）
+    # 1.1) v4.4 今日专注计时概览（进行中会话 + 今日完成总时长；日窗口与打卡同为本地日历日）
     running_focus = FocusSession.query.filter_by(user_id=user.id, status='running') \
         .order_by(FocusSession.id.desc()).first()
-    day_start = datetime(today.year, today.month, today.day, tzinfo=timezone.utc)
+    day_start = local_day_start(today)
     today_focus = FocusSession.query.filter_by(user_id=user.id, status='finished') \
         .filter(FocusSession.started_at >= day_start,
                 FocusSession.started_at < day_start + timedelta(days=1)).all()
@@ -2436,13 +2437,13 @@ def _parse_day(raw):
             return date.fromisoformat(raw)
         except (ValueError, TypeError):
             pass
-    return utcnow().date()
+    return local_today()
 
 
 def _today_snapshot(user):
     """聚合用户学习现状：返回（供 AI 的上下文文本，规则兑底建议列表）"""
     now = utcnow()
-    today = now.date()
+    today = local_today()
     lines = []
     fallback = []
 
@@ -2537,7 +2538,7 @@ def api_daily_task_toggle(tid):
         t.status = 'done'
         t.done_at = utcnow()
         # 完成当日任务计一次有效学习（打卡 tasks_done 累加）
-        if t.day == utcnow().date():
+        if t.day == local_today():
             eng.touch_checkin(user.id, tasks_delta=1)
     db.session.commit()
     return jsonify({'message': '已更新', 'status': t.status})
@@ -2871,7 +2872,7 @@ def _issue_certificate(user, path_id, final_score):
         'path_title': path.title,
         'major_name': path.major.name if path.major else None,
         'nodes': len(path.nodes), 'kps': len(kps), 'minutes': minutes,
-        'earned_date': utcnow().date().isoformat(),
+        'earned_date': local_today().isoformat(),
     }
     if cert:
         if (final_score or 0) > (cert.final_score or 0):
@@ -3387,7 +3388,7 @@ def api_checkin_calendar():
     user = verify_token()
     if not user:
         return jsonify({'message': '未登录'}), 401
-    raw = request.args.get('month') or utcnow().strftime('%Y-%m')
+    raw = request.args.get('month') or local_today().strftime('%Y-%m')
     try:
         y, m = (int(x) for x in raw.split('-')[:2])
         first = date(y, m, 1)
@@ -4290,7 +4291,7 @@ def api_ai_governance_summary():
                                    'avg_cost_ms': 0, '_sum': 0})
     by_user = defaultdict(int)
     for lg in logs:
-        d = per_day[lg.created_at.strftime('%Y-%m-%d')]
+        d = per_day[local_date(lg.created_at).isoformat()]
         d['total'] += 1
         d[lg.status if lg.status in ('success', 'degraded', 'fail') else 'fail'] += 1
         d['_sum'] += lg.cost_ms or 0
@@ -4356,7 +4357,7 @@ def api_ai_governance_quota(uid):
     quota = db.session.get(AiQuota, uid)
     if quota is None:
         quota = AiQuota(user_id=uid, daily_limit=limit, used_today=0,
-                        reset_date=utcnow().date())
+                        reset_date=local_today())
         db.session.add(quota)
     else:
         quota.daily_limit = limit

@@ -14,7 +14,7 @@ import pytest
 
 from database import db
 from database.models import Question, User, DailyTask, Major
-from utils.timeutil import utcnow
+from utils.timeutil import utcnow, local_today
 from homework.models import (
     Homework, HomeworkStatusEnum, HomeworkTypeEnum,
     HomeworkTemplate, HomeworkSeries, HomeworkSeriesStatusEnum,
@@ -138,7 +138,7 @@ def test_series_tick_generates_due_homeworks(env):
     # 两份作业 × 2 名学生 = 4 个 DailyTask
     tasks = DailyTask.query.filter(
         DailyTask.user_id.in_([env['s1'].id, env['s2'].id]),
-        DailyTask.day == utcnow().date()).all()
+        DailyTask.day == local_today()).all()
     assert len(tasks) == 4
     assert tasks[0].title.startswith('作业：')
 
@@ -182,7 +182,7 @@ def test_complete_daily_task_on_submit(env):
     _create_daily_tasks_for_homework(hw)
     db.session.commit()
 
-    task = DailyTask.query.filter_by(user_id=env['s1'].id, day=utcnow().date()).first()
+    task = DailyTask.query.filter_by(user_id=env['s1'].id, day=local_today()).first()
     assert task is not None
     assert task.status == 'pending'
 
