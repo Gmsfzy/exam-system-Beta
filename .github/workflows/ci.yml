@@ -25,6 +25,12 @@ jobs:
       # 保持 DEBUG=false 的生产校验路径被真正执行。测试走临时/内存库，不触碰真实 DB。
       SECRET_KEY: ci-test-secret-key-not-for-production
       FLASK_DEBUG: 'false'
+      # v5.36 显式声明探针时区：UTC runner 是暴露「测试依赖机器时区」的唯一环境
+      # （v5.33 的 CI 红就是这么抓出来的）。写死 UTC0 而不是 Asia/Shanghai：
+      # Windows CPython 不认 IANA 时区名（TZ=Asia/Shanghai 会被静默解析成偏移 0，
+      # 与 TZ=Bogus/Nothing 结果一致且不报错），只有 POSIX 形式 UTC0 跨平台可信；
+      # 生产口径由 utils/timeutil 的固定 +8 保证，与机器时区无关（见 test_time_contract_v5_36）。
+      TZ: 'UTC0'
     steps:
       - uses: actions/checkout@v4
 
