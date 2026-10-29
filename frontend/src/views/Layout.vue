@@ -644,10 +644,31 @@ const goPortal = () => {
 
 .sidebar-menu {
   flex: 1;
+  /* 菜单项多的模块（如自主学习 14 项）超出视口高度时内部滚动：
+     不设 min-height:0 则 flex 子项不收缩，overflow 形同虚设，
+     溢出项会直接画到页面背景上形成“鬼影”文字 */
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 163, 184, 0.35) transparent;
   padding: 20px 14px;
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+
+.sidebar-menu::-webkit-scrollbar {
+  width: 6px;
+}
+
+.sidebar-menu::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.35);
+  border-radius: 3px;
+}
+
+.sidebar-menu::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 .module-switch {
