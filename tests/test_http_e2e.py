@@ -14,10 +14,17 @@
 绝不触碰 instance 真库。
 """
 import os
-from datetime import datetime, timedelta
+from datetime import timedelta
+
+from utils.timeutil import utcnow, iso_local
 
 import pytest
 
+
+# 时间口径（v5.33）：后端 parse_dt 对**无时区**输入按 Asia/Shanghai 墙上时间解释。
+# 早先用例直接取 datetime.now()（= 运行机本地墙钟），在本机 UTC+8 恰好与约定一致而
+# 蒙对；到 UTC runner（GitHub Actions ubuntu）上窗口整体前移 8 小时，考试/赛事被
+# sync_status 判成已结束 → CI 红。统一改用 utcnow() + iso_local()，与作业/通知等用例同口径。
 
 def _auth(token):
     return {'Authorization': f'Bearer {token}'}
@@ -189,13 +196,12 @@ def test_exam_score_chain(ctx):
     """建卷→组卷→邀请→发布→开考→作答→交卷→成绩 HTTP 往返。"""
     c = ctx['_client']
     a = ctx['_app']
-    now = datetime.now()
-    fmt = '%Y-%m-%dT%H:%M:%S'
+    now = utcnow()
 
     r = c.post('/api/exams', json={
         'title': 'E2E 测验', 'duration': 60,
-        'start_time': (now - timedelta(hours=1)).strftime(fmt),
-        'end_time': (now + timedelta(hours=2)).strftime(fmt)},
+        'start_time': iso_local(now - timedelta(hours=1)),
+        'end_time': iso_local(now + timedelta(hours=2))},
         headers=_auth(ctx['t1']))
     assert r.status_code == 200, r.get_json()
     exam_id = r.get_json()['id']
@@ -259,17 +265,14 @@ def test_exam_score_chain(ctx):
 
 # ─────────────────── 钱链·竞赛托管版 / PK 对战 / 练习 OJ ───────────────────
 
-_FMT = '%Y-%m-%dT%H:%M:%S'
-
-
 def _make_ongoing_comp(ctx, title, prize, allow_pk):
     """教师建赛→加题→发布（经 t2 交叉审核）→进入进行中窗口。返回 comp_id。"""
     c = ctx['_client']
-    now = datetime.now()
+    now = utcnow()
     r = c.post('/api/competitions', json={
         'title': title, 'duration': 30, 'prize_points': prize, 'allow_pk': allow_pk,
-        'start_time': (now - timedelta(hours=1)).strftime(_FMT),
-        'end_time': (now + timedelta(hours=3)).strftime(_FMT)},
+        'start_time': iso_local(now - timedelta(hours=1)),
+        'end_time': iso_local(now + timedelta(hours=3))},
         headers=_auth(ctx['t1']))
     assert r.status_code == 200, r.get_json()
     cid = r.get_json()['id']
@@ -330,11 +333,11 @@ def test_competition_hosted_chain(ctx):
     # 驳回退回路径：再赛一场发布冻结 40，t2 驳回 → 全额退回
     b0 = _bal(c, ctx['t1'])
     cid2 = None
-    now = datetime.now()
+    now = utcnow()
     r = c.post('/api/competitions', json={
         'title': 'E2E 驳回赛', 'duration': 30, 'prize_points': 40,
-        'start_time': (now - timedelta(hours=1)).strftime(_FMT),
-        'end_time': (now + timedelta(hours=3)).strftime(_FMT)},
+        'start_time': iso_local(now - timedelta(hours=1)),
+        'end_time': iso_local(now + timedelta(hours=3))},
         headers=_auth(ctx['t1']))
     cid2 = r.get_json()['id']
     assert c.post(f'/api/competitions/{cid2}/questions',
@@ -470,11 +473,11 @@ def _upload_ds_file(c, token, cid, role, name, text):
 def _make_ds_comp(ctx, title, prize):
     """教师建 DS 赛→配 accuracy→上传 train/gold/sample→发布冻结→t2 审核→进行中。"""
     c = ctx['_client']
-    now = datetime.now()
+    now = utcnow()
     r = c.post('/api/competitions', json={
         'title': title, 'competition_type': 'ds', 'prize_points': prize,
-        'start_time': (now - timedelta(hours=1)).strftime(_FMT),
-        'end_time': (now + timedelta(hours=3)).strftime(_FMT)},
+        'start_time': iso_local(now - timedelta(hours=1)),
+        'end_time': iso_local(now + timedelta(hours=3))},
         headers=_auth(ctx['t1']))
     assert r.status_code == 200, r.get_json()
     cid = r.get_json()['id']
