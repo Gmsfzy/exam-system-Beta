@@ -1,0 +1,11 @@
+# 行尾策略：Windows 批处理与 PowerShell 脚本必须以 CRLF 落到工作区。
+#
+# 起因（v5.38 实测）：start-all.bat 曾以 LF 落盘，cmd.exe 读 LF-only 批处理会按错误
+# 字节偏移切碎命令行 —— 实测既起不了后端也起不了前端，报一堆
+# 「'XE' / 'n.exe" set "PYTHON_EXE' / '.version_info' 不是内部或外部命令」，
+# 还会把注释里的「>= 3.12。」当成重定向，在项目根生成名为「3.12。」的 0 字节野文件。
+# 更麻烦的是仓库开了 core.autocrlf=true，git 归一化后 diff 里看不到这种破坏，
+# 所以只能靠本文件把规则钉死，不再依赖各人机器的 autocrlf 取值。
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf

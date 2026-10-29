@@ -63,7 +63,7 @@ class Logger {
     this.lastSeen.set(sig, now);
     if (this.lastSeen.size > MAX_SEEN_ENTRIES) {
       // 简单防涨：超限时清掉最早一半（Map 保持插入序）
-      const cut = Math.floor(this.lastSeen.size / 2);
+      let cut = Math.floor(this.lastSeen.size / 2);   // 需自减，不能声明成 const
       for (const k of this.lastSeen.keys()) {
         this.lastSeen.delete(k);
         if (--cut <= 0) break;
