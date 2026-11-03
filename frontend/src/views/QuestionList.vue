@@ -137,6 +137,7 @@
                   <el-icon><Share /></el-icon>{{ q.is_public ? '移出公共题库' : '加入公共题库' }}
                 </el-dropdown-item>
                 <el-dropdown-item command="add_tag" :disabled="!q.is_owner && !q.is_public"><el-icon><Collection /></el-icon>贴标签</el-dropdown-item>
+                <el-dropdown-item command="discuss"><el-icon><ChatDotRound /></el-icon>讨论区</el-dropdown-item>
                 <el-dropdown-item command="delete" divided :disabled="!q.is_owner"><el-icon><Delete /></el-icon>删除</el-dropdown-item>
               </el-dropdown-menu>
             </template>
@@ -544,13 +545,17 @@
 
 <script setup>
 import { ref, onMounted, computed } from 'vue'
+import { useRouter } from 'vue-router'
 import request from '../utils/request'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   Plus, Search, More, Edit, Delete, Collection, Close, Upload, Share,
-  Document, DocumentDelete, DocumentChecked, Warning, VideoPlay, PictureFilled, Picture
+  Document, DocumentDelete, DocumentChecked, Warning, VideoPlay, PictureFilled, Picture,
+  ChatDotRound
 } from '@element-plus/icons-vue'
 import RichContent from '../components/RichContent.vue'
+
+const router = useRouter()
 
 const questions = ref([])
 const majors = ref([])
@@ -847,6 +852,9 @@ const handleCardAction = (cmd, q) => {
     togglePublic(q)
   } else if (cmd === 'add_tag') {
     addTagDialog(q)
+  } else if (cmd === 'discuss') {
+    // v5.29 社区轻联动:跳社区论坛按该题目过滤的讨论列表
+    router.push({ path: '/community', query: { linked_type: 'question', linked_id: q.id } })
   }
 }
 

@@ -4,8 +4,8 @@
 
     <div class="section">
       <el-radio-group v-model="kind" @change="load">
-        <el-radio-button label="accept">答疑之星（被采纳数）</el-radio-button>
-        <el-radio-button label="publish">悬赏达人（发布数）</el-radio-button>
+        <el-radio-button value="accept">答疑之星（被采纳数）</el-radio-button>
+        <el-radio-button value="publish">悬赏达人（发布数）</el-radio-button>
       </el-radio-group>
     </div>
 

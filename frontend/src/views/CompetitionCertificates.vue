@@ -46,7 +46,7 @@
         <div v-if="cert" ref="certRef" class="diploma" :style="{ '--accent': gradeColor(cert.grade) }">
           <div class="dp-border">
             <div class="dp-ornament top">✦ ⁘ ✦</div>
-            <p class="dp-brand">智汇学场 · 竞赛竞技认证</p>
+            <p class="dp-brand">为学空间 · 竞赛竞技认证</p>
             <h2 class="dp-title">赛季竞技证书</h2>
             <p class="dp-line">兹证明 <b class="dp-name">{{ cert.username || '选手' }}</b></p>
             <p class="dp-line">在 <b class="dp-season">{{ cert.season }}</b> 赛季竞技中</p>

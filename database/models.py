@@ -1028,4 +1028,407 @@ class AiQuota(db.Model):
     used_today = db.Column(db.Integer, nullable=False, default=0)
     reset_date = db.Column(db.Date, nullable=False)
 
-    user = db.relationship('User', backref='ai_quota')
+    user = db.relationship('User', backref='ai_quotas')
+
+
+# ──────────────────────────────────────────────────────────────
+# v5.29 社区中心 · Phase 1 论坛 MVP
+# ──────────────────────────────────────────────────────────────
+
+class CommunityCategoryEnum:
+    """社区帖子分类：String(20) 承载、无 DB CHECK，与项目现有枚举模式一致。"""
+    DISCUSSION = 'discussion'     # 错题讨论
+    SOLUTION = 'solution'         # 解法分享
+    HELP = 'help'                 # 求助答疑
+    EXPERIENCE = 'experience'     # 经验交流
+    RESOURCE = 'resource'         # 资源下载
+    OTHER = 'other'               # 其他
+
+    ALL = (DISCUSSION, SOLUTION, HELP, EXPERIENCE, RESOURCE, OTHER)
+
+    LABELS = {
+        DISCUSSION: '错题讨论',
+        SOLUTION:   '解法分享',
+        HELP:       '求助答疑',
+        EXPERIENCE: '经验交流',
+        RESOURCE:   '资源下载',
+        OTHER:      '其他',
+    }
+
+    @classmethod
+    def label(cls, value: str) -> str:
+        return cls.LABELS.get(value, value)
+
+
+class CommunityLinkTypeEnum:
+    """帖子关联对象类型：题目 / 作业 / 考试，可空表示不关联。"""
+    QUESTION = 'question'
+    HOMEWORK = 'homework'
+    EXAM = 'exam'
+    ALL = (QUESTION, HOMEWORK, EXAM)
+
+
+class CommunityPost(db.Model):
+    """社区帖子（Phase 1 论坛 MVP）。
+
+    与五大板块轻联动：linked_type + linked_id 可关联题目/作业/考试，
+    关联有效性不在 DB 层约束（避免跨表外键复杂度），由 API 层校验。
+    is_anonymous=True 时 author_id 仍存真实值，序列化时按需脱敏。"""
+    __tablename__ = 'community_post'
+
+    id = db.Column(db.Integer, primary_key=True)
+    title = db.Column(db.String(100), nullable=False, index=True)
+    content = db.Column(db.Text, nullable=False)
+    category = db.Column(db.String(20), nullable=False, default='other', index=True)
+
+    author_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False, index=True)
+
+    # 轻联动：帖子可关联题目 / 作业 / 考试（可空）
+    linked_type = db.Column(db.String(20), nullable=True)      # question / homework / exam
+    linked_id = db.Column(db.Integer, nullable=True)
+
+    # 匿名：帖子本身可选匿名，author_id 仍存真实值，展示层脱敏
+    is_anonymous = db.Column(db.Boolean, nullable=False, default=False)
+    anon_index = db.Column(db.Integer, nullable=True)         # 同一匿名用户序号（匿名#N 的 N）
+
+    # 软删除 + 计数
+    deleted = db.Column(db.Boolean, nullable=False, default=False)
+    like_count = db.Column(db.Integer, nullable=False, default=0)
+    comment_count = db.Column(db.Integer, nullable=False, default=0)
+    favorite_count = db.Column(db.Integer, nullable=False, default=0)
+
+    # 第一批扩充：已解决标记 + 举报折叠
+    is_resolved = db.Column(db.Boolean, nullable=False, default=False)
+    resolved_at = db.Column(UTCDateTime, nullable=True)
+    resolved_by = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=True)
+    hidden = db.Column(db.Boolean, nullable=False, default=False)
+    report_count = db.Column(db.Integer, nullable=False, default=0)
+
+    # 第二批扩充：采纳答案 + 标签（tag 以逗号分隔存储，避免额外关联表）
+    # accepted_comment_id 不用外键：comment 已反向引用 post，加 FK 会形成循环依赖
+    accepted_comment_id = db.Column(db.Integer, nullable=True)
+    tags = db.Column(db.String(200), nullable=True)
+
+    # 第三批扩充：班级圈子（按课程聚合，可空）+ 悬赏积分
+    course_id = db.Column(db.Integer, db.ForeignKey('course.id'), nullable=True, index=True)
+    bounty_points = db.Column(db.Integer, nullable=False, default=0)
+    bounty_rewarded = db.Column(db.Boolean, nullable=False, default=False)
+
+    created_at = db.Column(UTCDateTime, nullable=False, default=utcnow, index=True)
+    updated_at = db.Column(UTCDateTime, nullable=False, default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (
+        db.Index('ix_community_post_author_created', 'author_id', 'created_at'),
+        db.Index('ix_community_post_category_created', 'category', 'created_at'),
+        db.Index('ix_community_post_linked', 'linked_type', 'linked_id'),
+    )
+
+    # resolved_by 也指向 user.id，author 关系必须显式指定外键
+    author = db.relationship('User', foreign_keys=[author_id], backref='community_posts')
+    course = db.relationship('Course')
+    comments = db.relationship('CommunityComment', backref='post', lazy=True,
+                               cascade='all, delete-orphan',
+                               order_by='CommunityComment.created_at')
+
+    def to_dict(self, viewer=None):
+        """序列化帖子。viewer=当前登录用户（用于匿名脱敏权限判断）。"""
+        is_author = viewer is not None and viewer.id == self.author_id
+        is_teacher_or_admin = viewer is not None and viewer.role in ('teacher', 'admin')
+
+        display_username = None
+        display_anon = None
+        if self.is_anonymous:
+            display_anon = f'匿名#{self.anon_index or "?"}'
+            if is_teacher_or_admin:
+                # 老师/管理员可看真实身份（额外字段，仅前端有权限时渲染）
+                display_username = self.author.username
+        else:
+            display_username = self.author.username if self.author else '未知用户'
+
+        # 举报折叠：仅作者本人 / 老师 / 管理员可看被折叠内容
+        can_view_content = (not self.hidden) or is_author or is_teacher_or_admin
+        content = self.content if can_view_content else '该内容因多次举报已被折叠'
+
+        return {
+            'id': self.id,
+            'title': self.title,
+            'content': content,
+            'category': self.category,
+            'category_label': CommunityCategoryEnum.label(self.category),
+            'author_id': self.author_id,
+            'display_username': display_username,
+            'display_anon': display_anon,
+            'is_anonymous': self.is_anonymous,
+            'is_author': is_author,
+            'linked_type': self.linked_type,
+            'linked_id': self.linked_id,
+            'deleted': self.deleted,
+            'hidden': self.hidden,
+            'can_view_content': can_view_content,
+            'is_resolved': self.is_resolved,
+            'resolved_at': self.resolved_at.isoformat() if self.resolved_at else None,
+            'resolved_by': self.resolved_by,
+            'accepted_comment_id': self.accepted_comment_id,
+            'tags': [t for t in (self.tags or '').split(',') if t],
+            'course_id': self.course_id,
+            'course_name': self.course.name if self.course else None,
+            'bounty_points': self.bounty_points or 0,
+            'bounty_rewarded': bool(self.bounty_rewarded),
+            'report_count': self.report_count,
+            'like_count': self.like_count,
+            'comment_count': self.comment_count,
+            'favorite_count': self.favorite_count,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class CommunityComment(db.Model):
+    """社区评论：属于某条帖子，支持自身点赞 + 匿名。"""
+    __tablename__ = 'community_comment'
+
+    id = db.Column(db.Integer, primary_key=True)
+    post_id = db.Column(db.Integer, db.ForeignKey('community_post.id'), nullable=False, index=True)
+    author_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False, index=True)
+    content = db.Column(db.Text, nullable=False)
+
+    # 楼中楼：parent_id 指向同帖的另一条评论（NULL 表示直接评论帖子）
+    parent_id = db.Column(db.Integer, db.ForeignKey('community_comment.id'), nullable=True, index=True)
+
+    is_anonymous = db.Column(db.Boolean, nullable=False, default=False)
+    anon_index = db.Column(db.Integer, nullable=True)
+
+    deleted = db.Column(db.Boolean, nullable=False, default=False)
+    like_count = db.Column(db.Integer, nullable=False, default=0)
+
+    # 第一批扩充：举报折叠
+    hidden = db.Column(db.Boolean, nullable=False, default=False)
+    report_count = db.Column(db.Integer, nullable=False, default=0)
+
+    created_at = db.Column(UTCDateTime, nullable=False, default=utcnow, index=True)
+
+    author = db.relationship('User', backref='community_comments')
+    parent = db.relationship('CommunityComment', remote_side=[id], backref='replies')
+
+    def to_dict(self, viewer=None):
+        is_author = viewer is not None and viewer.id == self.author_id
+        is_post_author = False
+        if viewer and self.post and self.post.author_id == viewer.id:
+            is_post_author = True
+        is_teacher_or_admin = viewer is not None and viewer.role in ('teacher', 'admin')
+
+        display_username = None
+        display_anon = None
+        if self.is_anonymous:
+            display_anon = f'匿名#{self.anon_index or "?"}'
+            if is_teacher_or_admin:
+                display_username = self.author.username
+        else:
+            display_username = self.author.username if self.author else '未知用户'
+
+        can_view_content = (not self.hidden) or is_author or is_post_author or is_teacher_or_admin
+        content = self.content if can_view_content else '该评论因多次举报已被折叠'
+
+        return {
+            'id': self.id,
+            'post_id': self.post_id,
+            'parent_id': self.parent_id,
+            'author_id': self.author_id,
+            'display_username': display_username,
+            'display_anon': display_anon,
+            'is_anonymous': self.is_anonymous,
+            'content': content,
+            'deleted': self.deleted,
+            'hidden': self.hidden,
+            'can_view_content': can_view_content,
+            'is_accepted': bool(self.post and self.post.accepted_comment_id == self.id),
+            'report_count': self.report_count,
+            'like_count': self.like_count,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+# ──────────────────────────────────────────────────────────────
+# v5.31 社区中心 · 第二批扩充：投票帖
+# ──────────────────────────────────────────────────────────────
+
+class CommunityPollOption(db.Model):
+    """投票选项：一条帖子 2–6 个选项，计数由 community_poll_vote 聚合。"""
+    __tablename__ = 'community_poll_option'
+
+    id = db.Column(db.Integer, primary_key=True)
+    post_id = db.Column(db.Integer, db.ForeignKey('community_post.id'), nullable=False, index=True)
+    text = db.Column(db.String(100), nullable=False)
+    order_index = db.Column(db.Integer, nullable=False, default=0)
+    created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
+
+    post = db.relationship('CommunityPost', backref='poll_options')
+
+
+class CommunityPollVote(db.Model):
+    """投票记录：一个用户对一条帖子只能投一票，可改投（更新 option_id）。"""
+    __tablename__ = 'community_poll_vote'
+
+    id = db.Column(db.Integer, primary_key=True)
+    post_id = db.Column(db.Integer, db.ForeignKey('community_post.id'), nullable=False, index=True)
+    option_id = db.Column(db.Integer, db.ForeignKey('community_poll_option.id'), nullable=False, index=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False, index=True)
+    created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
+
+    __table_args__ = (
+        db.UniqueConstraint('post_id', 'user_id', name='_community_poll_vote_uc'),
+    )
+
+    option = db.relationship('CommunityPollOption', backref='votes')
+    user = db.relationship('User', backref='community_poll_votes')
+
+
+# ──────────────────────────────────────────────────────────────
+# v5.32 社区中心 · 第三批扩充：积分等级
+# ──────────────────────────────────────────────────────────────
+
+class CommunityUserStat(db.Model):
+    """社区积分账户：每个用户一条，等级由积分阈值实时推导（不落库避免漂移）。"""
+    __tablename__ = 'community_user_stat'
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False, unique=True, index=True)
+    points = db.Column(db.Integer, nullable=False, default=0)
+    updated_at = db.Column(UTCDateTime, nullable=False, default=utcnow, onupdate=utcnow)
+
+    user = db.relationship('User', backref='community_stat')
+
+
+class CommunityPointLog(db.Model):
+    """社区积分流水：发帖/评论/被采纳/获赞/悬赏收支，用于审计与个人页展示。"""
+    __tablename__ = 'community_point_log'
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False, index=True)
+    delta = db.Column(db.Integer, nullable=False)
+    reason = db.Column(db.String(30), nullable=False)   # post/comment/accept/like/bounty_hold/bounty_reward/bounty_refund
+    related_type = db.Column(db.String(20), nullable=True)
+    related_id = db.Column(db.Integer, nullable=True)
+    created_at = db.Column(UTCDateTime, nullable=False, default=utcnow, index=True)
+
+    user = db.relationship('User')
+
+
+class CommunityLike(db.Model):
+    """点赞记录：帖子 or 评论，联合唯一约束防重复点赞。
+
+    删除时直接 DELETE（不用软删除，点赞行为本身无历史价值）。"""
+    __tablename__ = 'community_like'
+
+    id = db.Column(db.Integer, primary_key=True)
+    target_type = db.Column(db.String(10), nullable=False, index=True)   # 'post' / 'comment'
+    target_id = db.Column(db.Integer, nullable=False, index=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False, index=True)
+    created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
+
+    __table_args__ = (
+        db.UniqueConstraint('target_type', 'target_id', 'user_id', name='_community_like_uc'),
+        db.Index('ix_community_like_user', 'user_id'),
+    )
+
+    user = db.relationship('User', backref='community_likes')
+
+
+class CommunityFavorite(db.Model):
+    """帖子收藏：一个用户对一条帖子最多收藏一次。"""
+    __tablename__ = 'community_favorite'
+
+    id = db.Column(db.Integer, primary_key=True)
+    post_id = db.Column(db.Integer, db.ForeignKey('community_post.id'), nullable=False, index=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False, index=True)
+    created_at = db.Column(UTCDateTime, nullable=False, default=utcnow, index=True)
+
+    __table_args__ = (
+        db.UniqueConstraint('post_id', 'user_id', name='_community_favorite_uc'),
+    )
+
+    post = db.relationship('CommunityPost', backref='favorites')
+    user = db.relationship('User', backref='community_favorites')
+
+
+class CommunityNotification(db.Model):
+    """社区通知：评论 / 回复 / @提及 / 采纳 / 内容折叠等事件的消息中心。"""
+    __tablename__ = 'community_notification'
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False, index=True)
+    actor_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=True)
+    type = db.Column(db.String(20), nullable=False, index=True)
+    post_id = db.Column(db.Integer, db.ForeignKey('community_post.id'), nullable=True, index=True)
+    comment_id = db.Column(db.Integer, db.ForeignKey('community_comment.id'), nullable=True)
+    content = db.Column(db.String(200), nullable=True)
+    is_read = db.Column(db.Boolean, nullable=False, default=False, index=True)
+    created_at = db.Column(UTCDateTime, nullable=False, default=utcnow, index=True)
+
+    __table_args__ = (
+        db.Index('ix_community_notification_user_read', 'user_id', 'is_read', 'created_at'),
+    )
+
+    actor = db.relationship('User', foreign_keys=[actor_id], backref='community_notifications_sent')
+    recipient = db.relationship('User', foreign_keys=[user_id], backref='community_notifications')
+    post = db.relationship('CommunityPost', backref='notifications')
+
+    TYPE_LABELS = {
+        'comment': '评论了你的帖子',
+        'reply': '回复了你的评论',
+        'mention': '在社区中提到了你',
+        'resolve': '将你的帖子标记为已解决',
+        'accept': '采纳了你的回答',
+        'hidden': '你的内容因举报被折叠',
+        'report': '举报已处理',
+    }
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'type': self.type,
+            'type_label': self.TYPE_LABELS.get(self.type, self.type),
+            'actor_id': self.actor_id,
+            'actor_name': self.actor.username if self.actor else '系统',
+            'post_id': self.post_id,
+            'post_title': self.post.title if self.post else None,
+            'comment_id': self.comment_id,
+            'content': self.content,
+            'is_read': self.is_read,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class CommunityReport(db.Model):
+    """举报记录：帖子 / 评论均适用，管理员审核后置 handled/dismissed。"""
+    __tablename__ = 'community_report'
+
+    id = db.Column(db.Integer, primary_key=True)
+    target_type = db.Column(db.String(10), nullable=False, index=True)   # 'post' / 'comment'
+    target_id = db.Column(db.Integer, nullable=False, index=True)
+    reporter_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False, index=True)
+    reason = db.Column(db.String(200), nullable=False)
+    status = db.Column(db.String(20), nullable=False, default='pending', index=True)
+    handled_by = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=True)
+    handled_at = db.Column(UTCDateTime, nullable=True)
+    created_at = db.Column(UTCDateTime, nullable=False, default=utcnow, index=True)
+
+    __table_args__ = (
+        db.UniqueConstraint('target_type', 'target_id', 'reporter_id', name='_community_report_uc'),
+        db.Index('ix_community_report_status_created', 'status', 'created_at'),
+    )
+
+    reporter = db.relationship('User', foreign_keys=[reporter_id], backref='community_reports')
+    handler = db.relationship('User', foreign_keys=[handled_by])
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'target_type': self.target_type,
+            'target_id': self.target_id,
+            'reporter_id': self.reporter_id,
+            'reporter_name': self.reporter.username if self.reporter else '未知用户',
+            'reason': self.reason,
+            'status': self.status,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+        }

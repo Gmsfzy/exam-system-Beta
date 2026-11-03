@@ -80,6 +80,7 @@
                 <el-dropdown-menu>
                 <el-dropdown-item command="smart">智能组卷</el-dropdown-item>
                 <el-dropdown-item command="questions">管理题目</el-dropdown-item>
+                <el-dropdown-item command="discuss">讨论区</el-dropdown-item>
                 <el-dropdown-item command="students">邀请学生</el-dropdown-item>
                 <el-dropdown-item command="monitor">实时监考</el-dropdown-item>
                 <el-dropdown-item command="analysis">试题分析</el-dropdown-item>
@@ -776,6 +777,10 @@ const handleDropdownAction = async (action, exam) => {
       break
     case 'monitor':
       router.push(`/exams/${exam.id}/monitor`)
+      break
+    case 'discuss':
+      // v5.29 社区轻联动:跳社区论坛按该考试过滤的讨论列表
+      router.push({ path: '/community', query: { linked_type: 'exam', linked_id: exam.id } })
       break
     case 'analysis':
       router.push(`/exams/${exam.id}/item-analysis`)

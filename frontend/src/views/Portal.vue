@@ -5,7 +5,7 @@
         <div class="brand-icon">
           <el-icon :size="26"><School /></el-icon>
         </div>
-        <span class="brand-text">智汇学场</span>
+        <span class="brand-text">为学空间</span>
       </div>
       <div class="header-actions">
         <el-button
@@ -70,7 +70,8 @@ import { useThemeStore } from '../stores/theme'
 import { ElMessage } from 'element-plus'
 import {
   Calendar, VideoPlay, Trophy, Money, Reading,
-  School, Sunny, Moon, SwitchButton, ArrowRight, Notebook
+  School, Sunny, Moon, SwitchButton, ArrowRight, Notebook,
+  ChatDotRound
 } from '@element-plus/icons-vue'
 
 const router = useRouter()
@@ -125,6 +126,14 @@ const teacherModules = [
     icon: Notebook,
     gradient: 'linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%)',
     path: '/homeworks/manage'
+  },
+  {
+    key: 'community',
+    title: '社区中心',
+    desc: '发帖讨论、匿名求助，联动题目/作业/考试',
+    icon: ChatDotRound,
+    gradient: 'linear-gradient(135deg, #14b8a6 0%, #0d9488 100%)',
+    path: '/community'
   }
 ]
 
@@ -168,6 +177,14 @@ const studentModules = [
     icon: Notebook,
     gradient: 'linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%)',
     path: '/homeworks/my'
+  },
+  {
+    key: 'community',
+    title: '社区中心',
+    desc: '交流答疑、分享经验，讨论联动题目和作业',
+    icon: ChatDotRound,
+    gradient: 'linear-gradient(135deg, #14b8a6 0%, #0d9488 100%)',
+    path: '/community'
   }
 ]
 

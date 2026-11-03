@@ -1,5 +1,5 @@
 <template>
-  <div class="home-page" :class="{ light: !isDark }">
+  <div class="home-page" :class="{ light: !isDark, egg: eggOn }">
     <!-- 全局背景：极光 + 噪点 -->
     <div class="bg-layer">
       <div class="aurora a1"></div>
@@ -13,13 +13,14 @@
       <div class="container nav-inner">
         <div class="navbar-brand" @click="scrollToTop">
           <div class="brand-logo"><el-icon :size="22"><School /></el-icon></div>
-          <span class="brand-text">智汇学场</span>
+          <span class="brand-text">为学空间</span>
         </div>
         <div class="navbar-links">
-          <a href="#modules" class="nav-link" @click.prevent="scrollTo('modules')">五大模块</a>
+          <a href="#modules" class="nav-link" @click.prevent="scrollTo('modules')">六大模块</a>
+          <a href="#live" class="nav-link" @click.prevent="scrollTo('live')">实时看板</a>
           <a href="#ai" class="nav-link" @click.prevent="scrollTo('ai')">AI 引擎</a>
           <a href="#panorama" class="nav-link" @click.prevent="scrollTo('panorama')">全景能力</a>
-          <a href="#voices" class="nav-link" @click.prevent="scrollTo('voices')">用户心声</a>
+          <a href="#roadmap" class="nav-link" @click.prevent="scrollTo('roadmap')">成长路线</a>
           <a href="#faq" class="nav-link" @click.prevent="scrollTo('faq')">常见问题</a>
         </div>
         <div class="navbar-actions">
@@ -39,15 +40,15 @@
         <div class="hero-copy">
           <div class="hero-badge rise" style="--d:.05s">
             <span class="pulse-dot"></span>
-            AI 驱动 · 五模块一体化学习平台
+            AI 驱动 · 六模块一体化学习平台
           </div>
           <h1 class="hero-title">
             <span class="line rise" style="--d:.12s">让每一次学习，</span>
-            <span class="line rise" style="--d:.22s">都有<span class="grad-text">场域</span>可依</span>
+            <span class="line rise" style="--d:.22s">都有<span class="grad-text">空间</span>可依</span>
           </h1>
           <p class="hero-sub rise" style="--d:.34s">
-            在线考试夯实测评、作业练习闭环批改、答题竞赛点燃热情、征集悬赏众创题库、自主学习持续提升——
-            五大场域环环相扣，AI 全程赋能。
+            在线考试夯实测评、作业练习闭环批改、答题竞赛点燃热情、征集悬赏众创题库、自主学习持续提升、社区中心经验共创——
+            六大场域环环相扣，AI 全程赋能。
           </p>
           <div class="hero-btns rise" style="--d:.44s">
             <router-link to="/register" class="btn btn-xl btn-primary btn-glow">
@@ -80,11 +81,11 @@
           </div>
         </div>
 
-        <!-- Hero 右侧：五模块轨道浮标 -->
+        <!-- Hero 右侧：六模块轨道浮标 -->
         <div class="hero-orbit rise" style="--d:.3s">
           <div class="orbit-core">
             <el-icon :size="34"><School /></el-icon>
-            <span>智汇学场</span>
+            <span>为学空间</span>
           </div>
           <div
             v-for="(m, i) in modules" :key="m.key"
@@ -114,16 +115,16 @@
       </div>
     </div>
 
-    <!-- ══ 五大模块 · 体验台 ══ -->
+    <!-- ══ 六大模块 · 体验台 ══ -->
     <section class="section" id="modules" ref="modulesRef">
       <div class="container">
         <div class="sec-head reveal">
-          <div class="sec-badge"><el-icon :size="13"><Grid /></el-icon> 五大场域</div>
-          <h2 class="sec-title">一个平台，<span class="grad-text">五种玩法</span></h2>
-          <p class="sec-sub">点击左侧模块，右侧即时预览该模块的真实工作界面</p>
+          <div class="sec-badge"><el-icon :size="13"><Grid /></el-icon> 六大场域</div>
+          <h2 class="sec-title">一个平台，<span class="grad-text">六种玩法</span></h2>
+          <p class="sec-sub">六个模块每 6 秒自动轮播，也可点左侧切换 · 悬停暂停 · 键盘 <kbd>←</kbd><kbd>→</kbd> 直达</p>
         </div>
 
-        <div class="showcase">
+        <div class="showcase" @mouseenter="railHover = true" @mouseleave="railHover = false">
           <!-- 左：模块选择列 -->
           <div class="mod-rail">
             <div
@@ -226,7 +227,7 @@
               </div>
 
               <!-- 作业练习 -->
-              <div v-else class="mock-body mb-homework">
+              <div v-else-if="active === 4" class="mock-body mb-homework">
                 <div class="mb-title">作业批改工作台 <em>教师视角</em></div>
                 <div class="hw-list">
                   <div class="hw-row" v-for="h in mockData.homeworks" :key="h.name">
@@ -242,6 +243,32 @@
                 <div class="learn-chips">
                   <span class="x-chip">题集/开放双形态</span><span class="x-chip">匿名互评</span>
                   <span class="x-chip">评分量规</span><span class="x-chip">查重监测</span><span class="x-chip">优秀展示墙</span>
+                </div>
+              </div>
+
+              <!-- 社区中心 -->
+              <div v-else class="mock-body mb-community">
+                <div class="mb-title">社区论坛 <em>最新帖子</em></div>
+                <div class="cf-list">
+                  <div class="cf-row" v-for="p in mockData.community" :key="p.title">
+                    <span class="cf-cat" :class="'cfc-' + p.cat">{{ p.cat }}</span>
+                    <div class="cf-body">
+                      <div class="cf-title">{{ p.title }}</div>
+                      <div class="cf-meta">
+                        <span class="cf-author">{{ p.anon ? '🫥 ' : '' }}{{ p.author }}</span>
+                        <span class="cf-time">{{ p.time }}</span>
+                      </div>
+                    </div>
+                    <div class="cf-stats">
+                      <span>❤ {{ p.likes }}</span>
+                      <span>💬 {{ p.replies }}</span>
+                    </div>
+                  </div>
+                </div>
+                <div class="cf-flow">发帖 → 分类/关联 → 匿名保护 → 讨论互动 → 反向聚合到详情页</div>
+                <div class="learn-chips">
+                  <span class="x-chip">6 大分类</span><span class="x-chip">匿名保护</span>
+                  <span class="x-chip">关联题目/作业/考试</span><span class="x-chip">点赞评论</span><span class="x-chip">跨班传播</span>
                 </div>
               </div>
             </div>
@@ -265,6 +292,87 @@
             </div>
           </div>
         </div>
+
+        <!-- 轮播控制条：自动播放 / 章节点 / 键盘提示 -->
+        <div class="showcase-bar reveal">
+          <button class="sb-btn" :class="{ on: autoPlay }" @click="toggleAutoPlay">
+            <el-icon :size="14"><VideoPause v-if="autoPlay" /><VideoPlay v-else /></el-icon>
+            {{ autoPlay ? (railHover ? '悬停暂停中' : '自动轮播中') : '轮播已暂停' }}
+          </button>
+          <span class="sb-dots">
+            <i v-for="(m, i) in modules" :key="m.key" class="sb-dot" :class="{ on: active === i }"
+               :style="{ background: active === i ? m.hex : '' }" :title="m.title"
+               @click="pickModule(i); bumpAuto()"></i>
+          </span>
+          <span class="sb-tip">键盘 <kbd>←</kbd><kbd>→</kbd> 切换 · 悬停面板自动暂停</span>
+          <span class="sb-prog"><i :key="'p' + active" :class="{ paused: !autoPlay || railHover }"></i></span>
+        </div>
+
+        <!-- 探索成就：滚动逐枚点亮，集齐触发隐藏彩蛋 -->
+        <div class="ach-panel reveal">
+          <div class="ach-head">
+            <span class="ach-title"><el-icon :size="14"><Trophy /></el-icon> 探索成就</span>
+            <b>{{ unlockedCount }} <em>/ 6</em></b>
+            <span class="ach-note">{{ unlockedCount >= 6 ? '已全部点亮 · 彩蛋已触发' : '把首页逛完，逐枚点亮它们' }}</span>
+          </div>
+          <div class="ach-list">
+            <div v-for="a in achievements" :key="a.id" class="ach" :class="{ got: unlocked.has(a.id) }"
+                 :style="{ '--mc': a.hex }" :title="a.tip">
+              <span class="ach-ico">{{ unlocked.has(a.id) ? a.emoji : '🔒' }}</span>
+              <span class="ach-name">{{ a.name }}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ══ 实时看板 · 此刻正在发生 ══ -->
+    <section class="section live-sec" id="live" ref="liveRef">
+      <div class="container">
+        <div class="sec-head reveal">
+          <div class="sec-badge"><el-icon :size="13"><DataAnalysis /></el-icon> 实时看板</div>
+          <h2 class="sec-title">此刻，<span class="grad-text">正在发生</span></h2>
+          <p class="sec-sub">平台真实聚合数据（只出总数、不含任何个人内容），每 60 秒自动刷新</p>
+        </div>
+
+        <div class="live-grid reveal">
+          <div class="live-main">
+            <div class="live-tiles">
+              <div v-for="t in liveTiles" :key="t.key" class="live-tile" :style="{ '--mc': t.hex }">
+                <div class="lt-num" :class="{ bump: t.bump }">{{ fmt(t.value) }}<i v-if="t.suffix">{{ t.suffix }}</i></div>
+                <div class="lt-label">{{ t.label }}</div>
+              </div>
+            </div>
+            <div class="live-mods">
+              <div v-for="m in liveModules" :key="m.key" class="lm-row">
+                <span class="lm-name">{{ m.label }}</span>
+                <span class="lm-bar"><i :style="{ width: lmPct(m) + '%', background: modHex(m.key) }"></i></span>
+                <b class="lm-val">{{ fmt(m.value) }}</b>
+                <span class="lm-hint">{{ m.hint }}</span>
+              </div>
+            </div>
+          </div>
+
+          <aside class="live-side">
+            <div class="ls-head">今日节奏 <em>{{ live.local_day || '——' }}</em></div>
+            <div class="ls-rows">
+              <div class="ls-row"><span>AI 调用</span><b>{{ fmt(live.today.ai_calls) }}</b></div>
+              <div class="ls-row"><span>学习打卡</span><b>{{ fmt(live.today.checkins) }}</b></div>
+              <div class="ls-row"><span>考试交卷</span><b>{{ fmt(live.today.results) }}</b></div>
+              <div class="ls-row"><span>新增帖子</span><b>{{ fmt(live.today.new_posts) }}</b></div>
+              <div class="ls-row"><span>作业提交</span><b>{{ fmt(live.today.new_submissions) }}</b></div>
+            </div>
+            <div class="ls-ai">
+              <div><b>{{ live.ai.avg_cost_ms ? fmt(live.ai.avg_cost_ms) + 'ms' : '—' }}</b><span>AI 平均耗时</span></div>
+              <div><b>{{ live.ai.success_rate != null ? live.ai.success_rate + '%' : '—' }}</b><span>今日成功率</span></div>
+            </div>
+            <div class="ls-foot">
+              <span class="ls-dot" :class="{ bad: !liveOk }"></span>
+              <em>{{ liveOk ? ('更新于 ' + liveUpdated) : '看板数据暂不可用，稍后自动重试' }}</em>
+              <button class="ls-refresh" @click="loadLive(true)"><el-icon :size="13"><Refresh /></el-icon> 刷新</button>
+            </div>
+          </aside>
+        </div>
       </div>
     </section>
 
@@ -273,8 +381,8 @@
       <div class="container">
         <div class="sec-head reveal">
           <div class="sec-badge"><el-icon :size="13"><MagicStick /></el-icon> AI 引擎</div>
-          <h2 class="sec-title">五大模块背后，<span class="grad-text">同一颗 AI 大脑</span></h2>
-          <p class="sec-sub">从出题、批改到答疑与规划，AI 贯穿教与学的每个环节</p>
+          <h2 class="sec-title">六大模块背后，<span class="grad-text">同一颗 AI 大脑</span></h2>
+          <p class="sec-sub">从出题、批改到答疑、规划与解法共创，AI 贯穿教与学的每个环节</p>
         </div>
         <div class="ai-grid reveal">
           <div v-for="(a, i) in aiPowers" :key="i" class="ai-card" :style="{ '--mc': a.hex }" @mousemove="followLight">
@@ -289,8 +397,12 @@
           </div>
         </div>
 
-        <!-- AI 批改演示流 -->
-        <div class="ai-demo reveal">
+        <!-- AI 批改演示流（可重放：得分环重跑 + 逐行打字机） -->
+        <div class="demo-bar reveal">
+          <span class="db-label"><el-icon :size="12"><MagicStick /></el-icon> AI 批改演示 · 主观题语义评分</span>
+          <button class="db-btn" @click="replayDemo"><el-icon :size="13"><Refresh /></el-icon> 重放一遍</button>
+        </div>
+        <div class="ai-demo reveal has-bar" :key="demoKey">
           <div class="demo-q">
             <div class="demo-label">学生主观题作答</div>
             <p>简述牛顿第二定律，并推导 F=ma 在非惯性系下的修正形式。</p>
@@ -304,13 +416,54 @@
                 <circle class="bgc" cx="40" cy="40" r="34"></circle>
                 <circle class="fgc" cx="40" cy="40" r="34"></circle>
               </svg>
-              <div><b>92</b><span>/100</span></div>
+              <div><b>{{ demoScore }}</b><span>/100</span></div>
             </div>
             <ul>
-              <li class="ok">✓ 定律表述完整，比例关系准确</li>
-              <li class="ok">✓ 惯性力修正概念正确</li>
-              <li class="warn">△ 未区分平移与转动惯性系（-8 分）</li>
+              <li v-for="(l, i) in demoLines" :key="i" :class="[l.cls, { typing: !demoTyped[i] }]">{{ demoTyped[i] || '​' }}</li>
             </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ══ 体验题卡 · 游客可答 ══ -->
+    <section class="section quiz-sec" id="quiz" ref="quizRef">
+      <div class="container quiz-wrap">
+        <div class="sec-head reveal">
+          <div class="sec-badge"><el-icon :size="13"><EditPen /></el-icon> 先试一手</div>
+          <h2 class="sec-title">不注册，<span class="grad-text">也能答一题</span></h2>
+          <p class="sec-sub">即时判分、连击加分、解析逐行展开——这就是平台日常的手感</p>
+        </div>
+
+        <div class="quiz-card reveal" :class="{ shake: quizShake }">
+          <div class="qc-top">
+            <span class="qc-tag">体验题 {{ quizIdx + 1 }} / {{ quizBank.length }}</span>
+            <span class="qc-combo" :class="{ on: combo > 1 }">🔥 连击 ×{{ combo }}</span>
+            <span class="qc-score">本轮得分 <b>{{ quizScore }}</b></span>
+          </div>
+          <div class="qc-q">{{ curQuiz.q }}</div>
+          <div class="qc-opts">
+            <button v-for="(o, i) in curQuiz.options" :key="o" class="qc-opt" :class="optClass(i)"
+                    :disabled="quizAnswered >= 0" @click="answerQuiz(i)">
+              <span class="oo">{{ 'ABCD'[i] }}</span>
+              <span class="ot">{{ o }}</span>
+              <el-icon v-if="quizAnswered >= 0 && i === curQuiz.answer" class="oi mark" :size="16"><Select /></el-icon>
+              <el-icon v-else-if="quizAnswered === i" class="oi cross" :size="16"><Close /></el-icon>
+            </button>
+          </div>
+          <div v-if="quizAnswered >= 0" class="qc-ana">
+            <div class="ana-verdict" :class="quizRight ? 'good' : 'bad'">
+              {{ quizRight ? '✓ 答对了' : '✗ 正确答案是 ' + 'ABCD'[curQuiz.answer] }}
+              <em v-if="quizRight">+{{ quizGain }}分{{ combo > 1 ? '（连击 ×' + combo + '）' : '' }}</em>
+            </div>
+            <div v-for="(l, idx) in curQuiz.analysis" :key="idx" class="ana-row" :style="{ '--d': idx * 0.14 + 's' }">
+              <span class="ar-k">{{ l.k }}</span><span class="ar-v">{{ l.v }}</span>
+            </div>
+          </div>
+          <div class="qc-foot">
+            <span class="qc-tip" v-if="quizAnswered < 0">键盘 <kbd>1</kbd><kbd>2</kbd><kbd>3</kbd><kbd>4</kbd> 可直接作答</span>
+            <button v-else class="btn btn-mini btn-next" @click="nextQuiz">下一题 <el-icon :size="14"><ArrowRight /></el-icon></button>
+            <router-link :to="loginLink" class="qc-link">登录后解锁 8 种题型与 AI 讲评 →</router-link>
           </div>
         </div>
       </div>
@@ -356,6 +509,27 @@
             </div>
           </div>
         </div>
+
+        <!-- 六模块能力矩阵：悬停高亮整行 -->
+        <div class="cap-matrix reveal">
+          <div class="cm-top">
+            <h4><el-icon :size="15"><Grid /></el-icon> 六模块能力矩阵</h4>
+            <span class="cm-legend"><i class="lg2">●</i> 核心能力 <i class="lg1">◐</i> 部分支持 <i class="lg0">·</i> 不适用</span>
+          </div>
+          <div class="cm-table">
+            <div class="cm-tr cm-hd">
+              <span class="cm-th name">核心能力</span>
+              <span class="cm-th" v-for="m in modules" :key="m.key">{{ m.short }}</span>
+            </div>
+            <div class="cm-tr" v-for="row in capMatrix" :key="row.name" :class="{ hl: capHover === row.name }"
+                 @mouseenter="hoverCapRow(row.name)" @mouseleave="capHover = ''">
+              <span class="cm-td name">{{ row.name }}</span>
+              <span class="cm-td" v-for="(v, i) in row.cells" :key="i">
+                <i :class="'lv' + v" :style="{ color: v ? modules[i].hex : '' }">{{ v === 2 ? '●' : v === 1 ? '◐' : '·' }}</i>
+              </span>
+            </div>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -364,8 +538,8 @@
       <div class="container">
         <div class="sec-head reveal">
           <div class="sec-badge"><el-icon :size="13"><Refresh /></el-icon> 成长闭环</div>
-          <h2 class="sec-title">测评 → 巩固 → 攻克 → 竞技 → <span class="grad-text">共创</span></h2>
-          <p class="sec-sub">五个模块环环相扣，你的每一步都有去处</p>
+          <h2 class="sec-title">测评 → 巩固 → 攻克 → 竞技 → 共创 → <span class="grad-text">社区中心</span></h2>
+          <p class="sec-sub">六个模块环环相扣，你的每一步都有去处</p>
         </div>
         <div class="loop-steps reveal">
           <div v-for="(s, i) in steps" :key="i" class="loop-step" :style="{ '--d': i * 0.12 + 's' }">
@@ -382,12 +556,33 @@
       </div>
     </section>
 
+    <!-- ══ 演进路线 ══ -->
+    <section class="section roadmap" id="roadmap" ref="roadmapRef">
+      <div class="container">
+        <div class="sec-head reveal">
+          <div class="sec-badge"><el-icon :size="13"><Compass /></el-icon> 演进路线</div>
+          <h2 class="sec-title">从一张试卷，<span class="grad-text">到六个空间</span></h2>
+          <p class="sec-sub">下面的每个里程碑都来自平台真实更新记录</p>
+        </div>
+        <div class="rm-rail reveal">
+          <div v-for="(r, i) in roadmap" :key="r.ver" class="rm-item" :class="{ now: r.now }" :style="{ '--d': i * 0.07 + 's' }">
+            <span class="rm-dot"><i></i></span>
+            <div class="rm-card">
+              <div class="rm-ver"><b>{{ r.ver }}</b><em>{{ r.date }}</em></div>
+              <h4>{{ r.title }}</h4>
+              <p>{{ r.desc }}</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <!-- ══ 用户心声 ══ -->
     <section class="section" id="voices" ref="voicesRef">
       <div class="container">
         <div class="sec-head reveal">
           <div class="sec-badge"><el-icon :size="13"><ChatDotRound /></el-icon> 用户心声</div>
-          <h2 class="sec-title">他们在智汇学场，<span class="grad-text">学到了什么</span></h2>
+          <h2 class="sec-title">他们在为学空间，<span class="grad-text">学到了什么</span></h2>
           <p class="sec-sub">来自教师、学生与队长的真实使用姿势</p>
         </div>
         <div class="voice-grid reveal">
@@ -434,8 +629,8 @@
     <!-- ══ CTA ══ -->
     <section class="section cta-section" ref="ctaRef">
       <div class="container cta-box reveal">
-        <h2>五种场域，<span class="grad-text">一个账号</span></h2>
-        <p>注册即享全部功能，把学习交给智汇学场</p>
+        <h2>六种场域，<span class="grad-text">一个账号</span></h2>
+        <p>注册即享全部功能，把学习交给为学空间</p>
         <div class="cta-btns">
           <router-link to="/register" class="btn btn-xl btn-primary btn-glow">免费注册 <el-icon :size="17"><ArrowRight /></el-icon></router-link>
           <router-link :to="loginLink" class="btn btn-xl btn-glass">已有账号，登录</router-link>
@@ -454,9 +649,9 @@
         <div class="foot-brand">
           <div class="navbar-brand">
             <div class="brand-logo"><el-icon :size="20"><School /></el-icon></div>
-            <span class="brand-text">智汇学场</span>
+            <span class="brand-text">为学空间</span>
           </div>
-          <p>融合考试、作业、竞赛、悬赏、自学的一体化智能学习平台。以 AI 赋能教与学，让每个进步都看得见。</p>
+          <p>融合考试、作业、竞赛、悬赏、自学、社区中心的一体化智能学习平台。以 AI 赋能教与学，让每个进步都看得见。</p>
           <div class="foot-badges">
             <span class="x-chip">Flask 3.1</span><span class="x-chip">Vue 3</span>
             <span class="x-chip">WebSocket 实时对战</span><span class="x-chip">AI 大模型</span>
@@ -468,21 +663,36 @@
         </div>
       </div>
       <div class="container foot-bottom">
-        © 2026 智汇学场 · Smart Learning Arena —— 让每一次学习，都有场域可依
+        © 2026 为学空间 · Arena of Learning —— 让每一次学习，都有空间可依
       </div>
     </footer>
+
+    <!-- 隐藏彩蛋：六枚成就集齐时触发 -->
+    <div v-if="eggOn" class="egg-sky" aria-hidden="true">
+      <i v-for="n in 26" :key="n" class="spark" :style="sparkStyle(n)"></i>
+    </div>
+    <transition name="egg-pop">
+      <div v-if="eggOn && eggToast" class="egg-toast">
+        <span class="et-emoji">🎇</span>
+        <div class="et-body">
+          <b>隐藏彩蛋解锁 · 空间漫游者</b>
+          <p>你已点亮全部 6 枚探索徽章。六个空间，此刻起都为你敲开。</p>
+        </div>
+        <button class="et-close" @click="eggToast = false"><el-icon :size="15"><Close /></el-icon></button>
+      </div>
+    </transition>
 
     <VideoModal :show="showVideoModal" @close="showVideoModal = false" />
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted, markRaw, nextTick } from 'vue'
+import { ref, reactive, computed, onMounted, onUnmounted, markRaw, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
 import {
-  School, Moon, Sunny, ArrowRight, VideoPlay, MagicStick, Check, Grid, Refresh,
+  School, Moon, Sunny, ArrowRight, VideoPlay, VideoPause, MagicStick, Check, Grid, Refresh,
   Calendar, Trophy, Coin, Reading, EditPen, DataAnalysis, ChatDotRound, Compass,
-  Document, QuestionFilled, User, Notebook
+  Document, QuestionFilled, User, Notebook, Select, Close
 } from '@element-plus/icons-vue'
 import VideoModal from '../components/VideoModal.vue'
 import { useThemeStore } from '../stores/theme'
@@ -504,6 +714,7 @@ const loginLink = computed(() => {
 const heroRef = ref(null); const modulesRef = ref(null); const aiRef = ref(null)
 const panoRef = ref(null); const workflowRef = ref(null); const voicesRef = ref(null)
 const faqRef = ref(null); const ctaRef = ref(null)
+const liveRef = ref(null); const quizRef = ref(null); const roadmapRef = ref(null)
 const s1 = ref(null); const s2 = ref(null); const s3 = ref(null); const s4 = ref(null)
 const pkA = ref(null); const pkB = ref(null)
 const pkQ = ref(4)
@@ -515,7 +726,7 @@ const tickerItems = [
   '8 种题型全覆盖', '积分排行榜', '错题自动沉淀', 'AI 苏格拉底式答疑', '赛季结算晋升',
 ]
 
-// ── 五大模块数据（与登录后 Portal 渐变一致）──
+// ── 六大模块数据（与登录后 Portal 渐变一致）──
 const modules = [
   {
     key: 'exam', short: '考试', title: '在线考试', tagline: '智能组卷 · 自动批改',
@@ -562,6 +773,15 @@ const modules = [
     points: ['题集式 / 开放式双形态', 'AI 批改建议 + 班级讲评', '匿名互评 · 评分量规', '查重检测 · 过程监测', '退回订正 · 优秀展示墙'],
     figures: [{ num: '2 形态', label: '题集/开放' }, { num: 'AI', label: '初评+讲评' }, { num: '全链', label: '布置到讲评' }],
   },
+  {
+    key: 'community', short: '社区', title: '社区中心', tagline: '论坛讨论 · 经验共创',
+    icon: markRaw(ChatDotRound), hex: '#14b8a6',
+    gradient: 'linear-gradient(135deg, #14b8a6 0%, #0d9488 100%)',
+    mockUrl: 'arena/community/forum',
+    desc: '开放的学习社区。论坛形态支持发帖讨论、评论点赞、匿名保护；发帖可关联题目/作业/考试，自动反向聚合到对应详情页的「讨论」tab。让优质解法跨班传播，错题疑问有人解答。',
+    points: ['论坛发帖 · 6 大分类', '匿名 / 实名自由切换', '关联题目/作业/考试', '反向聚合到详情页', '点赞 / 评论互动'],
+    figures: [{ num: '6 类', label: '帖子分类' }, { num: '匿名', label: '保护发言' }, { num: '聚合', label: '详情联动' }],
+  },
 ]
 
 // ── 仿真窗口内的假数据 ──
@@ -585,18 +805,24 @@ const mockData = {
     { name: '数据结构 · 链表编程题', meta: '开放式 · AI 已初评 30 份', pct: 62, color: '#8b5cf6', state: '待复核' },
     { name: '大学英语 · 作文 Unit 3', meta: '互评进行中 · 已收 20 份', pct: 40, color: '#f59e0b', state: '互评中' },
   ],
+  community: [
+    { cat: '解法分享', title: '洛必达法则遇到不定式怎么破？3 种变形技巧全整理', anon: false, author: '匿名#12', time: '2h 前', likes: 42, replies: 7 },
+    { cat: '错题讨论', title: '为什么我这道链表反转总是空指针？求大佬看一眼', anon: true, author: '匿名#38', time: '5h 前', likes: 18, replies: 12 },
+    { cat: '经验交流', title: '期末复习 10 天计划分享：我是怎么从 60 分爬到 88 的', anon: false, author: 'Kira', time: '1d 前', likes: 156, replies: 23 },
+    { cat: '求助答疑', title: 'Python 生成器和迭代器到底啥区别，面试问懵了', anon: true, author: '匿名#07', time: '2d 前', likes: 9, replies: 5 },
+  ],
 }
 
 // ── AI 引擎 ──
 const aiPowers = [
   { title: 'AI 智能出题', hex: '#8b5cf6', icon: markRaw(EditPen), gradient: 'linear-gradient(135deg,#6366f1,#8b5cf6)',
-    desc: '按知识点、难度、题型描述需求，秒级生成整卷题目，自动查重去歧义。', mods: ['在线考试', '征集悬赏'] },
+    desc: '按知识点、难度、题型描述需求，秒级生成整卷题目，自动查重去歧义。', mods: ['在线考试', '征集悬赏', '作业练习'] },
   { title: 'AI 语义批改', hex: '#06b6d4', icon: markRaw(DataAnalysis), gradient: 'linear-gradient(135deg,#06b6d4,#0891b2)',
     desc: '主观题不再逐字批改——AI 理解题意给分、标注失分点，教师复核一键确认；作业批改同样智能省时。', mods: ['在线考试', '作业练习', '自主学习'] },
   { title: 'AI 学习答疑', hex: '#10b981', icon: markRaw(ChatDotRound), gradient: 'linear-gradient(135deg,#10b981,#059669)',
-    desc: '苏格拉底式引导对话，不直接给答案；错题可追问，卡点随时拆解。', mods: ['自主学习'] },
+    desc: '苏格拉底式引导对话，不直接给答案；错题可追问，社区帖子的解法也能反向聚合。', mods: ['自主学习', '社区中心'] },
   { title: 'AI 路径规划', hex: '#f59e0b', icon: markRaw(Compass), gradient: 'linear-gradient(135deg,#f59e0b,#d97706)',
-    desc: '一句话目标自动拆解成带截止日的学习计划，掌握度引擎动态推荐下一步。', mods: ['自主学习', '答题竞赛'] },
+    desc: '一句话目标自动拆解成带截止日的学习计划，掌握度引擎动态推荐下一步与对手。', mods: ['自主学习', '答题竞赛', '征集悬赏'] },
 ]
 
 // ── 三角色全景 ──
@@ -622,6 +848,7 @@ const steps = [
   { title: '攻克提升', desc: '错题本间隔复习 + AI 学习计划逐个击破', icon: markRaw(Reading), hex: '#06b6d4', from: '自主学习', gradient: 'linear-gradient(135deg,#06b6d4,#0891b2)' },
   { title: '竞技检验', desc: 'PK 与排位赛实战检验，能力段位双晋升', icon: markRaw(Trophy), hex: '#f59e0b', from: '答题竞赛', gradient: 'linear-gradient(135deg,#f59e0b,#d97706)' },
   { title: '共创反哺', desc: '答悬赏、投稿题目赚积分，反哺社区题库', icon: markRaw(Coin), hex: '#ec4899', from: '征集悬赏', gradient: 'linear-gradient(135deg,#ec4899,#db2777)' },
+  { title: '社区中心', desc: '发帖讨论、评论点赞，优质解法跨班传播，错题疑问有人解答', icon: markRaw(ChatDotRound), hex: '#14b8a6', from: '社区中心', gradient: 'linear-gradient(135deg,#14b8a6,#0d9488)' },
 ]
 
 // ── 用户心声 ──
@@ -642,7 +869,7 @@ const voices = [
 
 // ── FAQ ──
 const faqs = [
-  { q: '智汇学场和普通考试系统有什么不同？', a: '普通系统只管「考」，智汇学场把「考 → 学 → 赛 → 创」连成闭环：考试暴露的薄弱知识点自动流入错题本与学习计划，学完可以去 PK 和竞赛检验，还能通过悬赏投稿把你会的题沉淀给社区，积分在五个模块间流通。' },
+  { q: '为学空间和普通考试系统有什么不同？', a: '普通系统只管「考」，为学空间把「考 → 作业 → 学 → 赛 → 创 → 社区」连成完整闭环：考试暴露的薄弱知识点自动流入错题本与学习计划，学完可以去 PK 和竞赛检验，还能通过悬赏投稿把你会的题沉淀给社区，社区里的优质解法又反向聚合到错题和详情页，积分在六个模块间流通。' },
   { q: 'AI 批改靠谱吗？会不会乱给分？', a: '客观题由系统精确判分；主观题采用 AI 语义评分，按得分点给分并标注失分原因，最终成绩支持教师一键复核调整。AI 是初评助手，打分权始终在教师手里。' },
   { q: '学生和教师账号有什么区别？', a: '教师账号拥有题库管理、组卷、考试发布、批改与成绩分析等教务能力；学生账号可以参加考试、错题复习、自由刷题、参与 PK/竞赛/悬赏。' },
   { q: 'PK 对战和竞赛是怎么匹配的？', a: '实时 PK 通过 WebSocket 毫秒级同步，AI 按答题水平与段位就近匹配；积分竞赛为限时全员同场，按得分与用时实时排行，赛季结束后按名次结算段位并发放勋章。' },
@@ -651,18 +878,298 @@ const faqs = [
 ]
 
 const footCols = [
-  { title: '模块', links: [{ t: '在线考试', to: '/login' }, { t: '作业练习', to: '/login' }, { t: '答题竞赛', to: '/login' }, { t: '征集悬赏', to: '/login' }, { t: '自主学习', to: '/login' }] },
+  { title: '模块', links: [{ t: '在线考试', to: '/login' }, { t: '作业练习', to: '/login' }, { t: '答题竞赛', to: '/login' }, { t: '征集悬赏', to: '/login' }, { t: '自主学习', to: '/login' }, { t: '社区中心', to: '/login' }] },
   { title: '能力', links: [{ t: 'AI 智能出题', to: '/login' }, { t: 'AI 语义批改', to: '/login' }, { t: '知识图谱路径', to: '/login' }, { t: '段位勋章体系', to: '/login' }] },
   { title: '开始', links: [{ t: '注册新账号', to: '/register' }, { t: '登录', to: '/login' }, { t: '常见问题', to: '/home' }] },
 ]
 
+// ── 可玩性：探索成就（滚动 / 交互逐枚解锁，集齐 6 枚触发彩蛋）──
+const achievements = [
+  { id: 'orbit', emoji: '🛰️', name: '六面览尽', tip: '把 6 个模块体验台都切一遍', hex: '#8b5cf6' },
+  { id: 'live', emoji: '💓', name: '此刻在场', tip: '在实时看板里拉到真实聚合数据', hex: '#ec4899' },
+  { id: 'replay', emoji: '🔁', name: 'AI 之眼', tip: '亲手重放一次 AI 批改演示', hex: '#06b6d4' },
+  { id: 'sharp', emoji: '🎯', name: '神来之答', tip: '体验题连续答对 2 题开启连击', hex: '#f59e0b' },
+  { id: 'matrix', emoji: '📊', name: '矩阵洞察', tip: '在能力矩阵上悬停任意一行', hex: '#22c55e' },
+  { id: 'roam', emoji: '🧭', name: '全程旅人', tip: '沿演进路线一直滚到最新一版', hex: '#14b8a6' },
+]
+const unlocked = reactive(new Set())
+const unlockedCount = computed(() => unlocked.size)
+const eggOn = ref(false)
+const eggToast = ref(false)
+
+function unlock(id) {
+  if (unlocked.has(id)) return
+  unlocked.add(id)
+  if (unlocked.size >= achievements.length && !eggOn.value) {
+    eggOn.value = true
+    eggToast.value = true
+  }
+}
+
+// 彩蛋星光：按序号给出确定性位置与延时，避免每次渲染拖动不同
+function sparkStyle(n) {
+  const r = (i) => ((n * 9301 + i * 49297) % 233280) / 233280
+  return {
+    left: (r(1) * 100).toFixed(2) + '%',
+    top: (r(2) * 100).toFixed(2) + '%',
+    animationDelay: (r(3) * 2.4).toFixed(2) + 's',
+    animationDuration: (1.6 + r(4) * 1.8).toFixed(2) + 's',
+  }
+}
+
+// ── 实时看板（公开聚合端点，零鉴权，失败静默降级）──
+const live = reactive({
+  counters: {},
+  today: { ai_calls: 0, checkins: 0, results: 0, new_posts: 0, new_submissions: 0 },
+  ai: { avg_cost_ms: 0, success_rate: null },
+  modules: [],
+  local_day: '', server_time: '',
+})
+const liveOk = ref(false)
+const liveUpdated = ref('')
+const livePulse = ref(false)
+const liveTiles = computed(() => {
+  const c = live.counters || {}
+  return [
+    { key: 'pq', label: '公共题库题目', value: c.public_questions || 0, suffix: '', hex: '#8b5cf6', bump: livePulse.value },
+    { key: 'ans', label: '累计作答', value: c.answers || 0, suffix: '', hex: '#06b6d4', bump: livePulse.value },
+    { key: 'sub', label: '作业提交', value: c.homework_submissions || 0, suffix: '', hex: '#10b981', bump: livePulse.value },
+    { key: 'dis', label: '社区讨论', value: (c.posts || 0) + (c.comments || 0), suffix: '', hex: '#14b8a6', bump: livePulse.value },
+  ]
+})
+const liveModules = computed(() => (live.modules && live.modules.length)
+  ? live.modules
+  : modules.map(m => ({ key: m.key, label: m.title, value: 0, hint: '等待数据' })))
+
+function lmPct(m) {
+  const max = Math.max(...liveModules.value.map(x => x.value || 0), 1)
+  return Math.max(2, Math.round((m.value || 0) / max * 100))
+}
+function modHex(key) {
+  return (modules.find(m => m.key === key) || {}).hex || '#8b5cf6'
+}
+function fmt(n) { return Number(n || 0).toLocaleString() }
+
+let liveTimer = null
+const LIVE_MS = 60000
+async function loadLive(manual) {
+  try {
+    const r = await fetch('/api/stats/public', { headers: { Accept: 'application/json' } })
+    if (!r.ok) throw new Error('HTTP ' + r.status)
+    const d = await r.json()
+    Object.assign(live, d)
+    liveOk.value = true
+    liveUpdated.value = (d.server_time || '').slice(11, 16) || '刚刚'
+    livePulse.value = true
+    setTimeout(() => { livePulse.value = false }, 820)
+    unlock('live')                 // 拿到真实聚合数即算「在场」，不等滚动瞬间的偶然命中
+    if (manual) bumpAuto()        // 手动刷新后重置轮播节奏，不与定时请求叠扫
+  } catch (e) {
+    liveOk.value = false          // 首页不因看板拉不到而弹错：静默降级，下个周期重试
+  }
+}
+
+// ── AI 批改演示：得分环重跑 + 失分点逐行打字机 ──
+const demoLines = [
+  { cls: 'ok', text: '✓ 定律表述完整，比例关系准确' },
+  { cls: 'ok', text: '✓ 惯性力修正概念正确' },
+  { cls: 'warn', text: '△ 未区分平移与转动惯性系（-8 分）' },
+]
+const demoKey = ref(0)
+const demoScore = ref(0)
+const demoTyped = ref(['', '', ''])
+let demoRaf = null
+let demoTimers = []
+let demoPlayed = false
+
+function stopDemo() {
+  if (demoRaf) { cancelAnimationFrame(demoRaf); demoRaf = null }
+  demoTimers.forEach(t => { clearTimeout(t.id); if (t.iv) clearInterval(t.iv) })
+  demoTimers = []
+}
+
+function runDemo(manual) {
+  stopDemo()
+  demoKey.value++                       // :key 重建子树，CSS 得分环动画从头跑
+  demoScore.value = 0
+  demoTyped.value = ['', '', '']
+  if (manual) unlock('replay')
+
+  const t0 = performance.now()
+  const step = () => {
+    const p = Math.min((performance.now() - t0) / 1700, 1)
+    demoScore.value = Math.round(92 * (1 - Math.pow(1 - p, 3)))
+    demoRaf = p < 1 ? requestAnimationFrame(step) : null
+  }
+  demoRaf = requestAnimationFrame(step)
+
+  let delay = 700
+  demoLines.forEach((l, li) => {
+    const to = { id: 0, iv: 0 }
+    to.id = setTimeout(() => {
+      let ci = 0
+      to.iv = setInterval(() => {
+        ci += 1
+        demoTyped.value[li] = l.text.slice(0, ci)
+        if (ci >= l.text.length) clearInterval(to.iv)
+      }, 42)
+    }, delay)
+    demoTimers.push(to)
+    delay += 320 + l.text.length * 42
+  })
+}
+function replayDemo() { runDemo(true) }
+
+// ── 体验题卡（纯前端假数据，不联网、不进任何判分链路）──
+const quizBank = [
+  { q: '下列哪一项是 Python 中的不可变类型？', options: ['list', 'tuple', 'dict', 'set'], answer: 1,
+    analysis: [
+      { k: '考点', v: '内置类型的可变性（基础必考）' },
+      { k: '判定', v: 'tuple 一旦创建不可修改元素；list / dict / set 均可原地增删' },
+      { k: '延伸', v: '不可变对象才能做字典键，tuple 需元素也全部不可变' } ] },
+  { q: '表示“已登录认证、但无权访问该资源”的 HTTP 状态码是？', options: ['400', '401', '403', '404'], answer: 2,
+    analysis: [
+      { k: '考点', v: '4xx 语义辨析' },
+      { k: '判定', v: '401 Unauthorized = 未认证；403 Forbidden = 已认证但无权' },
+      { k: '对应', v: '本平台 RBAC 门禁就按此口径：未登录 401、角色不够 403' } ] },
+  { q: '进程与线程的本质区别在于？', options: ['进程有独立地址空间，线程共享所属进程地址空间', '线程比进程拥有更多独立内存', '进程之间不能通信，线程可以', '一个进程只能包含一个线程'], answer: 0,
+    analysis: [
+      { k: '考点', v: '操作系统并发基础' },
+      { k: '判定', v: '进程是资源分配单位（独立地址空间），线程是调度单位（共享进程内存）' },
+      { k: '延伸', v: '因此线程通信廉价、进程间通信需管道/共享内存/消息队列' } ] },
+  { q: '关系型数据库采用 B+ 树而不是二叉树作索引，主要优势是？', options: ['天然支持全文模糊检索', '范围查询可沿叶子节点链表顺序扫描', '插入时永不发生页分裂', '索引列越多写入越快'], answer: 1,
+    analysis: [
+      { k: '考点', v: '索引存储结构与查询代价' },
+      { k: '判定', v: 'B+ 树非叶子层只存键，扇出大、树矮；叶子层双向链表串联，范围扫描不需回溯' },
+      { k: '代价', v: '写多读少场景索引反而变慢——每多一个索引，写入多一份维护' } ] },
+  { q: '归并排序的平均时间复杂度与额外空间复杂度分别是？', options: ['O(n log n) / O(1)', 'O(n²) / O(1)', 'O(n log n) / O(n)', 'O(log n) / O(n)'], answer: 2,
+    analysis: [
+      { k: '考点', v: '排序算法复杂度对照' },
+      { k: '判定', v: '归并每层合并线性、共 log n 层→O(n log n)；合并需临时数组→O(n)' },
+      { k: '对比', v: '堆排序 O(n log n) / O(1)，但缓存局部性差，实际常慢于快排' } ] },
+]
+const quizIdx = ref(0)
+const quizAnswered = ref(-1)
+const quizRight = ref(false)
+const quizGain = ref(0)
+const quizScore = ref(0)
+const combo = ref(0)
+const quizShake = ref(false)
+let quizInSight = false
+const curQuiz = computed(() => quizBank[quizIdx.value])
+
+function optClass(i) {
+  if (quizAnswered.value < 0) return {}
+  if (i === curQuiz.value.answer) return { right: true }
+  if (i === quizAnswered.value) return { wrong: true }
+  return { dim: true }
+}
+
+function answerQuiz(i) {
+  if (quizAnswered.value >= 0 || i >= curQuiz.value.options.length) return
+  quizAnswered.value = i
+  quizRight.value = i === curQuiz.value.answer
+  if (quizRight.value) {
+    combo.value += 1
+    quizGain.value = 10 + (combo.value - 1) * 5   // 连击逐题加 5 分
+    quizScore.value += quizGain.value
+    if (combo.value >= 2) unlock('sharp')
+  } else {
+    quizGain.value = 0
+    combo.value = 0
+    quizShake.value = true
+    setTimeout(() => { quizShake.value = false }, 460)
+  }
+}
+
+function nextQuiz() {
+  quizIdx.value = (quizIdx.value + 1) % quizBank.length
+  quizAnswered.value = -1
+  quizRight.value = false
+  quizGain.value = 0
+}
+
+// ── 六模块能力矩阵（0 不适用 / 1 部分 / 2 核心）──
+// 列顺序与 modules 一致：考试 · 竞赛 · 悬赏 · 学习 · 作业 · 社区
+const capMatrix = [
+  { name: 'AI 智能出题 / 组卷', cells: [2, 1, 2, 1, 2, 0] },
+  { name: 'AI 语义批改与讲评', cells: [2, 0, 1, 2, 2, 1] },
+  { name: '实时协同（WebSocket）', cells: [1, 2, 1, 1, 0, 2] },
+  { name: '积分激励与账本守恒', cells: [1, 2, 2, 1, 1, 2] },
+  { name: '数据看板与多维分析', cells: [2, 1, 1, 2, 2, 1] },
+  { name: '匿名保护与邀请门禁', cells: [2, 2, 1, 0, 2, 2] },
+  { name: '附件 / 富媒体与公式渲染', cells: [2, 1, 2, 2, 2, 2] },
+]
+const capHover = ref('')
+function hoverCapRow(name) { capHover.value = name; unlock('matrix') }
+
+// ── 演进路线图（里程碑与日期均取自更新日志「版本演进总览」）──
+const roadmap = [
+  { ver: 'v1.0', date: '2026-06-08', title: '一张在线试卷', desc: 'Flask + Jinja2 + SQLite 单引擎，考试与判分跑通第一条链路' },
+  { ver: 'v2.0', date: '2026-06-11', title: '题型与评分', desc: '题型扩到 8 种，加入教师人工评分与自动迁移' },
+  { ver: 'v2.9', date: '2026-09-05', title: '竞技化内核', desc: 'Socket.IO 实时推送 + 段位 / 赛季 / 勋章 / 战队 / 学情画像' },
+  { ver: 'v3.2', date: '2026-09-07', title: '征集悬赏', desc: '独立模块上线，师生同权众创题库' },
+  { ver: 'v3.4', date: '2026-09-09', title: '安全底座', desc: '全接口 JWT 鉴权、写接口教师专属、上传安全与异常收敛' },
+  { ver: 'v4.0', date: '2026-09-14', title: 'SPA 全栈化', desc: '移除服务端渲染，新增自主学习模块与公共题库' },
+  { ver: 'v4.8', date: '2026-09-21', title: '统一账本', desc: 'ledger 内核统一赏金与竞技积分，逐笔流水 + 守恒对账' },
+  { ver: 'v5.0', date: '2026-10-16', title: '作业练习', desc: '第五大业务模块：题集 / 开放双形态，自动判分 + 人工批改' },
+  { ver: 'v6.0', date: '2026-11-02', title: '社区中心', desc: '第六大业务模块落位，六个空间闭环成型', now: true },
+]
+
 // ── 交互逻辑 ──
-function pickModule(i) { active.value = i }
+const railHover = ref(false)
+const autoPlay = ref(true)
+const visited = reactive(new Set())
+const AUTO_MS = 6000
+let autoTimer = null
+
+function pickModule(i) {
+  active.value = i
+  visited.add(i)
+  if (visited.size >= modules.length) unlock('orbit')
+  bumpAuto()
+}
+
+function stepModule(dir) {
+  pickModule((active.value + dir + modules.length) % modules.length)
+}
+
+function bumpAuto() {
+  // 手动切换/点阵/刷新后重建定时器，让进度条与真实节奏对齐
+  if (autoTimer) { clearInterval(autoTimer); autoTimer = null }
+  if (autoPlay.value) startAuto(true)
+}
+
+function startAuto(immediate) {
+  if (autoTimer) clearInterval(autoTimer)
+  if (!autoPlay.value) return
+  autoTimer = setInterval(() => {
+    if (railHover.value) return          // 悬停面板：不跳走，不重置计数
+    active.value = (active.value + 1) % modules.length
+    visited.add(active.value)
+    if (visited.size >= modules.length) unlock('orbit')
+  }, immediate ? AUTO_MS : AUTO_MS)
+}
+
+function toggleAutoPlay() {
+  autoPlay.value = !autoPlay.value
+  if (autoPlay.value) startAuto()
+  else if (autoTimer) { clearInterval(autoTimer); autoTimer = null }
+}
 
 function followLight(e) {
   const r = e.currentTarget.getBoundingClientRect()
   e.currentTarget.style.setProperty('--mx', ((e.clientX - r.left) / r.width * 100) + '%')
   e.currentTarget.style.setProperty('--my', ((e.clientY - r.top) / r.height * 100) + '%')
+}
+
+function onKeydown(e) {
+  const t = e.target || {}
+  const tag = t.tagName || ''
+  if (['INPUT', 'TEXTAREA', 'SELECT'].includes(tag) || t.isContentEditable) return
+  if (e.key === 'ArrowLeft') { stepModule(-1) }
+  else if (e.key === 'ArrowRight') { stepModule(1) }
+  else if (/^[1-4]$/.test(e.key) && quizInSight) { answerQuiz(Number(e.key) - 1) }
 }
 
 const onScroll = () => { isScrolled.value = window.scrollY > 40 }
@@ -714,32 +1221,57 @@ function startPkTick() {
 
 // IntersectionObserver 统一驱动 reveal / 数字
 let io = null
+// 第二个观察负驱动成就：面板过半才算真的“看过”，不凭擦边过一下
+let io2 = null
 onMounted(() => {
   isDark.value = localStorage.getItem('theme') !== 'light'
   window.addEventListener('scroll', onScroll, { passive: true })
+  window.addEventListener('keydown', onKeydown)
 
   io = new IntersectionObserver((entries) => {
     entries.forEach(e => {
       if (!e.isIntersecting) return
       e.target.classList.add('in')
       if (e.target === heroRef.value) {
-        countUp(s1.value, 10000); countUp(s2.value, 5); countUp(s3.value, 8); countUp(s4.value, 30)
+        countUp(s1.value, 10000); countUp(s2.value, 6); countUp(s3.value, 8); countUp(s4.value, 30)
       }
     })
   }, { threshold: 0.12 })
 
+  io2 = new IntersectionObserver((entries) => {
+    entries.forEach(e => {
+      if (!e.isIntersecting) return
+      if (e.target === roadmapRef.value) {
+        unlock('roam')
+      } else if (e.target === quizRef.value) {
+        quizInSight = true
+      } else if (e.target === aiRef.value && !demoPlayed) {
+        demoPlayed = true; runDemo(false)
+      }
+    })
+  }, { threshold: 0.15, rootMargin: '-8% 0px -8% 0px' })   // AI 板块很高，阈值取高会让演示永不自动开播
+
   nextTick(() => {
     document.querySelectorAll('.home-page .reveal').forEach(el => io.observe(el))
     if (heroRef.value) io.observe(heroRef.value)
+    ;[roadmapRef, quizRef, aiRef].forEach(r => { if (r.value) io2.observe(r.value) })
+    visited.add(0)                 // 进页即停在首模块，视为已看过一格
   })
-  // PK mock 首次进入即启动跳动
+  loadLive()                        // 看板不靠滚动才拉数据，进页就拉一次
+  liveTimer = setInterval(() => loadLive(), LIVE_MS)   // 与文案口径一致的 60s 轮询
+  startAuto()                       // 轮播默认开，须在此起计时，否则 autoPlay 只是外观
   startPkTick()
 })
 
 onUnmounted(() => {
   window.removeEventListener('scroll', onScroll)
+  window.removeEventListener('keydown', onKeydown)
   if (io) io.disconnect()
+  if (io2) io2.disconnect()
   if (pkTimer) clearInterval(pkTimer)
+  if (autoTimer) clearInterval(autoTimer)
+  if (liveTimer) clearInterval(liveTimer)
+  stopDemo()
 })
 </script>
 
@@ -822,7 +1354,7 @@ onUnmounted(() => {
 .brand-logo { width: 38px; height: 38px; border-radius: 12px; background: linear-gradient(135deg, #6366f1, #06b6d4); display: flex; align-items: center; justify-content: center; color: #fff; box-shadow: 0 4px 16px rgba(99,102,241,.4); }
 .brand-text { font-weight: 700; font-size: 1.18rem; background: linear-gradient(120deg, #c4b5fa, #67e8f9); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
 .light .brand-text { background: linear-gradient(120deg, #6d28d9, #0e7490); -webkit-background-clip: text; background-clip: text; }
-.navbar-links { display: flex; gap: 28px; }
+.navbar-links { display: flex; gap: 22px; }
 .nav-link { color: var(--txt2); text-decoration: none; font-size: .93rem; font-weight: 500; transition: color .2s; }
 .nav-link:hover { color: var(--txt); }
 .navbar-actions { display: flex; align-items: center; gap: 12px; }
@@ -863,6 +1395,7 @@ onUnmounted(() => {
 .oc3 { left: 10%; bottom: 14%; animation-delay: -3s; }
 .oc4 { right: 6%; bottom: 30%; animation-delay: -4.5s; }
 .oc5 { left: 38%; bottom: -1%; animation-delay: -6s; }
+.oc6 { right: -2%; top: 50%; animation-delay: -7.5s; }
 @keyframes float { 50% { transform: translateY(-12px); } }
 
 .scroll-hint { position: absolute; left: 50%; bottom: 26px; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; gap: 8px; color: var(--txt3); font-size: .75rem; cursor: pointer; }
@@ -988,6 +1521,20 @@ onUnmounted(() => {
 .hw-state { font-size: .74rem; font-weight: 600; border: 1px solid; border-radius: 99px; padding: 3px 12px; white-space: nowrap; }
 .hw-flow { margin-top: 14px; text-align: center; font-size: .8rem; color: var(--txt2); border: 1px dashed var(--line); border-radius: 10px; padding: 10px; }
 
+/* 社区预览 */
+.mb-community .cf-list { display: flex; flex-direction: column; gap: 10px; }
+.cf-row { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 10px; background: rgba(20,184,166,.08); border: 1px solid rgba(20,184,166,.18); }
+.cf-cat { font-size: .72rem; font-weight: 700; padding: 3px 10px; border-radius: 99px; white-space: nowrap; background: rgba(20,184,166,.2); color: #5eead4; }
+.cf-cat.cfc-解法分享 { background: rgba(52,211,153,.2); color: #6ee7b7; }
+.cf-cat.cfc-错题讨论 { background: rgba(244,114,182,.2); color: #f9a8d4; }
+.cf-cat.cfc-经验交流 { background: rgba(147,197,253,.2); color: #bae6fd; }
+.cf-cat.cfc-求助答疑 { background: rgba(253,224,71,.2); color: #fde047; }
+.cf-body { flex: 1; min-width: 0; }
+.cf-title { font-size: .86rem; font-weight: 600; color: var(--txt); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cf-meta { font-size: .72rem; color: var(--txt3); margin-top: 2px; display: flex; gap: 8px; }
+.cf-stats { font-size: .74rem; color: var(--txt2); display: flex; gap: 10px; flex-shrink: 0; }
+.cf-flow { margin-top: 14px; text-align: center; font-size: .8rem; color: var(--txt2); border: 1px dashed var(--line); border-radius: 10px; padding: 10px; }
+
 /* 模块详情 */
 .mod-detail { border-radius: 18px; border: 1px solid var(--line); background: var(--card); backdrop-filter: blur(14px); padding: 26px 28px; animation: mockIn .55s cubic-bezier(.2,.7,.2,1) .12s backwards; }
 .mod-desc { color: var(--txt2); line-height: 1.85; font-size: .96rem; margin-bottom: 18px; }
@@ -1059,15 +1606,15 @@ onUnmounted(() => {
 .mx-chip.alt:hover { background: rgba(34,211,238,.2); }
 .light .mx-chip.alt { color: #0e7490; }
 
-/* ── 成长闭环 ── */
-.loop-steps { display: grid; grid-template-columns: repeat(5, 1fr); gap: 16px; }
-.loop-step { position: relative; text-align: center; padding: 34px 20px 28px; border-radius: 18px; border: 1px solid var(--line); background: var(--card); backdrop-filter: blur(12px); transition: all .35s ease; }
+/* ── 成长闭环（六模块六步）── */
+.loop-steps { display: grid; grid-template-columns: repeat(6, 1fr); gap: 16px; }
+.loop-step { position: relative; text-align: center; padding: 32px 14px 24px; border-radius: 18px; border: 1px solid var(--line); background: var(--card); backdrop-filter: blur(12px); transition: all .35s ease; }
 .loop-step:hover { transform: translateY(-6px); border-color: rgba(139,92,246,.45); box-shadow: 0 18px 44px rgba(0,0,0,.3); }
-.loop-num { position: absolute; top: 14px; left: 18px; font-size: 1.5rem; font-weight: 900; color: transparent; -webkit-text-stroke: 1px var(--txt3); opacity: .5; }
-.loop-icon { width: 58px; height: 58px; border-radius: 17px; margin: 0 auto 16px; display: flex; align-items: center; justify-content: center; color: #fff; box-shadow: 0 10px 26px rgba(0,0,0,.35); }
-.loop-step h3 { font-size: 1.02rem; margin: 0 0 8px; }
-.loop-step p { font-size: .83rem; color: var(--txt2); line-height: 1.7; margin: 0 0 14px; }
-.loop-mod { display: inline-block; font-size: .72rem; border: 1px solid; padding: 3px 12px; border-radius: 99px; }
+.loop-num { position: absolute; top: 12px; left: 14px; font-size: 1.35rem; font-weight: 900; color: transparent; -webkit-text-stroke: 1px var(--txt3); opacity: .5; }
+.loop-icon { width: 52px; height: 52px; border-radius: 16px; margin: 0 auto 14px; display: flex; align-items: center; justify-content: center; color: #fff; box-shadow: 0 10px 26px rgba(0,0,0,.35); }
+.loop-step h3 { font-size: .95rem; margin: 0 0 8px; }
+.loop-step p { font-size: .78rem; color: var(--txt2); line-height: 1.65; margin: 0 0 12px; }
+.loop-mod { display: inline-block; font-size: .7rem; border: 1px solid; padding: 3px 10px; border-radius: 99px; }
 .loop-arrow { position: absolute; right: -16px; top: 50%; transform: translateY(-50%); width: 30px; height: 30px; border-radius: 50%; background: linear-gradient(120deg, #7c3aed, #06b6d4); display: flex; align-items: center; justify-content: center; color: #fff; z-index: 2; box-shadow: 0 4px 14px rgba(124,58,237,.5); }
 
 /* ── 用户心声 ── */
@@ -1118,6 +1665,193 @@ onUnmounted(() => {
 .foot-col a:hover { color: var(--accent2); }
 .foot-bottom { border-top: 1px solid var(--line); padding-top: 22px; text-align: center; color: var(--txt3); font-size: .8rem; }
 
+/* ── 通用小件：键盘帽 / 迷你按钮 ── */
+kbd { display: inline-block; min-width: 20px; margin: 0 2px; padding: 1px 6px; border-radius: 6px; border: 1px solid var(--line); border-bottom-width: 2px; background: var(--card-strong); color: var(--txt2); font-family: Consolas, monospace; font-size: .72rem; line-height: 1.7; text-align: center; }
+.btn-mini { padding: 9px 18px; font-size: .84rem; border-radius: 11px; }
+
+/* ── 轮播控制条 ── */
+.showcase-bar { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; margin-top: 22px; padding: 14px 20px; border: 1px solid var(--line); border-radius: 16px; background: var(--card); backdrop-filter: blur(12px); }
+.sb-btn { display: inline-flex; align-items: center; gap: 7px; padding: 8px 15px; border-radius: 10px; border: 1px solid var(--line); background: transparent; color: var(--txt2); font-size: .82rem; font-weight: 600; font-family: inherit; cursor: pointer; transition: all .25s ease; white-space: nowrap; }
+.sb-btn:hover { color: var(--txt); border-color: rgba(139, 92, 246, .5); }
+.sb-btn.on { color: #c4b5fd; border-color: rgba(139, 92, 246, .55); background: rgba(139, 92, 246, .12); }
+.light .sb-btn.on { color: #6d28d9; }
+.sb-dots { display: inline-flex; align-items: center; gap: 9px; }
+.sb-dot { width: 11px; height: 11px; border-radius: 50%; background: var(--line); cursor: pointer; transition: all .3s cubic-bezier(.2, .7, .2, 1); }
+.sb-dot:hover { transform: scale(1.35); }
+.sb-dot.on { width: 26px; border-radius: 6px; }
+.sb-tip { font-size: .78rem; color: var(--txt3); }
+.sb-prog { position: relative; flex: 1; min-width: 120px; height: 3px; border-radius: 2px; background: var(--line); overflow: hidden; }
+.sb-prog i { position: absolute; inset: 0; transform-origin: left; background: linear-gradient(90deg, #8b5cf6, #22d3ee); animation: sbProg 6s linear forwards; }
+.sb-prog i.paused { animation-play-state: paused; }
+@keyframes sbProg { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+
+/* ── 探索成就 ── */
+.ach-panel { margin-top: 16px; border: 1px solid var(--line); border-radius: 16px; background: var(--card); backdrop-filter: blur(12px); padding: 16px 20px; }
+.ach-head { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; font-size: .82rem; color: var(--txt3); }
+.ach-title { display: inline-flex; align-items: center; gap: 7px; color: var(--txt2); font-weight: 600; }
+.ach-title .el-icon { color: #fbbf24; }
+.ach-head b { font-size: 1.05rem; color: var(--txt); }
+.ach-head b em { font-style: normal; font-size: .78rem; color: var(--txt3); }
+.ach-note { margin-left: auto; }
+.ach-list { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 14px; }
+.ach { display: flex; align-items: center; gap: 9px; padding: 9px 16px 9px 12px; border-radius: 12px; border: 1px dashed var(--line); background: transparent; font-size: .82rem; color: var(--txt3); transition: all .35s cubic-bezier(.2, .7, .2, 1); }
+.ach-ico { font-size: 1.05rem; filter: grayscale(1); opacity: .5; }
+.ach.got { border-style: solid; border-color: var(--mc); color: var(--txt); background: var(--card-strong); box-shadow: 0 6px 20px rgba(0, 0, 0, .22); animation: achPop .5s cubic-bezier(.2, .7, .2, 1); }
+.ach.got .ach-ico { filter: none; opacity: 1; }
+@keyframes achPop { 0% { transform: scale(.82); } 60% { transform: scale(1.06); } 100% { transform: none; } }
+
+/* ── 实时看板 ── */
+.live-sec { padding-top: 88px; }
+.live-grid { display: grid; grid-template-columns: 1.55fr 1fr; gap: 20px; align-items: stretch; }
+.live-main { display: flex; flex-direction: column; gap: 18px; }
+.live-tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+.live-tile { position: relative; border: 1px solid var(--line); border-radius: 16px; background: var(--card); backdrop-filter: blur(12px); padding: 20px 18px; overflow: hidden; transition: all .3s ease; }
+.live-tile::after { content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--mc); opacity: .75; }
+.live-tile:hover { transform: translateY(-4px); border-color: var(--mc); }
+.lt-num { display: flex; align-items: baseline; gap: 2px; font-size: 1.72rem; font-weight: 800; letter-spacing: -.5px; color: var(--txt); font-variant-numeric: tabular-nums; }
+.lt-num i { font-style: normal; font-size: .78rem; color: var(--mc); margin-left: 3px; }
+.lt-num.bump { animation: ltBump .8s cubic-bezier(.2, .7, .2, 1); }
+@keyframes ltBump { 0% { transform: scale(1); filter: none; } 30% { transform: scale(1.08); filter: brightness(1.35); } 100% { transform: scale(1); } }
+.lt-label { margin-top: 6px; font-size: .78rem; color: var(--txt3); }
+.live-mods { flex: 1; display: flex; flex-direction: column; justify-content: center; gap: 13px; border: 1px solid var(--line); border-radius: 16px; background: var(--card); backdrop-filter: blur(12px); padding: 20px 22px; }
+.lm-row { display: grid; grid-template-columns: 84px 1fr auto auto; align-items: center; gap: 12px; }
+.lm-name { font-size: .84rem; color: var(--txt2); }
+.lm-bar { height: 8px; border-radius: 4px; background: rgba(255, 255, 255, .07); overflow: hidden; }
+.light .lm-bar { background: rgba(15, 23, 42, .07); }
+.lm-bar i { display: block; height: 100%; border-radius: 4px; transform-origin: left; animation: grow 1s cubic-bezier(.2, .7, .2, 1); }
+.lm-val { font-size: .88rem; font-weight: 700; font-variant-numeric: tabular-nums; min-width: 52px; text-align: right; }
+.lm-hint { font-size: .72rem; color: var(--txt3); min-width: 68px; }
+.live-side { display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 18px; background: radial-gradient(320px 140px at 80% 0%, rgba(34, 211, 238, .12), transparent), var(--card); backdrop-filter: blur(14px); padding: 22px 24px; }
+.ls-head { display: flex; align-items: baseline; justify-content: space-between; font-weight: 700; font-size: .96rem; padding-bottom: 14px; border-bottom: 1px dashed var(--line); }
+.ls-head em { font-style: normal; font-size: .76rem; font-weight: 500; color: var(--txt3); font-variant-numeric: tabular-nums; }
+.ls-rows { display: flex; flex-direction: column; gap: 11px; padding: 16px 0; }
+.ls-row { display: flex; justify-content: space-between; font-size: .86rem; color: var(--txt2); }
+.ls-row b { font-variant-numeric: tabular-nums; color: var(--txt); }
+.ls-ai { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 14px 0; border-top: 1px dashed var(--line); }
+.ls-ai div { display: flex; flex-direction: column; gap: 3px; }
+.ls-ai b { font-size: 1.12rem; color: #22d3ee; font-variant-numeric: tabular-nums; }
+.ls-ai span { font-size: .74rem; color: var(--txt3); }
+.ls-foot { display: flex; align-items: center; gap: 9px; margin-top: auto; padding-top: 12px; border-top: 1px dashed var(--line); font-size: .76rem; color: var(--txt3); }
+.ls-foot em { font-style: normal; }
+.ls-dot { width: 8px; height: 8px; border-radius: 50%; background: #34d399; box-shadow: 0 0 0 0 rgba(52, 211, 153, .6); animation: pulse 2s infinite; flex-shrink: 0; }
+.ls-dot.bad { background: #f87171; animation: none; box-shadow: none; }
+.ls-refresh { margin-left: auto; display: inline-flex; align-items: center; gap: 5px; padding: 5px 12px; border-radius: 9px; border: 1px solid var(--line); background: transparent; color: var(--txt2); font-size: .76rem; font-family: inherit; cursor: pointer; transition: all .25s; }
+.ls-refresh:hover { color: var(--txt); border-color: rgba(34, 211, 238, .5); background: rgba(34, 211, 238, .1); }
+
+/* ── AI 演示重放条 ── */
+.demo-bar { display: flex; align-items: center; gap: 14px; margin-top: 34px; padding: 12px 20px; border: 1px solid var(--line); border-radius: 14px; background: var(--card); backdrop-filter: blur(12px); }
+.db-label { display: inline-flex; align-items: center; gap: 8px; font-size: .82rem; color: var(--txt2); }
+.db-label .el-icon { color: var(--accent2); }
+.db-btn { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; padding: 7px 15px; border-radius: 10px; border: 1px solid rgba(34, 211, 238, .45); background: rgba(34, 211, 238, .1); color: #67e8f9; font-size: .8rem; font-weight: 600; font-family: inherit; cursor: pointer; transition: all .25s; }
+.light .db-btn { color: #0e7490; }
+.db-btn:hover { background: rgba(34, 211, 238, .22); transform: translateY(-1px); }
+.ai-demo.has-bar { margin-top: 14px; }
+.demo-a li.typing { min-height: 1em; }
+.demo-a li.typing::after { content: '▍'; color: var(--accent2); animation: caret .7s steps(1) infinite; }
+@keyframes caret { 50% { opacity: 0; } }
+
+/* ── 体验题卡 ── */
+.quiz-sec { padding-top: 88px; }
+.quiz-wrap { max-width: 880px; }
+.quiz-card { border: 1px solid var(--line); border-radius: 22px; background: radial-gradient(520px 200px at 50% 0%, rgba(139, 92, 246, .16), transparent), var(--card); backdrop-filter: blur(16px); padding: 26px 28px 22px; box-shadow: var(--mock-shadow); }
+.quiz-card.shake { animation: qShake .46s cubic-bezier(.36, .07, .19, .97); }
+@keyframes qShake { 10%, 90% { transform: translateX(-2px); } 20%, 80% { transform: translateX(4px); } 30%, 50%, 70% { transform: translateX(-7px); } 40%, 60% { transform: translateX(7px); } }
+.qc-top { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; padding-bottom: 16px; border-bottom: 1px dashed var(--line); font-size: .78rem; }
+.qc-tag { color: var(--txt3); font-family: Consolas, monospace; }
+.qc-combo { color: var(--txt3); transition: all .3s; }
+.qc-combo.on { color: #fbbf24; font-weight: 700; animation: achPop .4s cubic-bezier(.2, .7, .2, 1); }
+.qc-score { margin-left: auto; color: var(--txt3); }
+.qc-score b { color: #22d3ee; font-size: 1.05rem; margin-left: 4px; font-variant-numeric: tabular-nums; }
+.qc-q { font-size: 1.1rem; font-weight: 700; line-height: 1.7; margin: 20px 0 18px; }
+.qc-opts { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.qc-opt { position: relative; display: flex; align-items: center; gap: 11px; padding: 13px 15px; border-radius: 13px; border: 1px solid var(--line); background: var(--card); color: var(--txt); font-size: .88rem; font-family: inherit; text-align: left; cursor: pointer; transition: all .28s cubic-bezier(.2, .7, .2, 1); }
+.qc-opt:hover:not(:disabled) { transform: translateY(-2px); border-color: rgba(139, 92, 246, .55); background: var(--card-strong); }
+.qc-opt:disabled { cursor: default; }
+.qc-opt .oo { width: 24px; height: 24px; border-radius: 8px; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; font-size: .74rem; font-weight: 800; background: rgba(255, 255, 255, .07); color: var(--txt2); }
+.light .qc-opt .oo { background: rgba(15, 23, 42, .06); }
+.qc-opt .ot { flex: 1; min-width: 0; }
+.qc-opt .oi { flex-shrink: 0; }
+.qc-opt.right { border-color: #34d399; background: rgba(52, 211, 153, .13); }
+.qc-opt.right .oo { background: #34d399; color: #04271c; }
+.qc-opt.right .mark { color: #34d399; }
+.qc-opt.wrong { border-color: #f87171; background: rgba(248, 113, 113, .12); }
+.qc-opt.wrong .oo { background: #f87171; color: #3b0a0a; }
+.qc-opt.wrong .cross { color: #f87171; }
+.qc-opt.dim { opacity: .42; }
+.qc-ana { margin-top: 18px; padding-top: 16px; border-top: 1px dashed var(--line); display: flex; flex-direction: column; gap: 9px; }
+.ana-verdict { font-size: .9rem; font-weight: 700; }
+.ana-verdict em { font-style: normal; font-size: .78rem; font-weight: 600; margin-left: 10px; color: #fbbf24; }
+.ana-verdict.good { color: #34d399; }
+.ana-verdict.bad { color: #f87171; }
+.ana-row { display: grid; grid-template-columns: 54px 1fr; gap: 12px; font-size: .84rem; opacity: 0; animation: anaIn .5s cubic-bezier(.2, .7, .2, 1) forwards; animation-delay: var(--d, 0s); }
+@keyframes anaIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+.ar-k { color: var(--txt3); border-right: 1px solid var(--line); }
+.ar-v { color: var(--txt2); line-height: 1.75; }
+.qc-foot { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin-top: 20px; padding-top: 16px; border-top: 1px dashed var(--line); }
+.qc-tip { font-size: .78rem; color: var(--txt3); }
+.btn-next { background: linear-gradient(120deg, #7c3aed, #06b6d4); color: #fff; }
+.btn-next:hover { transform: translateY(-2px); filter: brightness(1.12); }
+.qc-link { margin-left: auto; font-size: .8rem; color: var(--accent2); text-decoration: none; }
+.qc-link:hover { text-decoration: underline; }
+
+/* ── 六模块能力矩阵 ── */
+.cap-matrix { margin-top: 20px; border: 1px solid var(--line); border-radius: 18px; background: var(--card); backdrop-filter: blur(12px); padding: 26px 28px; overflow-x: auto; }
+.cm-top { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin-bottom: 16px; }
+.cm-top h4 { display: flex; align-items: center; gap: 8px; margin: 0; font-size: .95rem; }
+.cm-legend { margin-left: auto; font-size: .76rem; color: var(--txt3); display: inline-flex; align-items: center; gap: 5px; }
+.cm-legend i { font-style: normal; margin-left: 8px; }
+.cm-legend .lg2 { color: #34d399; }
+.cm-legend .lg1 { color: #fbbf24; }
+.cm-legend .lg0 { color: var(--txt3); }
+.cm-table { min-width: 720px; }
+.cm-tr { display: grid; grid-template-columns: 1.7fr repeat(6, 1fr); align-items: center; gap: 8px; padding: 10px 12px; border-radius: 10px; transition: background .25s ease; }
+.cm-hd { border-bottom: 1px solid var(--line); border-radius: 0; padding-bottom: 12px; }
+.cm-th { font-size: .8rem; font-weight: 700; color: var(--txt2); text-align: center; }
+.cm-th.name { text-align: left; color: var(--txt3); font-weight: 500; font-size: .76rem; letter-spacing: 1px; }
+.cm-tr + .cm-tr { margin-top: 2px; }
+.cm-tr.hl { background: var(--card-strong); }
+.cm-td { font-size: .84rem; }
+.cm-td.name { color: var(--txt2); }
+.cm-tr.hl .cm-td.name { color: var(--txt); font-weight: 600; }
+.cm-td i { display: block; font-style: normal; text-align: center; font-size: .95rem; transition: transform .25s; }
+.cm-tr.hl .cm-td i { transform: scale(1.2); }
+.cm-td .lv0 { color: var(--txt3); opacity: .5; }
+
+/* ── 演进路线 ── */
+.rm-rail { position: relative; display: flex; gap: 16px; overflow-x: auto; padding: 4px 4px 18px; scrollbar-width: thin; }
+.rm-item { position: relative; flex: 0 0 214px; padding-top: 30px; scroll-snap-align: start; }
+.rm-item::before { content: ''; position: absolute; top: 11px; left: 0; right: -16px; height: 2px; background: linear-gradient(90deg, rgba(139, 92, 246, .55), rgba(34, 211, 238, .25)); }
+.rm-item:last-child::before { right: auto; width: 0; }
+.rm-dot { position: absolute; top: 5px; left: 0; width: 14px; height: 14px; border-radius: 50%; background: var(--bg0); border: 2px solid var(--accent); }
+.rm-dot i { position: absolute; inset: 3px; border-radius: 50%; background: linear-gradient(120deg, #8b5cf6, #22d3ee); }
+.rm-item.now .rm-dot { border-color: #f59e0b; animation: pulse 2s infinite; box-shadow: 0 0 0 0 rgba(245, 158, 11, .5); }
+.rm-card { height: 100%; border: 1px solid var(--line); border-radius: 16px; background: var(--card); backdrop-filter: blur(12px); padding: 18px 18px 20px; transition: all .35s ease; }
+.rm-card:hover { transform: translateY(-5px); border-color: rgba(139, 92, 246, .5); box-shadow: 0 16px 36px rgba(0, 0, 0, .28); }
+.rm-item.now .rm-card { border-color: rgba(245, 158, 11, .55); background: var(--card-strong); }
+.rm-ver { display: flex; align-items: baseline; gap: 9px; margin-bottom: 10px; }
+.rm-ver b { font-size: .98rem; background: linear-gradient(120deg, #c4b5fa, #67e8f9); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent; }
+.light .rm-ver b { background: linear-gradient(120deg, #6d28d9, #0e7490); -webkit-background-clip: text; background-clip: text; }
+.rm-ver em { font-style: normal; font-size: .72rem; color: var(--txt3); font-variant-numeric: tabular-nums; }
+.rm-card h4 { margin: 0 0 8px; font-size: .94rem; }
+.rm-card p { margin: 0; font-size: .8rem; line-height: 1.75; color: var(--txt2); }
+.rm-item.now .rm-card h4::after { content: '当前'; font-size: .68rem; font-weight: 700; color: #f59e0b; border: 1px solid rgba(245, 158, 11, .5); border-radius: 99px; padding: 1px 8px; margin-left: 8px; vertical-align: 2px; }
+
+/* ── 隐藏彩蛋 ── */
+.home-page.egg { --accent: #f59e0b; }
+.egg-sky { position: fixed; inset: 0; z-index: 120; pointer-events: none; overflow: hidden; }
+.spark { position: absolute; width: 4px; height: 4px; border-radius: 50%; background: radial-gradient(circle, #fef3c7, #f59e0b); box-shadow: 0 0 12px 2px rgba(245, 158, 11, .65); animation: spark 2s ease-in-out infinite; }
+@keyframes spark { 0%, 100% { opacity: 0; transform: scale(.4); } 40% { opacity: 1; transform: scale(1.5); } }
+.egg-toast { position: fixed; right: 28px; bottom: 28px; z-index: 130; display: flex; align-items: flex-start; gap: 14px; max-width: 360px; padding: 20px 22px; border-radius: 18px; border: 1px solid rgba(245, 158, 11, .5); background: var(--glass); backdrop-filter: blur(18px); box-shadow: 0 22px 60px rgba(0, 0, 0, .45); }
+.et-emoji { font-size: 1.7rem; line-height: 1.2; }
+.et-body { flex: 1; min-width: 0; }
+.et-body b { display: block; font-size: .94rem; color: #fbbf24; margin-bottom: 6px; }
+.et-body p { margin: 0; font-size: .82rem; line-height: 1.75; color: var(--txt2); }
+.et-close { flex-shrink: 0; width: 26px; height: 26px; border-radius: 50%; border: 1px solid var(--line); background: transparent; color: var(--txt3); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; transition: all .25s; }
+.et-close:hover { color: var(--txt); border-color: rgba(245, 158, 11, .6); }
+.egg-pop-enter-active { transition: all .55s cubic-bezier(.2, .7, .2, 1); }
+.egg-pop-leave-active { transition: all .3s ease; }
+.egg-pop-enter-from, .egg-pop-leave-to { opacity: 0; transform: translateY(24px) scale(.94); }
+
 /* ── 响应式 ── */
 @media (max-width: 1024px) {
   .hero-grid { grid-template-columns: 1fr; text-align: center; }
@@ -1135,6 +1869,11 @@ onUnmounted(() => {
   .matrix { grid-template-columns: 1fr; }
   .loop-steps { grid-template-columns: 1fr 1fr; }
   .loop-arrow { display: none; }
+  .live-grid { grid-template-columns: 1fr; }
+  .live-tiles { grid-template-columns: repeat(4, 1fr); }
+  .sb-tip { display: none; }
+  .qc-opts { grid-template-columns: 1fr; }
+  .rm-item { flex-basis: 200px; }
   .voice-grid { grid-template-columns: 1fr; }
   .voice-card.wide { grid-column: span 1; }
   .foot-grid { grid-template-columns: 1fr 1fr; }
@@ -1150,5 +1889,15 @@ onUnmounted(() => {
   .pk-opts { grid-template-columns: 1fr; }
   .mod-figures { flex-direction: column; }
   .cta-box { padding: 48px 22px 40px; }
+  .showcase-bar { gap: 12px; padding: 12px 14px; }
+  .sb-prog { flex-basis: 100%; order: 3; }
+  .ach-note { display: none; }
+  .live-tiles { grid-template-columns: 1fr 1fr; }
+  .lm-row { grid-template-columns: 72px 1fr auto; }
+  .lm-hint { display: none; }
+  .quiz-card { padding: 20px 16px 16px; }
+  .demo-bar { flex-wrap: wrap; }
+  .egg-toast { left: 16px; right: 16px; bottom: 16px; max-width: none; }
+  .rm-item { flex-basis: 172px; }
 }
 </style>

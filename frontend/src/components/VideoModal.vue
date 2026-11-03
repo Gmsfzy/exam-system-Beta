@@ -17,7 +17,7 @@
         <button class="close-btn" @click="close">
           <el-icon :size="18"><Close /></el-icon>
         </button>
-        <div class="brand-mark">智汇学场 · Smart Learning Arena</div>
+        <div class="brand-mark">为学空间 · Arena of Learning</div>
       </div>
       <div class="video-controls">
         <div class="controls-left">
@@ -52,8 +52,8 @@
     </div>
     <template #footer>
       <div class="video-footer">
-        <h4>智汇学场 · Smart Learning Arena</h4>
-        <p>AI 驱动，融合考试 · 作业 · 竞赛 · 悬赏 · 自学的一体化智能学习平台</p>
+        <h4>为学空间 · Arena of Learning</h4>
+        <p>AI 驱动，融合考试 · 作业 · 竞赛 · 悬赏 · 自学 · 社区中心的一体化智能学习平台</p>
       </div>
     </template>
   </el-dialog>
@@ -83,7 +83,7 @@ const currentTime = ref(0)
 const isFullscreen = ref(false)
 const animationDuration = 620
 
-// ── 演示时间线：开场品牌 → 系统亮点 → 四大模块 → 闭环总结 ──
+// ── 演示时间线：开场品牌 → 系统亮点 → 六大模块 → 闭环总结 ──
 const slides = [
   {
     name: '品牌开场', scene: 'brand', dur: 4600,
@@ -124,6 +124,12 @@ const slides = [
     gradient: ['#0f766e', '#14b8a6', '#06b6d4'],
   },
   {
+    name: '社区中心', scene: 'community', dur: 5600,
+    title: '社区中心', desc: '论坛讨论 · 匿名保护 · 关联聚合 · 经验共创',
+    features: ['6 大分类发帖', '匿名 / 实名切换', '关联题目与作业', '反向聚合讨论', '点赞评论互动'],
+    gradient: ['#0284c7', '#0ea5e9', '#22d3ee'],
+  },
+  {
     name: '闭环总结', scene: 'summary', dur: 5200,
     gradient: ['#0f172a', '#4f46e5', '#06b6d4'],
   },
@@ -137,7 +143,7 @@ const totalDuration = computed(() => starts[starts.length - 1] + slides[slides.l
 const progressPercent = computed(() => (currentTime.value / totalDuration.value) * 100)
 
 const HIGHLIGHTS = [
-  { emoji: '🧩', title: '五位一体', sub: '考试·作业·竞赛·悬赏·自学' },
+  { emoji: '🧩', title: '六位一体', sub: '考试·作业·竞赛·悬赏·自学·社区' },
   { emoji: '🤖', title: 'AI 全流程', sub: '组卷·批改·答疑·推荐' },
   { emoji: '⚔️', title: '实时竞技', sub: '1v1 PK·段位排位' },
   { emoji: '🏅', title: '赛季证书', sub: '金银铜·分档颁发' },
@@ -307,16 +313,17 @@ function drawBrandScene(ctx, w, h, p, t) {
   ctx.stroke()
   ctx.restore()
 
-  // 五模块光点（均匀环排）
+  // 六模块光点（均匀环排）
   const mods = [
     { emoji: '📝', a: -Math.PI / 2, c: ['#a5b4fc', '#6366f1'] },
-    { emoji: '🏆', a: -Math.PI / 2 + 2 * Math.PI / 5, c: ['#fdba74', '#f97316'] },
-    { emoji: '💰', a: -Math.PI / 2 + 4 * Math.PI / 5, c: ['#6ee7b7', '#10b981'] },
-    { emoji: '📚', a: -Math.PI / 2 + 6 * Math.PI / 5, c: ['#f9a8d4', '#ec4899'] },
-    { emoji: '📒', a: -Math.PI / 2 + 8 * Math.PI / 5, c: ['#5eead4', '#14b8a6'] },
+    { emoji: '🏆', a: -Math.PI / 2 + 2 * Math.PI / 6, c: ['#fdba74', '#f97316'] },
+    { emoji: '💰', a: -Math.PI / 2 + 4 * Math.PI / 6, c: ['#6ee7b7', '#10b981'] },
+    { emoji: '📚', a: -Math.PI / 2 + 6 * Math.PI / 6, c: ['#f9a8d4', '#ec4899'] },
+    { emoji: '📒', a: -Math.PI / 2 + 8 * Math.PI / 6, c: ['#5eead4', '#14b8a6'] },
+    { emoji: '💬', a: -Math.PI / 2 + 10 * Math.PI / 6, c: ['#7dd3fc', '#0ea5e9'] },
   ]
   mods.forEach((m, i) => {
-    const appear = easeOut((p - 0.25 - i * 0.08) * 4)
+    const appear = easeOut((p - 0.25 - i * 0.06) * 4)
     if (appear <= 0) return
     const ang = m.a + t * 0.0003
     const mx = cx + ringR * Math.cos(ang)
@@ -337,18 +344,18 @@ function drawBrandScene(ctx, w, h, p, t) {
   ctx.globalAlpha = e
   ctx.translate(cx, cy)
   ctx.scale(0.85 + 0.15 * e, 0.85 + 0.15 * e)
-  drawGradText(ctx, '智汇学场', 0, -18, 44, 800, ['#ffffff', '#e0e7ff', '#a5f3fc'], 'center', 'middle')
+  drawGradText(ctx, '为学空间', 0, -18, 44, 800, ['#ffffff', '#e0e7ff', '#a5f3fc'], 'center', 'middle')
   ctx.restore()
-  drawText(ctx, 'Smart Learning Arena', cx, cy + 24, 15, 600, e, 'rgba(224,231,255,0.9)')
+  drawText(ctx, 'Arena of Learning', cx, cy + 24, 15, 600, e, 'rgba(224,231,255,0.9)')
   const sub = easeOut((p - 0.35) * 2.2)
   drawText(ctx, 'AI 驱动 · 一体化智能学习平台', cx, cy + 56, 16, 500, sub, 'rgba(255,255,255,0.92)')
-  drawText(ctx, '考试 · 作业 · 竞赛 · 悬赏 · 自学  五大场域环环相扣', cx, cy + 82, 12.5, 400, sub, 'rgba(226,232,240,0.75)')
+  drawText(ctx, '考试 · 作业 · 竞赛 · 悬赏 · 自学 · 社区  六大场域环环相扣', cx, cy + 82, 12.5, 400, sub, 'rgba(226,232,240,0.75)')
 }
 
 // ========== 场景 1：系统亮点 ==========
 function drawHighlightScene(ctx, w, h, p) {
   drawText(ctx, '系统亮点', w / 2, 40, 26, 800, easeOut(p * 3), '#ffffff')
-  drawText(ctx, 'Why 智汇学场 · 六大核心能力', w / 2, 66, 13, 400, easeOut(p * 3), 'rgba(224,231,255,0.85)')
+  drawText(ctx, 'Why 为学空间 · 六大核心能力', w / 2, 66, 13, 400, easeOut(p * 3), 'rgba(224,231,255,0.85)')
 
   const cols = 3, rows = 2
   const gx = 46, gy = 96
@@ -607,7 +614,7 @@ function drawStudyScene(ctx, w, h, progress) {
   ctx.restore()
 }
 
-// ========== 场景 5.5：作业练习 ==========
+// ========== 场景 6：作业练习 ==========
 function drawHomeworkScene(ctx, w, h, progress) {
   const fade = Math.min(progress * 1.5, 1)
   const slide = Math.max(0, (progress - 0.3) / 0.7)
@@ -666,7 +673,72 @@ function drawHomeworkScene(ctx, w, h, progress) {
   ctx.restore()
 }
 
-// ========== 场景 6：闭环总结 ==========
+// ========== 场景 7：社区中心 ==========
+function drawCommunityScene(ctx, w, h, progress) {
+  const fade = Math.min(progress * 1.5, 1)
+  const slide = Math.max(0, (progress - 0.3) / 0.7)
+  ctx.save()
+  ctx.globalAlpha = fade
+  const lx = 40 + slide * 20, ly = 54
+  drawGlassCard(ctx, lx, ly, 330, 300, 16, { shadowColor: 'rgba(14,165,233,0.35)' })
+  drawGradText(ctx, '💬 社区论坛 · 最新讨论', lx + 16, ly + 14, 15, 700, ['#0369a1', '#0ea5e9'])
+  ctx.fillStyle = '#64748b'; ctx.font = '500 11px sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'top'
+  ctx.fillText('今日新帖 26 · 评论 118 · 匿名保护 9 帖', lx + 16, ly + 40)
+  const rows = [
+    { cat: '解法分享', t: '洛必达遇不定式怎么破', likes: 42, rep: 7, c: '#0ea5e9' },
+    { cat: '错题讨论', t: '链表反转为何空指针', likes: 18, rep: 12, c: '#6366f1' },
+    { cat: '经验交流', t: '期末 10 天复习计划', likes: 65, rep: 21, c: '#10b981' },
+    { cat: '悬赏求题', t: '求二叉树遍历代码题', likes: 31, rep: 5, c: '#f59e0b' },
+  ]
+  rows.forEach((r, i) => {
+    const ry = ly + 76 + i * 42
+    ctx.save(); setShadow(ctx, r.c + '55', 5, 0, 1)
+    roundRect(ctx, lx + 16, ry - 12, 70, 24, 12); ctx.fillStyle = r.c; ctx.fill(); clearShadow(ctx); ctx.restore()
+    ctx.fillStyle = '#fff'; ctx.font = '700 11px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
+    ctx.fillText(r.cat, lx + 51, ry)
+    ctx.fillStyle = '#334155'; ctx.font = '600 12px sans-serif'; ctx.textAlign = 'left'
+    ctx.fillText(r.t, lx + 96, ry)
+    ctx.fillStyle = '#64748b'; ctx.font = '500 10px sans-serif'; ctx.textAlign = 'right'
+    ctx.fillText('❤ ' + r.likes + '  💬 ' + r.rep, lx + 314, ry)
+  })
+  ctx.textAlign = 'left'; ctx.textBaseline = 'top'; ctx.fillStyle = '#94a3b8'; ctx.font = '500 10.5px sans-serif'
+  ctx.fillText('发帖 → 分类/关联 → 匿名保护 → 讨论互动 → 反向聚合', lx + 16, ly + 256)
+  const tags = ['6 大分类', '匿名保护', '关联考试', '跨班传播']
+  tags.forEach((t, i) => {
+    const bx = lx + 16 + i * 78, by = ly + 274
+    roundRect(ctx, bx, by, 72, 20, 10); ctx.fillStyle = 'rgba(14,165,233,0.12)'; ctx.fill()
+    ctx.fillStyle = '#0369a1'; ctx.font = '600 10px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
+    ctx.fillText(t, bx + 36, by + 10)
+  })
+
+  const rx = 396 - slide * 10, ry2 = 70
+  drawGlassCard(ctx, rx, ry2, 300, 210, 14, { shadowColor: 'rgba(14,165,233,0.3)', shadowY: 5 })
+  drawGradText(ctx, '🔗 优质解法 · 反向聚合', rx + 16, ry2 + 14, 13, 700, ['#0369a1', '#0ea5e9'])
+  const src = [{ t: '题目', y: ry2 + 62 }, { t: '作业', y: ry2 + 100 }, { t: '考试', y: ry2 + 138 }]
+  const hx = rx + 216, hy = ry2 + 100
+  ctx.strokeStyle = 'rgba(14,165,233,0.45)'; ctx.lineWidth = 1.5
+  src.forEach(s => { ctx.beginPath(); ctx.moveTo(rx + 78, s.y + 12); ctx.lineTo(hx - 28, hy); ctx.stroke() })
+  src.forEach(s => {
+    ctx.save(); setShadow(ctx, 'rgba(14,165,233,0.35)', 5, 0, 1)
+    roundRect(ctx, rx + 18, s.y, 60, 24, 12); ctx.fillStyle = 'rgba(14,165,233,0.12)'; ctx.fill(); clearShadow(ctx); ctx.restore()
+    ctx.fillStyle = '#0369a1'; ctx.font = '600 11px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
+    ctx.fillText(s.t, rx + 48, s.y + 12)
+  })
+  drawGradientCircle(ctx, hx, hy, 30, ['#7dd3fc', '#0ea5e9', '#0369a1'], 'rgba(14,165,233,0.5)')
+  ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
+  ctx.font = '800 12px sans-serif'; ctx.fillText('讨论', hx, hy - 6)
+  ctx.font = '700 10px sans-serif'; ctx.fillText('聚合', hx, hy + 8)
+  const chips = ['讨论 tab', '点赞 / 评论', 'AI 归因联动', '优秀解法置顶']
+  chips.forEach((t, i) => {
+    const bx = rx + 6 + i * 74, by = ry2 + 172
+    roundRect(ctx, bx, by, 70, 22, 11); ctx.fillStyle = 'rgba(14,165,233,0.1)'; ctx.fill()
+    ctx.fillStyle = '#0369a1'; ctx.font = '600 10px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
+    ctx.fillText(t, bx + 35, by + 11)
+  })
+  ctx.restore()
+}
+
+// ========== 场景 8：闭环总结 ==========
 function drawSummaryScene(ctx, w, h, progress, t) {
   const fade = Math.min(progress * 1.5, 1)
   ctx.save()
@@ -678,13 +750,14 @@ function drawSummaryScene(ctx, w, h, progress, t) {
 
   const nodes = [
     { label: '在线考试', a: -Math.PI / 2, c: ['#a5b4fc', '#6366f1', '#4338ca'], e: '📝' },
-    { label: '答题竞赛', a: -Math.PI / 2 + 2 * Math.PI / 5, c: ['#fdba74', '#f97316', '#c2410c'], e: '🏆' },
-    { label: '征集悬赏', a: -Math.PI / 2 + 4 * Math.PI / 5, c: ['#6ee7b7', '#10b981', '#047857'], e: '💰' },
-    { label: '自主学习', a: -Math.PI / 2 + 6 * Math.PI / 5, c: ['#f9a8d4', '#ec4899', '#be185d'], e: '📚' },
-    { label: '作业练习', a: -Math.PI / 2 + 8 * Math.PI / 5, c: ['#5eead4', '#14b8a6', '#0f766e'], e: '📒' },
+    { label: '答题竞赛', a: -Math.PI / 2 + 2 * Math.PI / 6, c: ['#fdba74', '#f97316', '#c2410c'], e: '🏆' },
+    { label: '征集悬赏', a: -Math.PI / 2 + 4 * Math.PI / 6, c: ['#6ee7b7', '#10b981', '#047857'], e: '💰' },
+    { label: '自主学习', a: -Math.PI / 2 + 6 * Math.PI / 6, c: ['#f9a8d4', '#ec4899', '#be185d'], e: '📚' },
+    { label: '作业练习', a: -Math.PI / 2 + 8 * Math.PI / 6, c: ['#5eead4', '#14b8a6', '#0f766e'], e: '📒' },
+    { label: '社区中心', a: -Math.PI / 2 + 10 * Math.PI / 6, c: ['#7dd3fc', '#0ea5e9', '#0369a1'], e: '💬' },
   ]
   nodes.forEach((n, i) => {
-    const ap = easeOut((progress - 0.1 - i * 0.08) * 4)
+    const ap = easeOut((progress - 0.1 - i * 0.06) * 4)
     if (ap <= 0) return
     const ang = n.a + t * 0.0002
     const nx = cx + bigR * Math.cos(ang), ny = cy + bigR * Math.sin(ang)
@@ -702,10 +775,10 @@ function drawSummaryScene(ctx, w, h, progress, t) {
   ctx.beginPath(); ctx.arc(cx, cy, 58, 0, Math.PI * 2); ctx.fillStyle = cg; ctx.fill(); clearShadow(ctx); ctx.restore()
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#fff'
   ctx.font = '800 17px sans-serif'; ctx.shadowColor = 'rgba(0,0,0,0.2)'; ctx.shadowBlur = 4
-  ctx.fillText('智汇学场', cx, cy - 6); ctx.shadowBlur = 0
+  ctx.fillText('为学空间', cx, cy - 6); ctx.shadowBlur = 0
   ctx.font = '500 10.5px sans-serif'; ctx.fillStyle = 'rgba(255,255,255,0.92)'
-  ctx.fillText('AI 驱动 · 五模块闭环', cx, cy + 14)
-  drawText(ctx, '从测评、作业到竞技，从众创到自学 · 一站式成长', cx, h - 40, 14, 600, easeOut((progress - 0.4) * 2.5), 'rgba(255,255,255,0.95)')
+  ctx.fillText('AI 驱动 · 六模块闭环', cx, cy + 14)
+  drawText(ctx, '从测评、作业到竞技，从众创、自学到社区 · 一站式成长', cx, h - 40, 14, 600, easeOut((progress - 0.4) * 2.5), 'rgba(255,255,255,0.95)')
   ctx.restore()
 }
 
@@ -775,6 +848,7 @@ function drawFrame(t) {
   else if (slide.scene === 'bounty') drawBountyScene(ctx, W, H, Math.min(slideTime / animationDuration, 1))
   else if (slide.scene === 'study') drawStudyScene(ctx, W, H, Math.min(slideTime / animationDuration, 1))
   else if (slide.scene === 'homework') drawHomeworkScene(ctx, W, H, Math.min(slideTime / animationDuration, 1))
+  else if (slide.scene === 'community') drawCommunityScene(ctx, W, H, Math.min(slideTime / animationDuration, 1))
   else if (slide.scene === 'summary') drawSummaryScene(ctx, W, H, p, t)
 
   drawCaptionBand(ctx, slide, slideTime, W, H)

@@ -105,6 +105,13 @@
             {{ rec.ai_analysis ? '重新归因' : 'AI 归因' }}
           </el-button>
           <el-button size="small" type="primary" @click="askAI(rec)">AI 答疑</el-button>
+          <el-button
+            size="small"
+            type="success"
+            plain
+            :loading="askingCommunityId === rec.id"
+            @click="askCommunity(rec)"
+          >社区求助</el-button>
           <el-button size="small" type="danger" @click="removeRecord(rec)">移除</el-button>
         </div>
       </div>
@@ -222,6 +229,24 @@ function isCorrectOption(rec, i) {
 function isWrongOption(rec, i) {
   const a = (rec.wrong_answer || '').toUpperCase().trim()
   return a.includes(optionLabel(i))
+}
+
+const askingCommunityId = ref(0)
+
+async function askCommunity(rec) {
+  askingCommunityId.value = rec.id
+  try {
+    const res = await request.post('/api/community/ask-from-wrong-record', {
+      wrong_record_id: rec.id,
+    })
+    const post = res.data || {}
+    ElMessage.success('已发布社区求助帖')
+    if (post.id) router.push(`/community/${post.id}`)
+  } catch (e) {
+    // request 拦截器已提示
+  } finally {
+    askingCommunityId.value = 0
+  }
 }
 
 async function toggleMastered(rec) {

@@ -80,8 +80,8 @@
         </el-form-item>
         <el-form-item label="结算模式">
           <el-radio-group v-model="createForm.scoring_mode">
-            <el-radio-button label="best_n">最佳 N 场</el-radio-button>
-            <el-radio-button label="sum">总积分</el-radio-button>
+            <el-radio-button value="best_n">最佳 N 场</el-radio-button>
+            <el-radio-button value="sum">总积分</el-radio-button>
           </el-radio-group>
         </el-form-item>
         <el-form-item v-if="createForm.scoring_mode === 'best_n'" label="取最佳">

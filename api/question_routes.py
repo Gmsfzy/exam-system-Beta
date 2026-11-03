@@ -112,6 +112,37 @@ def _normalize_tags(value):
 
 api_question_bp = Blueprint('api_question', __name__)
 
+def _serialize_question(q, is_teacher, uid):
+    """题目序列化单一真值：列表与单题详情共用，字段与脱敏口径完全一致。
+    答案/解析/OJ 用例仅教师可见（学生视角剔除，防考前拖库）。"""
+    return {
+        'id': q.id,
+        'content': q.content,
+        'type': q.type,
+        'difficulty': q.difficulty,
+        'source': q.source,
+        'major_id': q.major_id,
+        'major_name': q.major.name if q.major else '',
+        'course_id': q.course_id,
+        'course_name': q.course.name if q.course else '',
+        'options': q.options,
+        # 答案与解析仅教师可见；学生端（如悬赏发布）只需要题干/选项
+        'answer': q.answer if is_teacher else '',
+        'analysis': q.analysis if is_teacher else '',
+        'knowledge': q.knowledge,
+        'tags': q.tags or [],                     # v5.23 自由标签数组（与知识点正交）
+        'material': q.material,                  # v4.3 材料题共享材料
+        'material_group': q.material_group,      # v4.3 同组题共享同一材料
+        # v4.7 OJ 用例含预期输出，仅教师可见
+        'test_cases': (q.test_cases if is_teacher else None),
+        'creator_id': q.creator_id,
+        'creator_name': q.creator.username if q.creator else '',
+        'is_public': q.is_public,
+        'is_owner': q.creator_id == uid if is_teacher else False,
+        'created_at': iso_local(q.created_at)
+    }
+
+
 @api_question_bp.route('/questions', methods=['GET'])
 @limiter.limit(RateLimitConfig.QUESTION_QUERY)
 def api_list_questions():
@@ -159,35 +190,23 @@ def api_list_questions():
 
     questions = query.all()
 
-    result = [{
-        'id': q.id,
-        'content': q.content,
-        'type': q.type,
-        'difficulty': q.difficulty,
-        'source': q.source,
-        'major_id': q.major_id,
-        'major_name': q.major.name if q.major else '',
-        'course_id': q.course_id,
-        'course_name': q.course.name if q.course else '',
-        'options': q.options,
-        # 答案与解析仅教师可见；学生端（如悬赏发布）只需要题干/选项
-        'answer': q.answer if is_teacher else '',
-        'analysis': q.analysis if is_teacher else '',
-        'knowledge': q.knowledge,
-        'tags': q.tags or [],                     # v5.23 自由标签数组（与知识点正交）
-        'material': q.material,                  # v4.3 材料题共享材料
-        'material_group': q.material_group,      # v4.3 同组题共享同一材料
-        # v4.7 OJ 用例含预期输出，仅教师可见
-        'test_cases': (q.test_cases if is_teacher else None),
-        'creator_id': q.creator_id,
-        'creator_name': q.creator.username if q.creator else '',
-        'is_public': q.is_public,
-        'is_owner': q.creator_id == user.id if is_teacher else False,
-        'created_at': iso_local(q.created_at)
-    } for q in questions]
+    result = [_serialize_question(q, is_teacher, user.id) for q in questions]
 
     set_cache(cache_key, result, expires=300)
     return jsonify(result)
+
+@api_question_bp.route('/questions/<int:id>', methods=['GET'])
+@limiter.limit(RateLimitConfig.QUESTION_QUERY)
+def api_get_question(id):
+    """v6.1 单题详情：供「题目关联」一步直达。角色脱敏与列表同源（学生不见答案/解析/用例）。"""
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '请先登录'}), 401
+    q = db.session.get(Question, id)
+    if not q:
+        return jsonify({'message': '题目不存在'}), 404
+    return jsonify(_serialize_question(q, user.is_teacher(), user.id))
+
 
 @api_question_bp.route('/questions', methods=['POST'])
 def api_add_question():

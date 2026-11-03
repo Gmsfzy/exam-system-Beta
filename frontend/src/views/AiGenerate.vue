@@ -87,11 +87,11 @@
           <div class="form-row">
             <el-form-item label="出题方式">
               <el-radio-group v-model="form.question_mode" class="question-mode-group">
-                <el-radio-button label="ai">
+                <el-radio-button value="ai">
                   <el-icon><MagicStick /></el-icon>
                   AI生成题目
                 </el-radio-button>
-                <el-radio-button label="past">
+                <el-radio-button value="past">
                   <el-icon><Notebook /></el-icon>
                   历年真题
                 </el-radio-button>

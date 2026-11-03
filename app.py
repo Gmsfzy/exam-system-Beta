@@ -72,6 +72,8 @@ from competition.team_routes import team_bp
 from bounty.routes import bounty_bp
 from dsci.routes import dsci_bp
 from homework.routes import homework_bp
+from api.community_routes import api_community_bp   # v5.29 社区中心 · Phase 1 论坛 MVP
+from api.stats_routes import api_stats_bp            # v6.1 首页公开统计（只读聚合，零鉴权）
 # 注意：api/routes.py 已废弃，路由已拆分到以上独立模块
 
 api_bps = [api_auth_bp,
@@ -95,7 +97,9 @@ api_bps = [api_auth_bp,
            team_bp,
            bounty_bp,
            dsci_bp,
-           homework_bp]
+           homework_bp,
+           api_community_bp,   # v5.29 社区中心
+           api_stats_bp]       # v6.1 首页公开统计
 for bp in api_bps:
     # CSRF 由 security._smart_csrf_check 统一处理：Bearer token 请求自动豁免，其余强制校验
     app.register_blueprint(bp, url_prefix='/api')
@@ -130,7 +134,7 @@ _ERROR_PAGE_HTML = """<!DOCTYPE html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>__CODE__ - 智汇学场</title>
+    <title>__CODE__ - 为学空间</title>
     <style>
         body { font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
                background: #f3f4f6; min-height: 100vh; margin: 0;

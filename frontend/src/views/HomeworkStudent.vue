@@ -15,8 +15,8 @@
     </div>
 
     <el-radio-group v-model="view" style="margin-bottom: 12px">
-      <el-radio-button label="all">全部</el-radio-button>
-      <el-radio-button label="weekly">本周作业</el-radio-button>
+      <el-radio-button value="all">全部</el-radio-button>
+      <el-radio-button value="weekly">本周作业</el-radio-button>
     </el-radio-group>
 
     <template v-if="view === 'weekly'">

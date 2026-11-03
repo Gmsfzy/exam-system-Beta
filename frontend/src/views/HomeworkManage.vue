@@ -10,9 +10,9 @@
     </div>
 
     <el-radio-group v-model="view" style="margin-bottom: 12px">
-      <el-radio-button label="hw">作业</el-radio-button>
-      <el-radio-button label="tpl">模板</el-radio-button>
-      <el-radio-button label="series">系列</el-radio-button>
+      <el-radio-button value="hw">作业</el-radio-button>
+      <el-radio-button value="tpl">模板</el-radio-button>
+      <el-radio-button value="series">系列</el-radio-button>
     </el-radio-group>
 
     <template v-if="view === 'hw'">
@@ -59,6 +59,7 @@
             <template #dropdown>
               <el-dropdown-menu>
                 <el-dropdown-item command="stats">成绩统计</el-dropdown-item>
+                <el-dropdown-item command="discuss">讨论区</el-dropdown-item>
                 <el-dropdown-item command="copy">复制为草稿</el-dropdown-item>
                 <el-dropdown-item command="urge" :disabled="row.status !== 'published'">催交未交</el-dropdown-item>
                 <el-dropdown-item command="export">导出成绩</el-dropdown-item>
@@ -511,10 +512,13 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { Notebook, Plus, Delete, ArrowDown, Upload, MagicStick, Download, Search } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import request from '../utils/request'
 import { DIFFICULTY_OPTIONS, difficultyLabel } from '../utils/enums'
+
+const router = useRouter()
 
 const tab = ref('all')
 const items = ref([])
@@ -1007,6 +1011,10 @@ const doDelete = async (row) => {
 
 const onRowCommand = (cmd, row) => {
   if (cmd === 'stats') return openStats(row)
+  if (cmd === 'discuss') {
+    // v5.29 社区轻联动:跳社区论坛按该作业过滤的讨论列表
+    return router.push({ path: '/community', query: { linked_type: 'homework', linked_id: row.id } })
+  }
   if (cmd === 'copy') return doCopy(row)
   if (cmd === 'urge') return doUrge(row)
   if (cmd === 'export') return doExport(row)

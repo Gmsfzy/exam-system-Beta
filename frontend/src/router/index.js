@@ -30,11 +30,13 @@ const routes = [
     children: [
       // ── 在线考试模块 ──
       { path: 'questions', name: 'Questions', component: () => import('../views/QuestionList.vue'), meta: { module: 'exam', requiresTeacher: true } },
+      { path: 'questions/:id', name: 'QuestionDetail', component: () => import('../views/QuestionDetail.vue'), meta: { module: 'exam' } },
       { path: 'majors', name: 'Majors', component: () => import('../views/MajorList.vue'), meta: { module: 'exam', requiresTeacher: true } },
       { path: 'majors/:id', name: 'MajorDetail', component: () => import('../views/MajorDetail.vue'), meta: { module: 'exam', requiresTeacher: true } },
       { path: 'chapters/:id', name: 'ChapterList', component: () => import('../views/ChapterList.vue'), meta: { module: 'exam', requiresTeacher: true } },
       { path: 'ai-generate', name: 'AiGenerate', component: () => import('../views/AiGenerate.vue'), meta: { module: 'exam', requiresTeacher: true } },
       { path: 'exams', name: 'ExamDashboard', component: () => import('../views/ExamDashboard.vue'), meta: { module: 'exam', requiresTeacher: true } },
+      { path: 'exams/:id', name: 'ExamDetail', component: () => import('../views/ExamDetail.vue'), meta: { module: 'exam' } },
       { path: 'exams/:id/edit', name: 'EditExam', component: () => import('../views/EditExam.vue'), meta: { module: 'exam', requiresTeacher: true } },
       { path: 'exams/:id/monitor', name: 'ExamMonitor', component: () => import('../views/ExamMonitor.vue'), meta: { module: 'exam', requiresTeacher: true } },
       { path: 'exams/:id/item-analysis', name: 'ExamItemAnalysis', component: () => import('../views/ExamItemAnalysis.vue'), meta: { module: 'exam', requiresTeacher: true } },
@@ -107,6 +109,16 @@ const routes = [
       { path: 'homeworks/redo', name: 'HomeworkRedo', component: () => import('../views/HomeworkRedo.vue'), meta: { module: 'homework', requiresStudent: true } },
       { path: 'homeworks/peer-reviews', name: 'PeerReviewCenter', component: () => import('../views/PeerReviewCenter.vue'), meta: { module: 'homework', requiresStudent: true } },
       { path: 'homeworks/:id/take', name: 'HomeworkTake', component: () => import('../views/HomeworkTake.vue'), meta: { module: 'homework', requiresStudent: true } },
+
+      // ── 社区中心模块（v5.29 · Phase 1 论坛 MVP）──
+      { path: 'community', name: 'CommunityForum', component: () => import('../views/CommunityForum.vue'), meta: { module: 'community', public: true } },
+      { path: 'community/new', name: 'CommunityNewPost', component: () => import('../views/CommunityNewPost.vue'), meta: { module: 'community' } },
+      { path: 'community/favorites', name: 'CommunityFavorites', component: () => import('../views/CommunityFavorites.vue'), meta: { module: 'community' } },
+      { path: 'community/notifications', name: 'CommunityNotifications', component: () => import('../views/CommunityNotifications.vue'), meta: { module: 'community' } },
+      { path: 'community/reports', name: 'CommunityReports', component: () => import('../views/CommunityReports.vue'), meta: { module: 'community', requiresTeacher: true } },
+      { path: 'community/admin', name: 'CommunityAdmin', component: () => import('../views/CommunityAdmin.vue'), meta: { module: 'community', requiresTeacher: true } },
+      { path: 'community/users/:id', name: 'CommunityUserProfile', component: () => import('../views/CommunityUserProfile.vue'), meta: { module: 'community', public: true } },
+      { path: 'community/:id', name: 'CommunityPostDetail', component: () => import('../views/CommunityPostDetail.vue'), meta: { module: 'community', public: true } },
     ]
   },
 

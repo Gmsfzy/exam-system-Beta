@@ -17,9 +17,9 @@
       <div class="field">
         <span class="field-label">题目范围</span>
         <el-radio-group v-model="form.scope_type" @change="resetScopeId">
-          <el-radio-button label="all">综合速赛</el-radio-button>
-          <el-radio-button label="major">专业速赛</el-radio-button>
-          <el-radio-button label="chapter">章节速赛</el-radio-button>
+          <el-radio-button value="all">综合速赛</el-radio-button>
+          <el-radio-button value="major">专业速赛</el-radio-button>
+          <el-radio-button value="chapter">章节速赛</el-radio-button>
         </el-radio-group>
       </div>
 

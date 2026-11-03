@@ -42,7 +42,7 @@
         <div v-if="cert" ref="certRef" class="diploma">
           <div class="dp-border">
             <div class="dp-ornament top">✦ ⁘ ✦</div>
-            <p class="dp-brand">智汇学场 · 终身学习认证</p>
+            <p class="dp-brand">为学空间 · 终身学习认证</p>
             <h2 class="dp-title">学习路径结业证书</h2>
             <p class="dp-line">兹证明 <b class="dp-name">{{ cert.username || '学习者' }}</b></p>
             <p class="dp-line">已完成专业学习路径</p>

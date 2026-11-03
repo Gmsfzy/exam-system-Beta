@@ -15,7 +15,7 @@
           <div class="logo-icon">
             <el-icon :size="48" color="#fff"><School /></el-icon>
           </div>
-          <h1 class="welcome-title">智汇学场</h1>
+          <h1 class="welcome-title">为学空间</h1>
           <p class="welcome-subtitle">融合考试、竞赛、悬赏、自学的一体化智能学习平台</p>
           <div class="feature-list">
             <div class="feature-item">

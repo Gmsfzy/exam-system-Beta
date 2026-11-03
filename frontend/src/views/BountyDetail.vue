@@ -35,7 +35,10 @@
 
         <!-- 答案悬赏：目标题展示 -->
         <div v-if="bounty.bounty_type === 'answer'" class="target-question">
-          <div class="tq-label">目标题目：</div>
+          <div class="tq-label">目标题目：
+            <el-button v-if="targetQ && targetQ.id" link type="primary" size="small"
+                       class="tq-view" @click="$router.push(`/questions/${targetQ.id}`)">查看原题 ›</el-button>
+          </div>
           <div v-if="targetQ" class="tq-content">
             <div>{{ targetQ.content }}</div>
             <div v-if="targetQ.options" class="tq-options">
@@ -57,8 +60,13 @@
             <div class="q-content">{{ a.q_content }}</div>
             <div class="q-answer">答案：{{ a.q_answer }}</div>
             <div v-if="a.q_analysis" class="q-analysis">解析：{{ a.q_analysis }}</div>
-            <el-alert v-if="a.accepted_question_id" type="success" :closable="false"
-                      :title="`题目已收录进题库（#${a.accepted_question_id}）`" class="inq-alert" />
+            <el-alert v-if="a.accepted_question_id" type="success" :closable="false" class="inq-alert">
+              <template #title>
+                题目已收录进题库（#{{ a.accepted_question_id }}）
+                <el-button link type="primary" size="small"
+                           @click="$router.push(`/questions/${a.accepted_question_id}`)">查看该题 ›</el-button>
+              </template>
+            </el-alert>
           </template>
           <template v-else>
             <div class="q-content">{{ a.content }}</div>

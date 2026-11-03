@@ -14,7 +14,11 @@
           <el-tag v-if="hw.is_expired" size="small" type="warning">已过截止{{ hw.allow_late ? '（可迟交）' : '（不再接收）' }}</el-tag>
         </div>
       </div>
-      <el-button :icon="Back" @click="$router.push('/homeworks/my')">返回</el-button>
+      <div style="display: flex; gap: 8px">
+        <!-- v5.29 社区轻联动:该作业的讨论区 -->
+        <el-button :icon="ChatDotRound" @click="$router.push({ path: '/community', query: { linked_type: 'homework', linked_id: hw.id } })">讨论区</el-button>
+        <el-button :icon="Back" @click="$router.push('/homeworks/my')">返回</el-button>
+      </div>
     </div>
 
     <el-alert v-if="hw.description" :closable="false" type="info" class="desc" >

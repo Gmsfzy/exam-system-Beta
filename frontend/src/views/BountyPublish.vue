@@ -10,8 +10,8 @@
     <el-form :model="form" label-width="100px" class="publish-form" v-loading="submitting">
       <el-form-item label="悬赏类型">
         <el-radio-group v-model="form.bounty_type">
-          <el-radio-button label="question">题目征集</el-radio-button>
-          <el-radio-button label="answer">答案征集</el-radio-button>
+          <el-radio-button value="question">题目征集</el-radio-button>
+          <el-radio-button value="answer">答案征集</el-radio-button>
         </el-radio-group>
       </el-form-item>
 
@@ -35,8 +35,8 @@
 
       <el-form-item label="可见范围">
         <el-radio-group v-model="form.visibility">
-          <el-radio label="public">公开（全体可见）</el-radio>
-          <el-radio label="targeted">定向（仅指定用户）</el-radio>
+          <el-radio value="public">公开（全体可见）</el-radio>
+          <el-radio value="targeted">定向（仅指定用户）</el-radio>
         </el-radio-group>
       </el-form-item>
       <el-form-item v-if="form.visibility === 'targeted'" label="定向用户ID">
@@ -66,8 +66,8 @@
       <template v-else>
         <el-form-item label="题目来源">
           <el-radio-group v-model="answerMode">
-            <el-radio label="existing">关联题库已有题</el-radio>
-            <el-radio label="inline">悬赏单自带题目</el-radio>
+            <el-radio value="existing">关联题库已有题</el-radio>
+            <el-radio value="inline">悬赏单自带题目</el-radio>
           </el-radio-group>
         </el-form-item>
 

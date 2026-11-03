@@ -161,7 +161,7 @@ import {
   SwitchButton, ArrowDown, School, Fold, Expand, Grid,
   Star, Calendar, VideoPlay, TrendCharts, Medal, Trophy, Lightning,
   Sunny, Moon, Check, Warning, InfoFilled,
-  Money, EditPen, Tickets, Close, Reading, Connection, Notebook, Memo
+  Money, EditPen, Tickets, Close, Reading, Connection, Notebook, Memo, ChatDotRound
 } from '@element-plus/icons-vue'
 
 const route = useRoute()
@@ -285,14 +285,25 @@ const handleNotificationClick = async (notification) => {
   await markAsRead(notification.id)
   
   if (notification.related_type === 'exam') {
+    // v6.1 直达考试详情页（新建 exams/:id；非创建教师/未被邀请学生由 API 403 拦截）
     router.push(`/exams/${notification.related_id}`)
   } else if (notification.related_type === 'result') {
-    router.push('/results')
+    // v6.2 成绩类通知直达成绩详情（related_id 即 Result.id，非本人由 API /api/results/:id 鉴权拦截）
+    router.push(`/results/${notification.related_id}`)
   } else if (notification.related_type === 'homework') {
     // 作业通知：学生直奔作答页，教师去批改页
     router.push(auth.user?.role === 'teacher'
       ? `/homeworks/${notification.related_id}/grade`
       : `/homeworks/${notification.related_id}/take`)
+  } else if (notification.related_type === 'bounty') {
+    // v6.2 悬赏类通知：直达悬赏详情（非发布者/不在定向名单由 API 403 拦截）
+    router.push(`/bounties/${notification.related_id}`)
+  } else if (notification.related_type === 'competition') {
+    // v6.2 竞赛类通知（开赛提醒/受限/讨论回复）：直达该竞赛榜单，对 timed/project/ds 三型均为通用落地页
+    router.push(`/competitions/${notification.related_id}/leaderboard`)
+  } else if (notification.related_type === 'competition_cert') {
+    // v6.2 赛季证书通知：直达证书详情（related_id 即 CompetitionCertificate.id）
+    router.push(`/competitions/certificates/${notification.related_id}`)
   }
 }
 
@@ -318,6 +329,8 @@ const syncUnread = async (force = false) => {
       await fetchNotifications()
     }
   } catch (error) {
+    // 网络瞬断/页面跳转中止(ERR_ABORTED / Failed to fetch)属正常噪声,静默即可;30s 后会自动重试对账
+    if (error instanceof TypeError) return
     console.error('未读数对账失败:', error)
   }
 }
@@ -430,7 +443,7 @@ const iconMap = {
   Document, Collection, HomeFilled, Bell, User, Setting,
   SwitchButton, ArrowDown, School, Fold, Expand, Grid,
   Star, Calendar, VideoPlay, TrendCharts, Medal, Trophy, Lightning,
-  Money, EditPen, Tickets, Reading, Connection, Notebook, Memo, Warning
+  Money, EditPen, Tickets, Reading, Connection, Notebook, Memo, Warning, ChatDotRound
 }
 
 // 按模块分组的菜单：与路由 meta.module 对应，新增模块只需在此加分组
@@ -528,6 +541,20 @@ const moduleMenus = {
       { path: '/homeworks/redo', label: '待订正', icon: iconMap.EditPen },
       { path: '/homeworks/showcase', label: '作业展示墙', icon: iconMap.Trophy },
     ]
+  },
+  community: {
+    teacher: [
+      { path: '/community', label: '社区中心', icon: iconMap.ChatDotRound },
+      { path: '/community/favorites', label: '我的收藏', icon: iconMap.Star },
+      { path: '/community/notifications', label: '消息中心', icon: iconMap.Bell },
+      { path: '/community/reports', label: '举报管理', icon: iconMap.Warning },
+      { path: '/community/admin', label: '社区管理', icon: iconMap.Setting },
+    ],
+    student: [
+      { path: '/community', label: '社区中心', icon: iconMap.ChatDotRound },
+      { path: '/community/favorites', label: '我的收藏', icon: iconMap.Star },
+      { path: '/community/notifications', label: '消息中心', icon: iconMap.Bell },
+    ]
   }
 }
 
@@ -539,9 +566,10 @@ const moduleBrandNames = {
   competition: '答题竞赛',
   bounty: '征集悬赏',
   learning: '自我学习',
-  homework: '作业练习'
+  homework: '作业练习',
+  community: '社区中心'
 }
-const brandName = computed(() => moduleBrandNames[currentModule.value] || '智汇学场')
+const brandName = computed(() => moduleBrandNames[currentModule.value] || '为学空间')
 
 const menuItems = computed(() => {
   const role = auth.user?.role === 'teacher' ? 'teacher' : 'student'
