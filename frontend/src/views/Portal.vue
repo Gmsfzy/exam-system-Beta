@@ -1,5 +1,12 @@
 <template>
   <div class="portal-wrapper">
+    <!-- 背景装饰：极光光斑 + 极淡网格（仅增强景深，不拦截交互） -->
+    <div class="bg-decor" aria-hidden="true">
+      <span class="aurora aurora-a"></span>
+      <span class="aurora aurora-b"></span>
+      <span class="aurora aurora-c"></span>
+      <span class="grid-overlay"></span>
+    </div>
     <header class="portal-header">
       <div class="header-brand">
         <div class="brand-icon">
@@ -32,21 +39,27 @@
 
     <main class="portal-main">
       <div class="portal-hero">
-        <h1 class="hero-title">{{ greeting }}，{{ auth.user?.username }}</h1>
-        <p class="hero-subtitle">请选择一个功能模块开始使用</p>
+        <div class="hero-eyebrow">为学空间 · 一站式学练赛</div>
+        <h1 class="hero-title">{{ greeting }}，<span class="hero-name">{{ auth.user?.username }}</span></h1>
+        <p class="hero-subtitle">选择一个模块，即刻开始</p>
+        <div class="hero-rule"></div>
       </div>
 
       <div class="portal-grid">
         <div
-          v-for="mod in modules"
+          v-for="(mod, i) in modules"
           :key="mod.key"
           class="portal-card"
           :class="{ disabled: mod.disabled }"
+          :style="{ '--accent': accentOf(mod.gradient), '--accent-soft': softOf(mod.gradient, 0.16), '--accent-glow': softOf(mod.gradient, 0.5), '--grad': mod.gradient, '--i': i }"
+          tabindex="0"
           @click="handleModuleClick(mod)"
+          @keydown.enter="handleModuleClick(mod)"
         >
+          <el-icon class="card-watermark" :size="128"><component :is="mod.icon" /></el-icon>
           <div v-if="mod.disabled" class="coming-badge">敬请期待</div>
-          <div class="card-icon" :style="{ background: mod.gradient }">
-            <el-icon :size="34" color="white">
+          <div class="card-icon">
+            <el-icon :size="30">
               <component :is="mod.icon" />
             </el-icon>
           </div>
@@ -54,7 +67,7 @@
           <p class="card-desc">{{ mod.desc }}</p>
           <div class="card-enter">
             <span>进入模块</span>
-            <el-icon :size="16"><ArrowRight /></el-icon>
+            <el-icon class="enter-arrow" :size="16"><ArrowRight /></el-icon>
           </div>
         </div>
       </div>
@@ -192,6 +205,16 @@ const modules = computed(() => {
   return auth.user?.role === 'teacher' ? teacherModules : studentModules
 })
 
+// Aurora 卡片：从模块自身渐变里取主色，驱动图标着色与悬停霓虹，避免逐条硬编码
+const accentOf = (grad) => (grad.match(/#[0-9a-fA-F]{6}/) || ['#6366f1'])[0]
+const softOf = (grad, a) => {
+  const h = accentOf(grad).slice(1)
+  const r = parseInt(h.slice(0, 2), 16)
+  const g = parseInt(h.slice(2, 4), 16)
+  const b = parseInt(h.slice(4, 6), 16)
+  return `rgba(${r}, ${g}, ${b}, ${a})`
+}
+
 const handleModuleClick = (mod) => {
   if (mod.disabled) {
     ElMessage.info('该模块正在开发中，敬请期待')
@@ -209,13 +232,66 @@ const handleLogout = () => {
 
 <style scoped>
 .portal-wrapper {
+  position: relative;
   min-height: 100vh;
   display: flex;
   flex-direction: column;
   background: var(--bg-secondary);
+  overflow: hidden;
+}
+
+/* ── 背景装饰：极光光斑 + 极淡网格 ── */
+.bg-decor {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+.aurora {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(90px);
+  opacity: 0.3;
+}
+.aurora-a {
+  width: 520px; height: 520px;
+  top: -160px; left: -120px;
+  background: radial-gradient(circle, rgba(99, 102, 241, 0.6), transparent 70%);
+  animation: drift 18s ease-in-out infinite;
+}
+.aurora-b {
+  width: 460px; height: 460px;
+  top: 8%; right: -150px;
+  background: radial-gradient(circle, rgba(139, 92, 246, 0.55), transparent 70%);
+  animation: drift 22s ease-in-out infinite reverse;
+}
+.aurora-c {
+  width: 520px; height: 520px;
+  bottom: -220px; left: 28%;
+  background: radial-gradient(circle, rgba(6, 182, 212, 0.5), transparent 70%);
+  animation: drift 26s ease-in-out infinite;
+}
+.grid-overlay {
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(148, 163, 184, 0.06) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(148, 163, 184, 0.06) 1px, transparent 1px);
+  background-size: 44px 44px;
+  -webkit-mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, #000 40%, transparent 100%);
+  mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, #000 40%, transparent 100%);
+}
+@keyframes drift {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  33% { transform: translate(40px, 30px) scale(1.08); }
+  66% { transform: translate(-30px, 20px) scale(0.95); }
 }
 
 .portal-header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
   height: 76px;
   display: flex;
   align-items: center;
@@ -299,23 +375,48 @@ const handleLogout = () => {
 }
 
 .portal-main {
+  position: relative;
+  z-index: 1;
   flex: 1;
   width: 100%;
-  max-width: 1080px;
+  max-width: 1120px;
   margin: 0 auto;
-  padding: 56px 32px;
+  padding: 48px 32px 64px;
 }
 
 .portal-hero {
+  position: relative;
   text-align: center;
-  margin-bottom: 56px;
+  margin-bottom: 48px;
+}
+
+.hero-eyebrow {
+  display: inline-block;
+  font-size: 12.5px;
+  letter-spacing: 2px;
+  font-weight: 600;
+  color: var(--text-muted);
+  padding: 6px 16px;
+  border: 1px solid var(--border-color);
+  border-radius: 9999px;
+  background: rgba(99, 102, 241, 0.06);
+  margin-bottom: 20px;
 }
 
 .hero-title {
-  font-size: 32px;
-  font-weight: 700;
+  font-size: clamp(34px, 5vw, 50px);
+  font-weight: 800;
   color: var(--text-primary);
   margin: 0 0 12px 0;
+  letter-spacing: -0.5px;
+  line-height: 1.12;
+}
+
+.hero-name {
+  background: var(--gradient-primary);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
 }
 
 .hero-subtitle {
@@ -324,10 +425,19 @@ const handleLogout = () => {
   margin: 0;
 }
 
+.hero-rule {
+  width: 64px;
+  height: 4px;
+  border-radius: 2px;
+  margin: 22px auto 0;
+  background: var(--gradient-primary);
+  opacity: 0.85;
+}
+
 .portal-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-  gap: 28px;
+  grid-template-columns: repeat(auto-fill, minmax(310px, 1fr));
+  gap: 26px;
 }
 
 .portal-card {
@@ -335,13 +445,34 @@ const handleLogout = () => {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  padding: 32px 28px 24px;
+  min-height: 236px;
+  padding: 28px 26px 24px;
   background: var(--bg-card);
   border: 1px solid var(--border-color);
-  border-radius: 20px;
+  border-radius: 22px;
   cursor: pointer;
-  transition: all 0.35s cubic-bezier(0.4, 0, 0.2, 1);
   overflow: hidden;
+  transition: transform 0.35s cubic-bezier(0.4, 0, 0.2, 1),
+              box-shadow 0.35s ease, border-color 0.35s ease;
+  animation: cardIn 0.55s cubic-bezier(0.22, 0.61, 0.36, 1) both;
+  animation-delay: calc(var(--i, 0) * 70ms);
+}
+
+@keyframes cardIn {
+  from { opacity: 0; transform: translateY(22px) scale(0.98); }
+  to { opacity: 1; transform: none; }
+}
+
+/* 右下角淡色大图标水印，增层次 */
+.card-watermark {
+  position: absolute;
+  right: -18px;
+  bottom: -24px;
+  color: var(--accent);
+  opacity: 0.07;
+  pointer-events: none;
+  z-index: 0;
+  transition: opacity 0.35s ease, transform 0.35s ease;
 }
 
 .portal-card::after {
@@ -350,20 +481,30 @@ const handleLogout = () => {
   top: 0;
   left: 0;
   right: 0;
-  height: 4px;
-  background: linear-gradient(90deg, #6366f1 0%, #8b5cf6 100%);
+  height: 3px;
+  background: var(--grad);
   opacity: 0;
   transition: opacity 0.3s ease;
+  z-index: 1;
 }
 
 .portal-card:hover {
-  transform: translateY(-6px);
-  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.14);
-  border-color: rgba(99, 102, 241, 0.45);
+  transform: translateY(-8px);
+  border-color: var(--accent);
+  box-shadow: 0 18px 44px var(--accent-glow), 0 0 0 1px var(--accent-soft);
 }
 
-.portal-card:hover::after {
-  opacity: 1;
+.portal-card:hover::after { opacity: 1; }
+
+.portal-card:hover .card-watermark {
+  opacity: 0.12;
+  transform: translate(-4px, -4px) rotate(-6deg);
+}
+
+.portal-card:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
 .portal-card.disabled {
@@ -376,6 +517,8 @@ const handleLogout = () => {
   box-shadow: none;
 }
 
+.portal-card.disabled:hover::after { opacity: 0; }
+
 .coming-badge {
   position: absolute;
   top: 14px;
@@ -387,68 +530,117 @@ const handleLogout = () => {
   font-weight: 600;
   padding: 4px 36px;
   letter-spacing: 1px;
+  z-index: 2;
 }
 
 .card-icon {
-  width: 66px;
-  height: 66px;
+  position: relative;
+  z-index: 1;
+  width: 62px;
+  height: 62px;
   border-radius: 16px;
   display: flex;
   align-items: center;
   justify-content: center;
-  margin-bottom: 20px;
-  box-shadow: 0 8px 20px rgba(99, 102, 241, 0.25);
+  margin-bottom: 18px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  transition: background 0.35s cubic-bezier(0.4, 0, 0.2, 1),
+              color 0.35s ease, transform 0.35s ease, box-shadow 0.35s ease;
+}
+
+.portal-card:hover .card-icon {
+  background: var(--grad);
+  color: #fff;
+  transform: scale(1.06) rotate(-3deg);
+  box-shadow: 0 10px 24px var(--accent-glow);
 }
 
 .card-title {
+  position: relative;
+  z-index: 1;
   font-size: 19px;
-  font-weight: 600;
+  font-weight: 650;
   color: var(--text-primary);
   margin: 0 0 8px 0;
 }
 
 .card-desc {
+  position: relative;
+  z-index: 1;
   font-size: 13.5px;
   color: var(--text-muted);
-  margin: 0 0 20px;
+  margin: 0 0 14px;
   line-height: 1.6;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 .card-enter {
+  position: relative;
+  z-index: 1;
+  width: 100%;
   display: flex;
   align-items: center;
-  gap: 6px;
+  justify-content: space-between;
   margin-top: auto;
+  padding-top: 14px;
+  border-top: 1px solid var(--border-color);
   font-size: 13px;
-  font-weight: 500;
+  font-weight: 600;
   color: var(--text-light);
-  transition: all 0.3s ease;
+  transition: color 0.3s ease, border-color 0.3s ease;
+}
+
+.enter-arrow {
+  transition: transform 0.3s ease;
 }
 
 .portal-card:hover .card-enter {
-  color: #6366f1;
-  gap: 10px;
+  color: var(--accent);
+  border-top-color: var(--accent-soft);
+}
+
+.portal-card:hover .enter-arrow {
+  transform: translateX(4px);
 }
 
 .dark .portal-wrapper {
   background: var(--bg-secondary);
 }
 
+.dark .aurora {
+  opacity: 0.55;
+}
+
 .dark .portal-header {
   background: var(--glass-bg);
   backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
   border-bottom-color: var(--glass-border);
+}
+
+.dark .hero-eyebrow {
+  background: rgba(99, 102, 241, 0.1);
+  border-color: var(--glass-border);
 }
 
 .dark .portal-card {
   background: var(--glass-bg);
   border-color: var(--glass-border);
-  backdrop-filter: blur(12px);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
 }
 
 .dark .portal-card:hover {
-  border-color: rgba(99, 102, 241, 0.5);
-  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 18px 48px var(--accent-glow), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+/* 玻璃卡上的分隔线用半透明白，避免 glass-border 过淡看不出 footer */
+.dark .card-enter {
+  border-top-color: rgba(255, 255, 255, 0.08);
 }
 
 @media (max-width: 768px) {
@@ -457,7 +649,7 @@ const handleLogout = () => {
   }
 
   .portal-main {
-    padding: 32px 16px;
+    padding: 32px 16px 48px;
   }
 
   .portal-grid {
@@ -465,8 +657,12 @@ const handleLogout = () => {
     gap: 18px;
   }
 
+  .portal-card {
+    min-height: 0;
+  }
+
   .hero-title {
-    font-size: 24px;
+    font-size: 28px;
   }
 
   .brand-text {
