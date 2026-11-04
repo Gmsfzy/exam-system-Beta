@@ -7,7 +7,12 @@
           <h1 class="page-title">我的赛季证书</h1>
           <p class="page-subtitle">赛季归档时按最终积分分等级颁发</p>
         </div>
-        <el-button text @click="$router.push('/rank')">← 返回段位中心</el-button>
+        <div class="header-actions">
+          <el-button text @click="$router.push('/learning/certificates')">
+            <el-icon><Medal /></el-icon>&nbsp;前往证书中心
+          </el-button>
+          <el-button text @click="$router.push('/rank')">← 返回段位中心</el-button>
+        </div>
       </div>
 
       <div v-loading="loading">
@@ -36,6 +41,9 @@
       <div class="page-header detail-header no-print">
         <el-button text @click="$router.push('/competitions/certificates')">← 返回证书列表</el-button>
         <div class="header-actions">
+          <el-button text @click="$router.push(`/learning/certificates/module/${certId}`)">
+            <el-icon><Medal /></el-icon>&nbsp;在证书中心查看
+          </el-button>
           <el-button type="primary" @click="print">
             <el-icon><Printer /></el-icon>&nbsp;打印 / 导出 PDF
           </el-button>
@@ -78,7 +86,7 @@
 <script setup>
 import { ref, computed, watch, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
-import { ArrowRight, Printer } from '@element-plus/icons-vue'
+import { ArrowRight, Printer, Medal } from '@element-plus/icons-vue'
 import request from '../utils/request'
 
 const route = useRoute()
@@ -121,6 +129,7 @@ function print() {
 .certificate-view { padding: 20px; max-width: 1000px; }
 
 .page-header { margin-bottom: 20px; display: flex; justify-content: space-between; align-items: center; }
+.header-actions { display: flex; gap: 8px; align-items: center; }
 .page-title { font-size: 26px; font-weight: 700; margin: 0 0 6px; color: var(--text-primary); }
 .page-subtitle { font-size: 13px; color: var(--text-muted); margin: 0; }
 

@@ -63,6 +63,25 @@ def _apply_exam_config(exam, data):
         exam.multi_score_rule = data['multi_score_rule']
     if 'anonymous_grading' in data:
         exam.anonymous_grading = bool(data['anonymous_grading'])
+    # v6.1 竞赛段位加分（只加分不免考）
+    if 'rank_bonus_tier' in data:
+        tier = data.get('rank_bonus_tier')
+        if tier in (None, ''):
+            exam.rank_bonus_tier = None
+        else:
+            from competition.gamification import TIERS
+            allowed = {t[0] for t in TIERS}
+            if tier not in allowed:
+                raise ValueError('段位门槛不合法')
+            exam.rank_bonus_tier = tier
+    if 'rank_bonus_score' in data:
+        try:
+            bs = float(data.get('rank_bonus_score') or 0)
+        except (TypeError, ValueError):
+            raise ValueError('段位加分必须为数字')
+        if bs < 0:
+            raise ValueError('段位加分不能为负')
+        exam.rank_bonus_score = bs
     # v5.21 课程归属（可空，成绩册聚合用）
     if 'course_id' in data:
         cid = data.get('course_id')
@@ -89,6 +108,8 @@ def _exam_config(exam):
         'shuffle_options': bool(exam.shuffle_options),
         'multi_score_rule': exam.multi_score_rule or 'all_or_nothing',
         'anonymous_grading': bool(exam.anonymous_grading),
+        'rank_bonus_tier': exam.rank_bonus_tier,
+        'rank_bonus_score': exam.rank_bonus_score or 0,
         'course_id': exam.course_id,
     }
 
@@ -639,6 +660,9 @@ def api_exam_monitor(id):
 
     result_map = {r.student_id: r for r in Result.query.filter_by(exam_id=id).all()}
 
+    # v6.1 段位加分（只读叠加，监考视图与学生看到的最终分一致）
+    from api.exam_engine import exam_rank_bonus
+
     students = []
     seen = set()
     for es in ExamStudent.query.filter_by(exam_id=id).all():
@@ -654,6 +678,7 @@ def api_exam_monitor(id):
             status, cur = 'absent', None
         total_q = len(session_question_ids(cur, exam)) if cur else len(exam.exam_questions)
         r = result_map.get(es.student_id)
+        bonus = exam_rank_bonus(exam, es.student_id, r.total_score) if r else 0.0
         students.append({
             'student_id': es.student_id,
             'username': es.student.username if es.student else None,
@@ -665,7 +690,8 @@ def api_exam_monitor(id):
             'answered': answered_map.get(running.id, 0) if running else (total_q if submitted else 0),
             'total_questions': total_q,
             'last_score': cur.score if (cur and status == 'submitted') else None,
-            'result_score': r.score if r else None,
+            'result_score': (r.score + bonus) if r else None,
+            'rank_bonus': bonus,
             'needs_manual': bool(r and Answer.query.filter_by(
                 session_id=r.session_id, needs_manual_grade=True).first()) if r and r.session_id else False,
         })
@@ -673,12 +699,14 @@ def api_exam_monitor(id):
     for sid, ss in by_student.items():
         if sid in seen:
             continue
+        r2 = result_map.get(sid)
+        b2 = exam_rank_bonus(exam, sid, r2.total_score) if r2 else 0.0
         students.append({'student_id': sid, 'username': None, 'status': 'in_progress' if any(
             x.status == 'in_progress' for x in ss) else 'submitted',
             'attempts_used': len(ss), 'allowance': None, 'extra_attempts': None,
             'switch_count': sum((x.switch_count or 0) for x in ss),
             'answered': None, 'total_questions': None, 'last_score': None,
-            'result_score': result_map[sid].score if sid in result_map else None,
+            'result_score': (r2.score + b2) if r2 else None, 'rank_bonus': b2,
             'needs_manual': False})
 
     return jsonify({
@@ -716,15 +744,19 @@ def api_export_results(id):
     wb = Workbook()
     ws = wb.active
     ws.title = '成绩'
-    ws.append(['排名', '学生账号', '得分', '总分', '得分率(%)', '交卷时间', '作答轮次', '申诉状态'])
+    ws.append(['排名', '学生账号', '得分', '段位加分', '总分', '得分率(%)', '交卷时间', '作答轮次', '申诉状态'])
     _review_labels = {'none': '', 'requested': '待复核', 'resolved': '申诉成立', 'rejected': '申诉驳回'}
+    from api.exam_engine import exam_rank_bonus
     for rank, r in enumerate(results, 1):
-        rate = round((r.score or 0) / r.total_score * 100, 1) if r.total_score else 0
+        bonus = exam_rank_bonus(exam, r.student_id, r.total_score)
+        final = (r.score or 0) + bonus
+        rate = round(final / r.total_score * 100, 1) if r.total_score else 0
         sess = db.session.get(ExamSession, r.session_id) if r.session_id else None
         ws.append([
             rank,
             user_map.get(r.student_id, str(r.student_id)),
-            r.score,
+            final,
+            bonus,
             r.total_score,
             rate,
             iso_local(r.submitted_at) or '',

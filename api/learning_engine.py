@@ -13,7 +13,7 @@ from sqlalchemy import func
 from database import db
 from database.models import (
     KnowledgeMastery, ReviewItem, StudyCheckin, StudyPlan, StudyPlanTask,
-    question_knowledge_point,
+    question_knowledge_point, KnowledgePoint,
 )
 from utils.logger import logger
 from utils.timeutil import utcnow, local_today
@@ -91,6 +91,27 @@ def mastery_level_value(user_id, kp_id):
 def kp_ids_of_question(question_id):
     rows = db.session.query(question_knowledge_point.c.knowledge_point_id) \
         .filter(question_knowledge_point.c.question_id == question_id).all()
+    return [r[0] for r in rows]
+
+
+def resolve_kp_ids_by_names(names):
+    """把一组名称（社区标签/悬赏知识点字符串）按精确匹配解析为知识点 ID 列表。
+
+    跨模块掌握度信号入口用：社区被采纳解答、悬赏中标答案的知识点名称可能只是
+    自由文本，能匹配上库里的 KnowledgePoint.name 才计入掌握度，匹配不上忽略。
+    去重、忽略空值与大小写差异。
+    """
+    cleaned = []
+    for n in (names or []):
+        s = str(n or '').strip()
+        if s and s not in cleaned:
+            cleaned.append(s)
+    if not cleaned:
+        return []
+    rows = db.session.query(KnowledgePoint.id).filter(
+        KnowledgePoint.status == 'active',
+        func.lower(KnowledgePoint.name).in_([s.lower() for s in cleaned]),
+    ).all()
     return [r[0] for r in rows]
 
 

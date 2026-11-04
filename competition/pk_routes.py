@@ -126,6 +126,30 @@ def _advance_bot(battle, now=None, force=False):
     return added > 0
 
 
+def _sync_pk_weak_mastery(battle):
+    """PK 双方错题 → 知识点薄弱标记（权重 0.0）。非关键路径，失败不影响结算。"""
+    try:
+        from api.learning_engine import update_mastery, kp_ids_of_question
+        player_ids = [battle.challenger_id]
+        if battle.opponent_id:
+            player_ids.append(battle.opponent_id)
+        for uid in player_ids:
+            wrong_qids = [
+                a.cq.question_id for a in battle.answers
+                if a.player_id == uid and not a.is_correct and a.cq and a.cq.question_id
+            ]
+            if not wrong_qids:
+                continue
+            kp_ids = []
+            for qid in set(wrong_qids):
+                kp_ids.extend(kp_ids_of_question(qid))
+            if kp_ids:
+                update_mastery(uid, kp_ids, 0.0)
+    except Exception as e:
+        from utils.logger import logger
+        logger.warning('pk weak mastery sync failed: %s', e)
+
+
 def _settle_battle(battle, now=None):
     """惰性结算：双方完成或超时后决出胜负（分高者胜，同分先完成者胜）
 
@@ -180,6 +204,9 @@ def _settle_battle(battle, now=None):
 
     battle.finished_at = now
     db.session.commit()
+
+    # v6.1 跨模块学习联动：把双方错题的知识点标记为薄弱，流入学习推荐
+    _sync_pk_weak_mastery(battle)
 
     # 竞技积分/段位/勋章结算；在本函数内提交，避免 lobby 等不 commit 的调用路径丢积分
     from competition.gamification import award_pk_result, _notify_profile_update

@@ -28,6 +28,9 @@
             <div class="work-comment" v-if="it.comment">教师点评：{{ it.comment }}</div>
             <div class="work-foot">
               <el-button size="small" text type="primary" @click="openDetail(it)">查看详情</el-button>
+              <el-button v-if="isTeacher && it.teacher_id === auth.user?.id"
+                         size="small" text type="success" :loading="it._syncing"
+                         @click="syncToCommunity(it)">发布到社区</el-button>
               <span class="muted small">{{ fmt(it.graded_at) }}</span>
             </div>
           </el-card>
@@ -82,13 +85,16 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
+import { useRouter } from 'vue-router'
 import { Trophy, Refresh } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import request from '../utils/request'
 import { useAuthStore } from '../stores/auth'
 
 const auth = useAuthStore()
+const router = useRouter()
 const isStudent = computed(() => auth.user?.role !== 'teacher')
+const isTeacher = computed(() => auth.user?.role === 'teacher')
 
 const tab = ref('wall')
 const loading = ref(false)
@@ -144,6 +150,19 @@ const decline = async (iv) => {
     await reload()
   } catch (e) {
     ElMessage.error(e?.response?.data?.message || '操作失败')
+  }
+}
+
+const syncToCommunity = async (it) => {
+  it._syncing = true
+  try {
+    const res = await request.post(`/api/homeworks/showcase/${it.sub_id}/sync-community`)
+    ElMessage.success('已发布到社区经验帖')
+    if (res.data?.post_id) router.push(`/community/${res.data.post_id}`)
+  } catch (e) {
+    ElMessage.error(e?.response?.data?.message || '同步失败')
+  } finally {
+    it._syncing = false
   }
 }
 

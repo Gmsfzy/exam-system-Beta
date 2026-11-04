@@ -72,7 +72,34 @@ def _finish_participant(comp, participant, now):
         participant.used_time = int(min(elapsed, comp.duration * 60))
     participant.status = ParticipantStatusEnum.FINISHED
     participant.finished_at = now
+    # v6.1 跨模块学习联动：把本次错题的知识点标记为薄弱，流入学习推荐
+    _sync_competition_weak_mastery(participant)
     return True
+
+
+def _sync_competition_weak_mastery(participant):
+    """竞赛错题 → 知识点掌握度薄弱标记（权重 0.0）。非关键路径，失败不影响结算。
+
+    错题取 CompetitionAnswer.is_correct=False 的题，经 CompetitionQuestion.question_id
+    找到原题知识点，调 update_mastery(uid, kp_ids, 0.0) 把对应 KP 掌握度拉低，
+    使其在 weak_knowledge_points / 推荐练习中优先出现。
+    """
+    try:
+        from api.learning_engine import update_mastery, kp_ids_of_question
+        wrong_qids = [
+            a.cq.question_id for a in participant.answers
+            if not a.is_correct and a.cq and a.cq.question_id
+        ]
+        if not wrong_qids:
+            return
+        kp_ids = []
+        for qid in set(wrong_qids):
+            kp_ids.extend(kp_ids_of_question(qid))
+        if kp_ids:
+            update_mastery(participant.user_id, kp_ids, 0.0)
+    except Exception as e:
+        from utils.logger import logger
+        logger.warning('competition weak mastery sync failed: %s', e)
 
 
 @competition_play_bp.route('/competitions/lobby', methods=['GET'])

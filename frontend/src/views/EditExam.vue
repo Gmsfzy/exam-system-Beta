@@ -80,6 +80,18 @@
         <span class="form-hint">关闭后学生不可见分数，交卷也暂不发通知；在考试列表可一键发布</span>
       </el-form-item>
 
+      <el-divider>竞赛段位加分（只加分、不免考）</el-divider>
+      <el-form-item label="段位门槛">
+        <el-select v-model="editForm.rank_bonus_tier" clearable placeholder="不启用" style="width:180px">
+          <el-option v-for="t in tierOptions" :key="t" :label="t" :value="t" />
+        </el-select>
+        <span class="form-hint">达到该段位及以上的学生额外加分</span>
+      </el-form-item>
+      <el-form-item label="加分值" v-if="editForm.rank_bonus_tier">
+        <el-input-number v-model="editForm.rank_bonus_score" :min="0" :max="100" :precision="1" />
+        <span class="form-hint">最终加分不超过试卷满分的 20%</span>
+      </el-form-item>
+
       <el-divider>邀请设置</el-divider>
       <el-form-item>
         <el-checkbox
@@ -183,8 +195,13 @@ const editForm = ref({
   shuffle_options: false,
   multi_score_rule: 'all_or_nothing',
   anonymous_grading: false,
-  results_published: true
+  results_published: true,
+  // v6.1 竞赛段位加分
+  rank_bonus_tier: null,
+  rank_bonus_score: 0,
 })
+
+const tierOptions = ['青铜', '白银', '黄金', '铂金', '钻石', '星耀', '王者']
 
 const inviteFlags = reactive({
   generate_code: false,
@@ -220,7 +237,9 @@ const loadExam = async () => {
       shuffle_options: !!exam.shuffle_options,
       multi_score_rule: exam.multi_score_rule || 'all_or_nothing',
       anonymous_grading: !!exam.anonymous_grading,
-      results_published: exam.results_published !== false
+      results_published: exam.results_published !== false,
+      rank_bonus_tier: exam.rank_bonus_tier || null,
+      rank_bonus_score: exam.rank_bonus_score || 0,
     }
     if (exam.invitation_code) {
       invitationData.code = exam.invitation_code
@@ -313,7 +332,9 @@ const saveExam = async () => {
       shuffle_options: editForm.value.shuffle_options,
       multi_score_rule: editForm.value.multi_score_rule,
       anonymous_grading: editForm.value.anonymous_grading,
-      results_published: editForm.value.results_published
+      results_published: editForm.value.results_published,
+      rank_bonus_tier: editForm.value.rank_bonus_tier || null,
+      rank_bonus_score: editForm.value.rank_bonus_tier ? editForm.value.rank_bonus_score : 0,
     })
     ElMessage.success('修改成功')
     router.push('/exams')

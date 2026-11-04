@@ -28,6 +28,7 @@ from database.models import (
     UserPathEnrollment, UserNodeProgress, LearningResource,
     KnowledgeMastery, UserKpNote, QuizAttempt, QuizAttemptAnswer,
     ReviewItem, StudyCheckin, PathCertificate, DailyTask,
+    UserCertificate, CERT_CATEGORY_LABELS, CERT_VERIFY_LABELS,
     AiChatConversation, AiChatMessage, FocusSession, StudyNote, ExplainCard,
     StudyFolder, StudyMaterial, MaterialFavorite, MaterialReport, UserFollow,
     AiUsageLog, AiQuota,
@@ -3066,6 +3067,264 @@ def _certificate_to_dict(c, brief=False):
         d['summary'] = c.summary or {}
         d['username'] = c.user.username if c.user else None
     return d
+
+
+# ════════════════════════════════════════════════════════════
+#  v6.4 证书中心：多源聚合（系统结业 + 跨模块赛季 + 社会第三方）
+# ════════════════════════════════════════════════════════════
+
+_SEASON_GRADE_LABELS = {'gold': '金奖', 'silver': '银奖', 'bronze': '铜奖', 'merit': '纪念奖'}
+
+
+def _get_competition_cert_model():
+    """防御性导入赛季证书模型（独立模块，缺失时证书墙降级为不含跨模块证书）。"""
+    try:
+        from competition.models import CompetitionCertificate
+        return CompetitionCertificate
+    except Exception:
+        logger.exception('赛季证书模型导入失败，证书墙降级为不含跨模块证书')
+        return None
+
+
+def _wall_item_system(c):
+    s = c.summary or {}
+    return {
+        'kind': 'system', 'id': c.id, 'uid': f'system-{c.id}', 'group': 'system',
+        'category': 'system', 'category_label': '系统结业',
+        'title': s.get('path_title') or '学习路径结业证书',
+        'subtitle': f"终测 {(c.final_score or 0) * 100:.0f} 分",
+        'serial_no': c.serial_no, 'earned_at': iso_local(c.earned_at),
+        'verify_status': 'verified', 'verify_label': '已核验',
+        'extra': {'final_score': c.final_score, 'major_name': s.get('major_name')},
+    }
+
+
+def _wall_item_module(c):
+    s = c.summary or {}
+    grade_label = s.get('grade_label') or _SEASON_GRADE_LABELS.get(c.grade, c.grade)
+    sub = f'段位 {c.tier} · 第 {c.rank} 名' if c.rank else (c.tier or '')
+    return {
+        'kind': 'module', 'id': c.id, 'uid': f'module-{c.id}', 'group': 'module',
+        'category': 'module', 'category_label': '跨模块',
+        'title': f'{c.season} 赛季 · {grade_label}',
+        'subtitle': sub,
+        'serial_no': c.serial_no, 'earned_at': iso_local(c.earned_at),
+        'verify_status': 'verified', 'verify_label': '已核验',
+        'extra': {'grade': c.grade, 'grade_label': grade_label, 'tier': c.tier,
+                  'rank': c.rank, 'points': c.points, 'total_players': c.total_players},
+    }
+
+
+def _wall_item_social(c, with_owner=False):
+    d = {
+        'kind': 'social', 'id': c.id, 'uid': f'social-{c.id}', 'group': 'social',
+        'category': c.category, 'category_label': CERT_CATEGORY_LABELS.get(c.category, c.category),
+        'title': c.title,
+        'subtitle': ' · '.join(x for x in [c.issuer, c.grade] if x),
+        'serial_no': c.serial_no, 'earned_at': iso_local(c.earned_date or c.created_at),
+        'verify_status': c.verify_status,
+        'verify_label': CERT_VERIFY_LABELS.get(c.verify_status, c.verify_status),
+        'has_file': bool(c.file_name),
+        'extra': {'cert_no': c.cert_no, 'verify_note': c.verify_note},
+    }
+    if with_owner and c.owner is not None:
+        d['owner'] = {'id': c.user_id, 'username': c.owner.username}
+    return d
+
+
+def _social_detail(c):
+    d = _wall_item_social(c, with_owner=True)
+    d.update({
+        'issuer': c.issuer, 'cert_no': c.cert_no, 'grade': c.grade, 'note': c.note,
+        'verify_note': c.verify_note,
+        'earned_date': iso_local(c.earned_date) if c.earned_date else None,
+        'created_at': iso_local(c.created_at),
+        'verified_at': iso_local(c.verified_at) if c.verified_at else None,
+        'file': {'orig': c.file_orig, 'size': c.file_size,
+                 'url': f'/api/learning/certificates/social/{c.id}/file'} if c.file_name else None,
+        'username': c.owner.username if c.owner else None,
+    })
+    return d
+
+
+@api_learning_bp.route('/learning/certificates/wall', methods=['GET'])
+def api_certificates_wall():
+    """证书墙：聚合系统结业/跨模块赛季/社会第三方三类，按获证时间倒序；返回各分类计数。"""
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    items = []
+
+    sys_certs = PathCertificate.query.filter_by(user_id=user.id) \
+        .order_by(PathCertificate.earned_at.desc()).all()
+    items += [_wall_item_system(c) for c in sys_certs]
+
+    CC = _get_competition_cert_model()
+    mod_certs = []
+    if CC is not None:
+        mod_certs = CC.query.filter_by(user_id=user.id).order_by(CC.earned_at.desc()).all()
+        items += [_wall_item_module(c) for c in mod_certs]
+
+    soc_certs = UserCertificate.query.filter_by(user_id=user.id) \
+        .order_by(UserCertificate.created_at.desc()).all()
+    items += [_wall_item_social(c) for c in soc_certs]
+
+    items.sort(key=lambda x: x.get('earned_at') or '', reverse=True)
+    pending = sum(1 for c in soc_certs if c.verify_status == 'pending')
+    tabs = {'all': len(items), 'system': len(sys_certs),
+            'module': len(mod_certs), 'social': len(soc_certs)}
+    return jsonify({'items': items, 'tabs': tabs, 'pending_mine': pending,
+                    'is_teacher': user.role == 'teacher',
+                    'category_labels': CERT_CATEGORY_LABELS})
+
+
+@api_learning_bp.route('/learning/certificates/<kind>/<int:cid>', methods=['GET'])
+def api_certificate_unified(kind, cid):
+    """统一证书详情：按 kind 分发（system/module/social）。"""
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    if kind == 'system':
+        cert = db.session.get(PathCertificate, cid)
+        if not cert or cert.user_id != user.id:
+            return jsonify({'message': '证书不存在'}), 404
+        data = _certificate_to_dict(cert, brief=False)
+        data['kind'] = 'system'
+        return jsonify(data)
+    if kind == 'module':
+        CC = _get_competition_cert_model()
+        if CC is None:
+            return jsonify({'message': '证书不存在'}), 404
+        cert = db.session.get(CC, cid)
+        if not cert or cert.user_id != user.id:
+            return jsonify({'message': '证书不存在'}), 404
+        s = cert.summary or {}
+        grade_label = s.get('grade_label') or _SEASON_GRADE_LABELS.get(cert.grade, cert.grade)
+        return jsonify({
+            'kind': 'module', 'id': cert.id, 'serial_no': cert.serial_no,
+            'season': cert.season, 'grade': cert.grade, 'grade_label': grade_label,
+            'tier': cert.tier, 'rank': cert.rank, 'points': cert.points,
+            'total_players': cert.total_players, 'earned_at': iso_local(cert.earned_at),
+            'username': cert.author.username if cert.author else None, 'summary': s,
+        })
+    if kind == 'social':
+        cert = db.session.get(UserCertificate, cid)
+        if not cert or (cert.user_id != user.id and user.role != 'teacher'):
+            return jsonify({'message': '证书不存在'}), 404
+        return jsonify(_social_detail(cert))
+    return jsonify({'message': '未知证书类型'}), 400
+
+
+@api_learning_bp.route('/learning/certificates/social', methods=['POST'])
+@limiter.limit(RateLimitConfig.DATA_WRITE)
+def api_certificate_social_create():
+    """登记社会/第三方证书：表单字段 + 可选佐证附件（multipart），提交后为待核验。"""
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    title = (request.form.get('title') or '').strip()
+    if not title:
+        return jsonify({'message': '请填写证书名称'}), 400
+    category = (request.form.get('category') or 'other').strip()
+    if category not in CERT_CATEGORY_LABELS:
+        category = 'other'
+    cert = UserCertificate(
+        user_id=user.id, category=category, title=title[:200],
+        issuer=(request.form.get('issuer') or '').strip()[:120] or None,
+        cert_no=(request.form.get('cert_no') or '').strip()[:80] or None,
+        grade=(request.form.get('grade') or '').strip()[:60] or None,
+        note=(request.form.get('note') or '').strip()[:2000] or None,
+        serial_no=eng.gen_serial_no(), verify_status='pending',
+    )
+    try:
+        cert.earned_date = parse_dt((request.form.get('earned_date') or '').strip())
+    except (ValueError, TypeError):
+        cert.earned_date = None
+    file = request.files.get('file')
+    if file and file.filename:
+        try:
+            stored, size = save_upload(file, 'cert', _UPLOAD_DIR)
+        except ValueError as e:
+            return jsonify({'message': str(e)}), 400
+        cert.file_name, cert.file_orig, cert.file_size = stored, file.filename[:200], size
+    db.session.add(cert)
+    db.session.commit()
+    return jsonify({'message': '已提交，等待教师核验', 'certificate': _social_detail(cert)}), 201
+
+
+@api_learning_bp.route('/learning/certificates/social/<int:cid>', methods=['DELETE'])
+def api_certificate_social_delete(cid):
+    """删除社会证书：本人可删自己的；教师可删任意（驳回后清理）。附件一并清理。"""
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    cert = db.session.get(UserCertificate, cid)
+    if not cert:
+        return jsonify({'message': '证书不存在'}), 404
+    if cert.user_id != user.id and user.role != 'teacher':
+        return jsonify({'message': '无权删除'}), 403
+    if cert.file_name:
+        try:
+            os.remove(os.path.join(_UPLOAD_DIR, cert.file_name))
+        except OSError:
+            pass
+    db.session.delete(cert)
+    db.session.commit()
+    return jsonify({'message': '已删除'})
+
+
+@api_learning_bp.route('/learning/certificates/social/pending', methods=['GET'])
+def api_certificate_social_pending():
+    """教师：全站待核验社会证书列表。"""
+    user, err = require_teacher()
+    if err:
+        return err
+    certs = UserCertificate.query.filter_by(verify_status='pending') \
+        .order_by(UserCertificate.created_at.asc()).all()
+    return jsonify({'items': [_social_detail(c) for c in certs]})
+
+
+@api_learning_bp.route('/learning/certificates/social/<int:cid>/verify', methods=['POST'])
+def api_certificate_social_verify(cid):
+    """教师核验：action=verify|reject，附意见；结果通知提交人。"""
+    user, err = require_teacher()
+    if err:
+        return err
+    cert = db.session.get(UserCertificate, cid)
+    if not cert:
+        return jsonify({'message': '证书不存在'}), 404
+    data = request.get_json(silent=True) or {}
+    action = (data.get('action') or '').strip()
+    if action not in ('verify', 'reject'):
+        return jsonify({'message': 'action 需为 verify 或 reject'}), 400
+    cert.verify_status = 'verified' if action == 'verify' else 'rejected'
+    cert.verify_note = (data.get('note') or '').strip()[:200] or None
+    cert.verified_by = user.id
+    cert.verified_at = utcnow()
+    db.session.commit()
+    result = '已通过核验' if cert.verify_status == 'verified' else '未通过核验'
+    create_notification(
+        cert.user_id, '证书核验结果',
+        f'你提交的「{cert.title}」{result}。' + (f'教师意见：{cert.verify_note}' if cert.verify_note else ''),
+        type='success' if cert.verify_status == 'verified' else 'warning',
+        related_type='certificate', related_id=cert.id,
+    )
+    return jsonify({'message': f'已{result}', 'certificate': _social_detail(cert)})
+
+
+@api_learning_bp.route('/learning/certificates/social/<int:cid>/file', methods=['GET'])
+def api_certificate_social_file(cid):
+    """下载社会证书佐证附件：本人或教师可取。"""
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    cert = db.session.get(UserCertificate, cid)
+    if not cert or not cert.file_name:
+        return jsonify({'message': '附件不存在'}), 404
+    if cert.user_id != user.id and user.role != 'teacher':
+        return jsonify({'message': '无权下载该附件'}), 403
+    return send_from_directory(_UPLOAD_DIR, cert.file_name,
+                               as_attachment=True, download_name=cert.file_orig)
 
 
 # ══ v4.4 学习体验升级：AI 会话持久化/流式 · 错题归因 · 专注计时 · 打卡心情 · 自由笔记 · 讲解卡 · 图片上传 ══

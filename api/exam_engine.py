@@ -197,6 +197,37 @@ def apply_exam_result(sess, earned, total):
     return result, False, changed
 
 
+# ── v6.1 竞赛段位加分（只读叠加，不改原始分，不免考）─────────────
+
+def exam_rank_bonus(exam, student_id, total_score=None):
+    """某考试对该学生的段位加分。达到 exam.rank_bonus_tier 段位的学生，
+    在成绩展示时叠加 exam.rank_bonus_score 分；加分上限 = total_score * 20%。
+
+    设计：只加分、不免考；原始分 result.score 不变，加分在读取时叠加，
+    避免污染 best/last 策略的原始分比较。
+    """
+    if not exam or not getattr(exam, 'rank_bonus_tier', None) or not (getattr(exam, 'rank_bonus_score', 0) or 0):
+        return 0.0
+    try:
+        from competition.gamification import (
+            ensure_profile, current_season, tier_of, TIERS,
+        )
+        season = current_season()
+        profile = ensure_profile(student_id, season)
+        student_tier = tier_of(profile.points)
+        order = {name: i for i, (name, *_) in enumerate(TIERS)}
+        threshold = order.get(str(exam.rank_bonus_tier), 10 ** 9)
+        if order.get(student_tier, -1) >= threshold:
+            bonus = float(exam.rank_bonus_score)
+            if total_score:
+                bonus = min(bonus, float(total_score) * 0.2)
+            return round(bonus, 2)
+    except Exception as e:
+        from utils.logger import logger
+        logger.warning('exam_rank_bonus failed: %s', e)
+    return 0.0
+
+
 # ── 知识点掌握度联动（v4.3 P2）─────────────────────────────────────
 
 def update_mastery_from_exam(student_id, session_id):

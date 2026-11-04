@@ -86,7 +86,11 @@ def api_my_results():
         }
         # v4.3 成绩发布控制：未发布不展示分数与解析
         if published:
-            item['score'] = r.score
+            from api.exam_engine import exam_rank_bonus
+            bonus = exam_rank_bonus(exam, user.id, r.total_score) if exam else 0.0
+            item['score'] = (r.score or 0) + bonus
+            item['raw_score'] = r.score
+            item['rank_bonus'] = bonus
             item['total_score'] = r.total_score
             item['ai_analysis'] = r.ai_analysis
             item['review_reply'] = r.review_reply
@@ -194,10 +198,16 @@ def api_result_detail(result_id):
                 'analysis': ''
             })
 
+    # v6.1 竞赛段位加分：只读叠加，原始分不变
+    from api.exam_engine import exam_rank_bonus
+    rank_bonus = exam_rank_bonus(exam, result.student_id, result.total_score) if exam else 0.0
+
     return jsonify({
         'id': result.id,
         'exam_title': exam.title if exam else '',
-        'score': result.score,
+        'score': (result.score or 0) + rank_bonus,
+        'raw_score': result.score,
+        'rank_bonus': rank_bonus,
         'total_score': result.total_score,
         'submitted_at': iso_local(result.submitted_at),
         'ai_analysis': result.ai_analysis,

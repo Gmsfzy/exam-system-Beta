@@ -173,12 +173,13 @@
 
 <script setup>
 import { ref, reactive, onMounted, nextTick } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRouter, useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { ChatLineSquare, Promotion, Upload, Plus } from '@element-plus/icons-vue'
 import request from '../utils/request'
 
 const router = useRouter()
+const route = useRoute()
 const submitting = ref(false)
 const uploading = ref(false)
 const bodyInputRef = ref(null)
@@ -300,6 +301,18 @@ const submit = async () => {
 }
 
 onMounted(async () => {
+  // v6.1 跨模块求助入口：支持从作业/考试结果页带参跳转，预填关联信息
+  const q = route.query
+  if (q.linked_type) form.linked_type = String(q.linked_type)
+  if (q.linked_id) form.linked_id = Number(q.linked_id) || null
+  if (q.course_id) form.course_id = Number(q.course_id) || null
+  if (q.category) form.category_key = String(q.category)
+  if (q.title) form.title = String(q.title)
+  if (q.tags) {
+    const t = String(q.tags)
+    form.tags = t.split(',').map((s) => s.trim()).filter(Boolean).slice(0, 5)
+  }
+
   try {
     const res = await request.get('/api/community/categories')
     if (Array.isArray(res.data) && res.data.length) {

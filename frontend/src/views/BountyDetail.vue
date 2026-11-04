@@ -221,6 +221,22 @@
         <el-button type="primary" @click="submitEdit">保存</el-button></template>
     </el-dialog>
 
+    <!-- 采纳对话框（含同步到社区开关） -->
+    <el-dialog v-model="acceptVisible" title="确认采纳投稿" width="460px">
+      <el-form :model="acceptForm" label-width="90px">
+        <el-form-item label="发放积分">
+          <el-input-number v-model="acceptForm.share" :min="0" />
+        </el-form-item>
+        <el-form-item label="同步社区">
+          <el-checkbox v-model="acceptForm.sync">采纳后将答案发布到社区经验帖（不暴露投稿人身份）</el-checkbox>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="acceptVisible = false">取消</el-button>
+        <el-button type="primary" :loading="accepting" @click="doAccept">确认采纳</el-button>
+      </template>
+    </el-dialog>
+
     <!-- 投稿附件选择（隐藏 input，v4.6 统一白名单） -->
     <input ref="attachInput" type="file" style="display: none"
            accept=".pdf,.doc,.docx,.txt,.md,.ppt,.pptx,.xls,.xlsx,.csv,.zip,.rar,.7z,.png,.jpg,.jpeg,.gif,.webp,.mp4,.webm,.py,.java,.c,.cpp,.js,.ts,.html,.css,.sql"
@@ -248,6 +264,10 @@ const newComment = ref('')
 const optionsText = ref('')
 const editingSubmission = ref(false)
 const editVisible = ref(false)
+const acceptVisible = ref(false)
+const accepting = ref(false)
+const acceptTarget = ref(null)
+const acceptForm = reactive({ share: 0, sync: false })
 
 // v4.6.1 枚举收敛：题型/难度单一来源 frontend/src/utils/enums.js（顺手修正旧 map 中 short_answer/essay 标签互换的漂移）
 import { QUESTION_TYPE_LABELS, DIFFICULTY_LABELS } from '../utils/enums'
@@ -390,24 +410,32 @@ const downloadBlob = async (url, filename) => {
 }
 const downloadAttachment = (sid, idx, a) => downloadBlob(`/api/submissions/${sid}/attachments/${idx}/download`, a.filename || `附件${idx + 1}${a.ext || ''}`)
 
-const accept = async (s) => {
-  const multi = (bounty.value.max_accepts || 1) > 1
-  let share = bounty.value.reward_points
-  const msg = multi
-    ? `采纳 ${s.submitter_name} 的投稿？可调整本次发放积分（剩余名额 ${bounty.value.max_accepts - bounty.value.accept_count}）。`
-    : `采纳 ${s.submitter_name} 的投稿？将发放 ${bounty.value.reward_points} 积分，采纳后悬赏关闭。`
+const accept = (s) => {
+  acceptTarget.value = s
+  acceptForm.share = bounty.value.reward_points
+  acceptForm.sync = false
+  acceptVisible.value = true
+}
+
+const doAccept = async () => {
+  if (!acceptTarget.value) return
+  accepting.value = true
   try {
-    const r = await ElMessageBox.prompt(msg, '确认采纳', {
-      type: 'warning', confirmButtonText: '确认采纳', cancelButtonText: '取消',
-      inputPattern: /^\d+$/, inputErrorMessage: '请输入非负整数',
-      inputValue: String(bounty.value.reward_points),
-      inputPlaceholder: '发放积分数',
+    const res = await request.post(`/api/submissions/${acceptTarget.value.id}/accept`, {
+      reward_share: acceptForm.share,
+      sync_to_community: acceptForm.sync,
     })
-    share = parseInt(r.value) || 0
-  } catch { return }
-  const res = await request.post(`/api/submissions/${s.id}/accept`, { reward_share: share })
-  ElMessage.success(res.data.message || '采纳成功')
-  await load()
+    ElMessage.success(res.data.message || '采纳成功')
+    acceptVisible.value = false
+    await load()
+    if (res.data?.accepted_post_id) {
+      ElMessage.success('已同步发布到社区')
+    }
+  } catch (e) {
+    ElMessage.error(e?.response?.data?.message || '采纳失败')
+  } finally {
+    accepting.value = false
+  }
 }
 
 const reject = async (s) => {

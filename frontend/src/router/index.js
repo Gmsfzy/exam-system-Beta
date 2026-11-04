@@ -65,6 +65,7 @@ const routes = [
       { path: 'rank/player/:userId', name: 'PublicProfile', component: () => import('../views/PublicProfile.vue'), meta: { module: 'competition' } },
       { path: 'teams', name: 'TeamCenter', component: () => import('../views/TeamCenter.vue'), meta: { module: 'competition' } },
       { path: 'study-profile', name: 'StudyProfile', component: () => import('../views/StudyProfile.vue'), meta: { module: 'competition' } },
+      { path: 'achievements', name: 'Achievements', component: () => import('../views/Achievements.vue'), meta: { module: 'competition' } },
 
       // ── 征集悬赏模块 ──
       { path: 'bounties', name: 'BountyPlaza', component: () => import('../views/BountyPlaza.vue'), meta: { module: 'bounty' } },
@@ -79,7 +80,7 @@ const routes = [
       { path: 'learning/today', name: 'TodayStudy', component: () => import('../views/TodayStudy.vue'), meta: { module: 'learning' } },
       { path: 'learning/my-knowledge', name: 'MyKnowledge', component: () => import('../views/MyKnowledge.vue'), meta: { module: 'learning' } },
       { path: 'learning/certificates', name: 'Certificates', component: () => import('../views/CertificateView.vue'), meta: { module: 'learning' } },
-      { path: 'learning/certificates/:id', name: 'CertificateDetail', component: () => import('../views/CertificateView.vue'), meta: { module: 'learning' } },
+      { path: 'learning/certificates/:kind/:id', name: 'CertificateDetail', component: () => import('../views/CertificateView.vue'), meta: { module: 'learning' } },
       { path: 'learning/paths', name: 'MajorPaths', component: () => import('../views/MajorPathsView.vue'), meta: { module: 'learning' } },
       { path: 'learning/paths/:id', name: 'PathDetail', component: () => import('../views/PathDetailView.vue'), meta: { module: 'learning' } },
       { path: 'learning/node/:nodeId', name: 'NodeLearn', component: () => import('../views/NodeLearnView.vue'), meta: { module: 'learning' } },

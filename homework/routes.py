@@ -1531,6 +1531,7 @@ def _showcase_summary(sub, viewer):
     hw = sub.homework
     return {
         'sub_id': sub.id, 'homework_id': hw.id, 'homework_title': hw.title,
+        'teacher_id': hw.teacher_id,
         'hw_type': str(hw.hw_type), 'author': _showcase_author(sub, viewer),
         'is_mine': sub.student_id == viewer.id,
         'total_score': sub.total_score, 'max_score': sub.max_score,
@@ -1606,6 +1607,60 @@ def api_showcase_consent(sub_id):
     db.session.commit()
     return jsonify({'message': '已同意展示' if accept else '已拒绝/撤回展示',
                     'showcase_status': sub.showcase_status})
+
+
+@homework_bp.route('/homeworks/showcase/<int:sub_id>/sync-community', methods=['POST'])
+def api_showcase_sync_community(sub_id):
+    """v6.1 教师把已上墙的优秀作业同步为社区经验帖（复用 community_bridge）。
+
+    仅 featured 作品可同步；作者=操作教师（不暴露原作答学生）；
+    匿名开关取自 sub.showcase_anon；关联 linked_type=homework。
+    """
+    user, err = require_teacher()
+    if err:
+        return err
+    sub = db.session.get(HomeworkSubmission, sub_id)
+    if not sub:
+        return jsonify({'message': '提交不存在'}), 404
+    hw = sub.homework
+    if not hw or hw.teacher_id != user.id:
+        return jsonify({'message': '无权操作该作业'}), 403
+    if sub.showcase_status != ShowcaseStatusEnum.FEATURED:
+        return jsonify({'message': '仅已上展示墙的作品可同步到社区'}), 400
+
+    # 拼装社区帖正文：作业标题 + 得分 + 作答内容（开放式取 content；题集式取答案摘要）
+    score_part = ''
+    if sub.total_score is not None and sub.max_score:
+        score_part = f'\n\n**得分**：{sub.total_score} / {sub.max_score}'
+    if hw.hw_type == HomeworkTypeEnum.OPEN:
+        body = (sub.content or '（无正文）')[:2000]
+    else:
+        lines = []
+        for i, ans in enumerate(sub.answers, 1):
+            q_text = (ans.question.content if ans.question else f'第{i}题')[:60]
+            a_text = (ans.answer or '（未作答）')[:200]
+            lines.append(f'**{i}. {q_text}**\n{a_text}')
+        body = '\n\n'.join(lines)[:3000] or '（无作答内容）'
+    if sub.comment:
+        body += f'\n\n---\n**教师点评**：{sub.comment[:500]}'
+    content = f'> 来自优秀作业展示：《{hw.title}》{score_part}\n\n{body}'
+
+    from utils.community_bridge import sync_to_community
+    post = sync_to_community(
+        actor_id=user.id,
+        category='experience',
+        title=f'[优秀作业] {hw.title}',
+        content=content,
+        linked_type='homework',
+        linked_id=hw.id,
+        course_id=hw.course_id,
+        anonymous=bool(sub.showcase_anon),
+    )
+    db.session.commit()
+    create_notification(user.id, '优秀作业已同步到社区',
+                        f'《{hw.title}》的优秀作品已发布为社区经验帖。',
+                        type='success', related_type='community_post', related_id=post.id)
+    return jsonify({'message': '已同步到社区', 'post_id': post.id})
 
 
 @homework_bp.route('/homeworks/showcase', methods=['GET'])

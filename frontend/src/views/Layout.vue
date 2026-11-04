@@ -304,6 +304,9 @@ const handleNotificationClick = async (notification) => {
   } else if (notification.related_type === 'competition_cert') {
     // v6.2 赛季证书通知：直达证书详情（related_id 即 CompetitionCertificate.id）
     router.push(`/competitions/certificates/${notification.related_id}`)
+  } else if (notification.related_type === 'certificate') {
+    // v6.4 社会/第三方证书核验结果通知：直达证书中心该证书详情（related_id 即 UserCertificate.id）
+    router.push(`/learning/certificates/social/${notification.related_id}`)
   }
 }
 
@@ -470,6 +473,7 @@ const moduleMenus = {
       { path: '/competitions/series', label: '系列赛', icon: iconMap.Connection },
       { path: '/teams', label: '战队管理', icon: iconMap.User },
       { path: '/study-profile', label: '学情画像', icon: iconMap.TrendCharts },
+      { path: '/achievements', label: '我的成就', icon: iconMap.Trophy },
     ],
     student: [
       { path: '/competitions', label: '竞赛广场', icon: iconMap.Trophy },
@@ -478,6 +482,7 @@ const moduleMenus = {
       { path: '/rank', label: '我的段位', icon: iconMap.Medal },
       { path: '/teams', label: '战队', icon: iconMap.User },
       { path: '/study-profile', label: '学情画像', icon: iconMap.TrendCharts },
+      { path: '/achievements', label: '我的成就', icon: iconMap.Trophy },
     ]
   },
   bounty: {

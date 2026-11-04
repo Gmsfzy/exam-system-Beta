@@ -11,6 +11,10 @@
           <span class="score-label">分</span>
         </div>
         <div class="score-total">满分 {{ resultData.total_score }}</div>
+        <div v-if="resultData.rank_bonus > 0" class="score-bonus">
+          含竞赛段位加分 +{{ resultData.rank_bonus }}
+          <span class="raw-hint">（原始分 {{ resultData.raw_score }}）</span>
+        </div>
       </div>
     </div>
 
@@ -91,6 +95,15 @@
             <span class="answer-value analysis"><RichContent :content="answer.analysis || ''" /></span>
           </div>
         </div>
+        <div class="question-actions">
+          <el-button
+            size="small"
+            type="primary"
+            plain
+            :icon="ChatDotRound"
+            @click="askInCommunity(answer)"
+          >去社区提问</el-button>
+        </div>
       </div>
     </div>
 
@@ -110,7 +123,7 @@
 import { ref, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { InfoFilled, Check, Close, Minus, Clock } from '@element-plus/icons-vue'
+import { InfoFilled, Check, Close, Minus, Clock, ChatDotRound } from '@element-plus/icons-vue'
 import request from '../utils/request'
 import RichContent from '../components/RichContent.vue'
 
@@ -155,6 +168,20 @@ const getOptions = (optionsStr) => {
 
 const goBack = () => {
   router.push('/results')
+}
+
+// v6.1 跨模块求助：从考试题目跳转到社区发帖，预填关联题目与求助分类
+const askInCommunity = (answer) => {
+  if (!answer?.question_id) return ElMessage.warning('该题暂无题目 ID，无法关联')
+  router.push({
+    path: '/community/new',
+    query: {
+      linked_type: 'question',
+      linked_id: answer.question_id,
+      category: 'help',
+      title: `关于「${(answer.content || '').slice(0, 20)}…」的疑问`,
+    },
+  })
 }
 
 // v4.3 成绩申诉
@@ -229,6 +256,8 @@ const submitReview = async () => {
   font-size: 14px;
   color: #64748b;
 }
+.score-bonus { color: #e6a23c; font-size: 12px; margin-top: 4px; }
+.raw-hint { color: #94a3b8; margin-left: 4px; }
 
 .analysis-card {
   background: linear-gradient(135deg, #f0fdf4 0%, #fef3c7 100%);
@@ -380,6 +409,12 @@ const submitReview = async () => {
   display: flex;
   gap: 8px;
   margin-bottom: 8px;
+}
+
+.question-actions {
+  margin-top: 10px;
+  display: flex;
+  justify-content: flex-end;
 }
 
 .answer-row:last-child {

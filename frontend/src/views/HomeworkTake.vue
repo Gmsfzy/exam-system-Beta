@@ -158,6 +158,15 @@
         <!-- 其余主观/填空 -->
         <el-input v-else v-model="answers[q.question_id]" type="textarea" :rows="3"
                   :disabled="!editable" placeholder="请输入答案" />
+        <div class="q-actions">
+          <el-button
+            size="small"
+            type="primary"
+            plain
+            :icon="ChatDotRound"
+            @click="askInCommunity(q)"
+          >去社区提问</el-button>
+        </div>
       </div>
     </div>
 
@@ -190,7 +199,7 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { Back, ChatLineSquare, ChatDotRound, MagicStick, UserFilled } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import request from '../utils/request'
@@ -199,6 +208,7 @@ import HomeworkDiscussion from '../components/HomeworkDiscussion.vue'
 import AnnotationCanvas from '../components/AnnotationCanvas.vue'
 
 const route = useRoute()
+const router = useRouter()
 const hwId = route.params.id
 const LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
 
@@ -236,6 +246,20 @@ const isSingle = (t) => t === 'single_choice' || t === 'true_false'
 const letter = (idx) => LETTERS[idx]
 const optionList = (q) => (Array.isArray(q.options) ? q.options : [])
 const attUrl = computed(() => `/api/homeworks/${hwId}/attachment`)
+
+// v6.1 跨模块求助：从作业题目跳转到社区发帖，预填关联题目与求助分类
+const askInCommunity = (q) => {
+  if (!q?.question_id) return ElMessage.warning('该题暂无题目 ID，无法关联')
+  router.push({
+    path: '/community/new',
+    query: {
+      linked_type: 'question',
+      linked_id: q.question_id,
+      category: 'help',
+      title: `关于「${(q.content || '').slice(0, 20)}…」的疑问`,
+    },
+  })
+}
 
 const downloadRef = async () => {
   const res = await request.get(`/api/homeworks/${hwId}/reference`, { responseType: 'blob' })
@@ -450,6 +474,7 @@ onUnmounted(() => {
 .q-idx { font-weight: 700; color: #6366f1; }
 .q-score { color: #909399; font-size: 13px; }
 .q-content { margin-bottom: 10px; line-height: 1.6; }
+.q-actions { margin-top: 8px; display: flex; justify-content: flex-end; }
 .opt { display: block; margin-bottom: 6px; }
 .code :deep(textarea) { font-family: Consolas, Monaco, monospace; }
 .foot-bar { position: sticky; bottom: 0; background: #fff; padding: 12px 0; border-top: 1px solid #ebeef5; text-align: right; }

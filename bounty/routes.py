@@ -784,6 +784,58 @@ def submission_accept(sid):
         if tq and (force or not (tq.analysis or '').strip()):
             tq.analysis = sub.content
 
+    # v6.1 跨模块掌握度信号：中标答案作者对相关知识点的掌握验证
+    # 题目悬赏用投稿的 q_knowledge 名称解析；答案悬赏用目标题已关联的知识点 ID
+    # 权重 0.3（弱于考试/作业的 1.0），避免刷悬赏冲掌握度
+    try:
+        from api.learning_engine import (
+            update_mastery, resolve_kp_ids_by_names, kp_ids_of_question,
+        )
+        kp_ids = []
+        if bounty.bounty_type == BountyTypeEnum.QUESTION and sub.q_knowledge:
+            kp_ids = resolve_kp_ids_by_names(sub.q_knowledge.split(','))
+        elif bounty.bounty_type == BountyTypeEnum.ANSWER and bounty.target_question_id:
+            kp_ids = kp_ids_of_question(bounty.target_question_id)
+        if kp_ids:
+            update_mastery(sub.submitter_id, kp_ids, 0.3)
+    except Exception as e:
+        from utils.logger import logger
+        logger.warning('bounty accept mastery update failed: %s', e)
+
+    # v6.1 跨模块内容桥接：采纳时可选把中标答案同步为社区帖（复用 community_bridge）
+    # 作者=悬赏发布者（不暴露投稿人身份）；题目悬赏关联新题、答案悬赏关联目标题
+    if bool(data.get('sync_to_community')):
+        try:
+            from utils.community_bridge import sync_to_community
+            if bounty.bounty_type == BountyTypeEnum.QUESTION:
+                body_parts = [f'**题目**：{sub.q_content}']
+                if sub.q_answer:
+                    body_parts.append(f'**答案**：{sub.q_answer}')
+                if sub.q_analysis:
+                    body_parts.append(f'**解析**：{sub.q_analysis}')
+                post = sync_to_community(
+                    actor_id=user.id, category='resource',
+                    title=f'[悬赏入库] {(sub.q_content or "")[:40]}',
+                    content='\n\n'.join(body_parts)[:4000],
+                    linked_type='question', linked_id=accepted_question_id,
+                    tags=sub.q_knowledge, anonymous=True,
+                )
+            else:
+                post = sync_to_community(
+                    actor_id=user.id, category='experience',
+                    title=f'[悬赏采纳] {bounty.title[:40]}',
+                    content=(sub.content or '')[:4000],
+                    linked_type='question', linked_id=bounty.target_question_id,
+                    anonymous=True,
+                )
+            accepted_post_id = post.id
+        except Exception as e:
+            from utils.logger import logger
+            logger.warning('bounty accept sync to community failed: %s', e)
+            accepted_post_id = None
+    else:
+        accepted_post_id = None
+
     # 采纳该投稿（状态已由上方条件 UPDATE 抢占，这里同步 ORM 对象并补写其余字段）
     sub.status = SubmissionStatusEnum.ACCEPTED
     sub.reward_share = share
@@ -849,6 +901,7 @@ def submission_accept(sid):
         'message': '采纳成功',
         'submission': sub.to_dict(viewer_id=user.id, is_publisher=True),
         'accepted_question_id': accepted_question_id,
+        'accepted_post_id': accepted_post_id,
         'reward_share': share,
         'accept_count': bounty.accept_count,
         'max_accepts': bounty.max_accepts,

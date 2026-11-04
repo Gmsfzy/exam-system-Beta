@@ -256,6 +256,97 @@ def badges_me():
     return jsonify({'all': all_defs})
 
 
+# ═══════════════ v6.1 全局成就聚合（只读，跨三大体系不打通账本）═══════════════
+
+@gamification_bp.route('/achievements', methods=['GET'])
+def achievements_me():
+    """只读聚合三大成长体系的成就概览：
+      - 竞赛：当前赛季积分/段位/排名 + Elo
+      - 悬赏：已获得勋章数与清单
+      - 社区：积分/等级/排名
+    纯读聚合，不做任何积分互转或账本打通。
+    """
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+
+    # ── 竞赛 ──
+    comp = {'points': 0, 'tier': None, 'tier_name': None, 'rank': None,
+            'season': None, 'elo': None, 'peak_elo': None}
+    try:
+        season = current_season()
+        p = ensure_profile(user.id, season)
+        rank = season_rank_of(user.id, season)
+        total = UserPointsProfile.query.filter_by(season=season).count()
+        tp = tier_progress(p.points, rank, total)
+        rating = get_or_create_rating(user.id)
+        comp = {
+            'season': season,
+            'points': p.points,
+            'tier': tp['tier'],
+            'tier_color': tp.get('tier_color'),
+            'rank': rank,
+            'total_players': total,
+            'elo': rating.elo,
+            'peak_elo': rating.peak_elo,
+            'games': rating.games,
+        }
+    except Exception as e:
+        from utils.logger import logger
+        logger.warning('achievements competition part failed: %s', e)
+
+    # ── 悬赏勋章 ──
+    bounty = {'granted_count': 0, 'badges': []}
+    try:
+        all_badge_defs = dict(BADGE_DEFS)
+        try:
+            from bounty.rewards import BOUNTY_BADGES
+            all_badge_defs.update(BOUNTY_BADGES)
+        except ImportError:
+            pass
+        mine = UserBadge.query.filter_by(user_id=user.id).all()
+        mine_map = {b.badge_code: b for b in mine}
+        granted = []
+        for code, d in all_badge_defs.items():
+            if code in mine_map:
+                granted.append({'code': code, 'name': d['name'], 'icon': d.get('icon')})
+        bounty = {'granted_count': len(granted), 'badges': granted}
+    except Exception as e:
+        from utils.logger import logger
+        logger.warning('achievements bounty part failed: %s', e)
+
+    # ── 社区积分/等级 ──
+    community = {'points': 0, 'level': 1, 'level_name': '新手上路', 'rank': None}
+    try:
+        from database.models import CommunityUserStat
+        from api.community_routes import LEVEL_THRESHOLDS
+        stat = CommunityUserStat.query.filter_by(user_id=user.id).first()
+        points = stat.points if stat else 0
+        idx = 0
+        for i, (threshold, _name) in enumerate(LEVEL_THRESHOLDS):
+            if points >= threshold:
+                idx = i
+        threshold, name = LEVEL_THRESHOLDS[idx]
+        rank = 1 + CommunityUserStat.query.filter(
+            CommunityUserStat.points > points).count()
+        community = {
+            'points': points,
+            'level': idx + 1,
+            'level_name': name,
+            'level_threshold': threshold,
+            'rank': rank,
+        }
+    except Exception as e:
+        from utils.logger import logger
+        logger.warning('achievements community part failed: %s', e)
+
+    return jsonify({
+        'competition': comp,
+        'bounty': bounty,
+        'community': community,
+    })
+
+
 # ═══════════════ 学情画像 ═══════════════
 
 def _exam_profile(student_id):

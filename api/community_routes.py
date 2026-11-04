@@ -1307,6 +1307,18 @@ def accept_answer(post_id):
             post.bounty_rewarded = True
         _notify(comment.author_id, user.id, 'accept', post_id=post.id,
                 comment_id=comment.id, content='你的回答被采纳为最佳答案')
+        # v6.1 跨模块掌握度信号：被采纳回答视为对帖子标签对应知识点的掌握验证
+        # 权重 0.3（弱于考试/作业的 1.0），避免刷社区回答刷高掌握度
+        try:
+            from api.learning_engine import update_mastery, resolve_kp_ids_by_names
+            tag_names = (post.tags or '').split(',') if post.tags else []
+            kp_ids = resolve_kp_ids_by_names(tag_names)
+            if kp_ids:
+                update_mastery(comment.author_id, kp_ids, 0.3)
+        except Exception as e:
+            # 掌握度更新为非关键路径，失败不影响采纳主流程
+            from utils.logger import logger
+            logger.warning('community accept mastery update failed: %s', e)
     db.session.commit()
 
     return _ok(_post_serialize(post, user))

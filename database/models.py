@@ -225,6 +225,10 @@ class Exam(db.Model):
     multi_score_rule = db.Column(db.String(20), nullable=False, default='all_or_nothing')  # 多选题：all_or_nothing/partial(漏选按比例)
     anonymous_grading = db.Column(db.Boolean, nullable=False, default=False)  # 批改盲评（隐学生名）
 
+    # ── v6.1 竞赛段位加分（迁移 0041，单向：竞赛→考试，只加分不免考）──
+    rank_bonus_tier = db.Column(db.String(20), nullable=True)    # 段位门槛（bronze/silver/gold/...），NULL=不启用
+    rank_bonus_score = db.Column(db.Float, nullable=False, default=0)  # 达段位学生的加分（0=关闭）
+
     creator = db.relationship('User', backref='exams', lazy=True)
     course = db.relationship('Course', backref='exams')
     # 删除考试时 ORM 级联清理题目配置/受邀学生/会话/成绩（依赖记录无独立存在意义）
@@ -775,6 +779,55 @@ class PathCertificate(db.Model):
 
     user = db.relationship('User', backref='certificates')
     path = db.relationship('LearningPath', backref='certificates')
+
+
+# ── 证书中心：社会/第三方证书（用户上传 + 教师核验）─────────────
+
+# 类别/核验状态标签单一来源：后端与前端均以此为准，新增类别须同步补 label
+CERT_CATEGORY_LABELS = {
+    'language': '外语等级', 'it': '计算机等级', 'practice': '职业资格',
+    'academic': '学历学位', 'award': '竞赛获奖', 'other': '其他',
+}
+CERT_VERIFY_LABELS = {'pending': '待核验', 'verified': '已核验', 'rejected': '已驳回'}
+
+
+class UserCertificate(db.Model):
+    """社会/第三方证书：用户登记现实获得的证书（四六级/计算机等级/一建二建/毕业学位等），
+    上传佐证附件，教师核验后方在证书墙标记「已核验」；核验状态不阻止展示，仅影响角标。"""
+    __tablename__ = 'user_certificate'
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    category = db.Column(db.String(20), nullable=False, default='other')
+    title = db.Column(db.String(200), nullable=False)          # 证书名称，如「全国大学英语六级证书」
+    issuer = db.Column(db.String(120))                         # 发证机构
+    cert_no = db.Column(db.String(80))                         # 现实证书编号（可空）
+    serial_no = db.Column(db.String(32), nullable=False, unique=True)  # 系统编号 ZHX-
+    grade = db.Column(db.String(60))                           # 成绩/等级，如「425 分」「合格」
+    earned_date = db.Column(UTCDateTime)                       # 获证日期
+    note = db.Column(db.Text)                                  # 用户备注
+    file_name = db.Column(db.String(120))                      # 佐证附件落盘名（uploads/）
+    file_orig = db.Column(db.String(200))                      # 原始文件名
+    file_size = db.Column(db.Integer)                          # 附件字节
+    verify_status = db.Column(db.String(12), nullable=False, default='pending')
+    verify_note = db.Column(db.String(200))                    # 教师核验意见
+    verified_by = db.Column(db.Integer, db.ForeignKey('user.id'))
+    verified_at = db.Column(UTCDateTime)
+    created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
+
+    __table_args__ = (
+        db.CheckConstraint(
+            "category IN ('language', 'it', 'practice', 'academic', 'award', 'other')",
+            name='_usercert_category_ck'),
+        db.CheckConstraint(
+            "verify_status IN ('pending', 'verified', 'rejected')",
+            name='_usercert_verify_ck'),
+        db.Index('ix_usercert_user', 'user_id'),
+        db.Index('ix_usercert_status', 'verify_status'),
+    )
+
+    owner = db.relationship('User', foreign_keys=[user_id], backref='social_certificates')
+    verifier = db.relationship('User', foreign_keys=[verified_by])
 
 
 class DailyTask(db.Model):
