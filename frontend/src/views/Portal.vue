@@ -101,6 +101,22 @@ const greeting = computed(() => {
 
 const teacherModules = [
   {
+    key: 'learning',
+    title: '自我学习',
+    desc: '错题本 · 自由刷题 · 学习计划 · AI 答疑',
+    icon: Reading,
+    gradient: 'linear-gradient(135deg, #06b6d4 0%, #0891b2 100%)',
+    path: '/learning'
+  },
+  {
+    key: 'homework',
+    title: '作业练习',
+    desc: '发布题集/开放作业，自动判分与人工批改',
+    icon: Notebook,
+    gradient: 'linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%)',
+    path: '/homeworks/manage'
+  },
+  {
     key: 'exam',
     title: '在线考试',
     desc: '题库管理、组卷发布、考试执行与成绩分析',
@@ -125,22 +141,6 @@ const teacherModules = [
     path: '/bounties'
   },
   {
-    key: 'learning',
-    title: '自我学习',
-    desc: '错题本 · 自由刷题 · 学习计划 · AI 答疑',
-    icon: Reading,
-    gradient: 'linear-gradient(135deg, #06b6d4 0%, #0891b2 100%)',
-    path: '/learning'
-  },
-  {
-    key: 'homework',
-    title: '作业练习',
-    desc: '发布题集/开放作业，自动判分与人工批改',
-    icon: Notebook,
-    gradient: 'linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%)',
-    path: '/homeworks/manage'
-  },
-  {
     key: 'community',
     title: '社区中心',
     desc: '发帖讨论、匿名求助，联动题目/作业/考试',
@@ -151,6 +151,22 @@ const teacherModules = [
 ]
 
 const studentModules = [
+  {
+    key: 'learning',
+    title: '自我学习',
+    desc: '错题回顾 · 自由刷题 · 学习计划 · AI 答疑',
+    icon: Reading,
+    gradient: 'linear-gradient(135deg, #06b6d4 0%, #0891b2 100%)',
+    path: '/learning'
+  },
+  {
+    key: 'homework',
+    title: '作业练习',
+    desc: '接收老师发布的作业，按时作答与提交',
+    icon: Notebook,
+    gradient: 'linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%)',
+    path: '/homeworks/my'
+  },
   {
     key: 'exam',
     title: '在线考试',
@@ -174,22 +190,6 @@ const studentModules = [
     icon: Money,
     gradient: 'linear-gradient(135deg, #ec4899 0%, #db2777 100%)',
     path: '/bounties'
-  },
-  {
-    key: 'learning',
-    title: '自我学习',
-    desc: '错题回顾 · 自由刷题 · 学习计划 · AI 答疑',
-    icon: Reading,
-    gradient: 'linear-gradient(135deg, #06b6d4 0%, #0891b2 100%)',
-    path: '/learning'
-  },
-  {
-    key: 'homework',
-    title: '作业练习',
-    desc: '接收老师发布的作业，按时作答与提交',
-    icon: Notebook,
-    gradient: 'linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%)',
-    path: '/homeworks/my'
   },
   {
     key: 'community',
@@ -574,6 +574,7 @@ const handleLogout = () => {
   line-height: 1.6;
   display: -webkit-box;
   -webkit-line-clamp: 2;
+  line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
