@@ -1,5 +1,5 @@
 from flask import Blueprint, request, jsonify
-from database.models import Course
+from database.models import Course, Major
 from database import db
 
 from utils.redis_cache import get_cache, set_cache, invalidate_course_cache, invalidate_chapter_cache, invalidate_question_cache, CacheKey
@@ -31,6 +31,11 @@ def api_list_courses():
     query = Course.query
     if major_id:
         query = query.filter(Course.major_id == int(major_id))
+    else:
+        # 排除自我学习“自由学习空间”容器下的课程（不污染考试侧全局课程列表）
+        self_major_ids = [m.id for m in Major.query.filter_by(name='自由学习空间').all()]
+        if self_major_ids:
+            query = query.filter(~Course.major_id.in_(self_major_ids))
     courses = query.all()
     
     result = [{

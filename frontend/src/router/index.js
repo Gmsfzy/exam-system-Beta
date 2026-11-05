@@ -77,6 +77,7 @@ const routes = [
 
       // ── 自主学习模块 ──
       { path: 'learning', name: 'LearningHome', component: () => import('../views/LearningHome.vue'), meta: { module: 'learning' } },
+      { path: 'learning/dashboard', name: 'StudyDashboard', component: () => import('../views/StudyDashboard.vue'), meta: { module: 'learning' } },
       { path: 'learning/today', name: 'TodayStudy', component: () => import('../views/TodayStudy.vue'), meta: { module: 'learning' } },
       { path: 'learning/my-knowledge', name: 'MyKnowledge', component: () => import('../views/MyKnowledge.vue'), meta: { module: 'learning' } },
       { path: 'learning/certificates', name: 'Certificates', component: () => import('../views/CertificateView.vue'), meta: { module: 'learning' } },

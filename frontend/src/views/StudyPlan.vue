@@ -583,9 +583,11 @@ async function onDrop(p) {
 
 // ── AI 拆任务 ──
 async function suggestTasks(title, description, startDate, endDate) {
+  // AI 拆解需等外部大模型返回（实测 20–35s，后端上限 60s+），远超 axios 默认 30s，
+  // 单独放宽超时到 90s，避免浏览器先行 ERR_ABORTED。
   const res = await request.post('/api/learning/plans/ai-suggest-tasks', {
     title, description, start_date: startDate || undefined, end_date: endDate || undefined,
-  })
+  }, { timeout: 90000 })
   return res.data || {}
 }
 

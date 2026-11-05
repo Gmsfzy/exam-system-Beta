@@ -980,7 +980,7 @@ def api_plan_ai_suggest_tasks():
         start = date.fromisoformat(data['start_date']) if data.get('start_date') else local_today()
     except (ValueError, TypeError):
         start = local_today()
-    days = 14
+    days = 56  # 未选周期时默认按两个月（八周）拆解，预留知识图谱/知识点整理/预习复习的空间
     if data.get('end_date'):
         try:
             days = max(1, min((date.fromisoformat(data['end_date']) - start).days or 1, 365))
@@ -1733,6 +1733,117 @@ def api_path_ai_generate():
         'kp_created': stats['kp_created'], 'kp_existing': stats['kp_existing'],
         'edges_created': stats['edges_created'], 'nodes_created': stats['nodes_created'],
         'message': 'AI 生成完成，已创建草稿路径',
+    })
+
+
+# 自我学习「自由主题」命名空间容器：知识点/路径的 FK 硬约束需要一个专业+课程+章节作落点。
+# 该专业由自我学习子系统在服务端代建，并对教师/学生一视同仁（不分角色），
+# 同时从考试侧专业/课程列表过滤掉（见 major_routes/course_routes），以免污染考试目录。
+SELF_LEARN_MAJOR_NAME = '自由学习空间'
+
+
+def _get_or_create_topic_container(topic_title):
+    """为自由主题取得/创建「专业→课程→章节」命名空间容器（幂等、服务端代建，无角色门禁）。"""
+    major = Major.query.filter_by(name=SELF_LEARN_MAJOR_NAME).first()
+    if not major:
+        major = Major(name=SELF_LEARN_MAJOR_NAME[:50],
+                      description='自我学习：用户自定义主题自动生成的学习空间')
+        db.session.add(major)
+        db.session.flush()
+    course_name = (topic_title or '自由主题')[:50]
+    course = Course.query.filter_by(major_id=major.id, name=course_name).first()
+    if not course:
+        course = Course(name=course_name, major_id=major.id)
+        db.session.add(course)
+        db.session.flush()
+    chapter = Chapter.query.filter_by(course_id=course.id, name='核心知识体系').first()
+    if not chapter:
+        chapter = Chapter(name='核心知识体系', course_id=course.id, order_num=1)
+        db.session.add(chapter)
+        db.session.flush()
+    return major, course, chapter
+
+
+@api_learning_bp.route('/learning/topics/plan-full', methods=['POST'])
+@limiter.limit(RateLimitConfig.AI_GENERATE)
+def api_topic_plan_full():
+    """自由主题一键闭环：任意主题→服务端建命名空间容器→AI 生成学习路径+知识点+依赖边（知识图谱）
+    →据这些真实知识点建学习计划+任务（任务绑定知识点→打通掌握度/错题本）。全民可用，不分教师/学生。"""
+    user, err = _require_login()
+    if err:
+        return err
+
+    data = request.get_json(silent=True) or {}
+    title = (data.get('title') or '').strip()
+    desc = (data.get('description') or '').strip()
+    if not title and not desc:
+        return jsonify({'message': '请填写学习主题或描述'}), 400
+    topic = (title or desc)[:60]
+    desc = desc or topic
+
+    try:
+        start = date.fromisoformat(data['start_date']) if data.get('start_date') else local_today()
+    except (ValueError, TypeError):
+        start = local_today()
+    end = None
+    if data.get('end_date'):
+        try:
+            end = date.fromisoformat(data['end_date'])
+        except (ValueError, TypeError):
+            return jsonify({'message': '结束日期格式错误'}), 400
+    if end and end < start:
+        return jsonify({'message': '结束日期不能早于开始日期'}), 400
+    if not end:
+        end = start + timedelta(days=56)  # 未选周期默认两个月（八周）
+    days = max(1, (end - start).days)
+
+    # 1) 命名空间容器（专业→课程→章节）
+    major, course, chapter = _get_or_create_topic_container(topic)
+
+    # 2) 复用现成引擎生成路径骨架（知识点+依赖边+节点），AI 不可用则报错降级
+    try:
+        from ai_service.services import ai_generate_path_skeleton
+        path, stats = ai_generate_path_skeleton(
+            db.session, major.id, topic, [chapter.id],
+            description=desc, creator_id=user.id, learning_goal=desc,
+            start_date=start, target_end_date=end,
+        )
+    except Exception:
+        logger.exception('自由主题闭环：AI 生成路径骨架失败')
+        return jsonify({'message': 'AI 生成失败，请稍后重试，或改用“基于已有课程”模式'}), 502
+
+    _enroll_creator(path, user.id)   # 自己的路径：生成即加入
+
+    # 3) 学习计划：任务直接绑定骨架生成的知识点，与路径节点/图谱/掌握度同源
+    plan = StudyPlan(user_id=user.id, title=topic, description=desc,
+                     start_date=start, end_date=end, status='active')
+    db.session.add(plan)
+    db.session.flush()
+    nodes = [n for n in path.nodes if n.node_type == 'knowledge_point' and n.knowledge_point_id]
+    step = max(1, round(days / len(nodes))) if nodes else days
+    order = 0
+    for i, n in enumerate(nodes):
+        kp = db.session.get(KnowledgePoint, n.knowledge_point_id)
+        if not kp:
+            continue
+        order += 1
+        due = start + timedelta(days=min(days, (i + 1) * step) - 1)
+        db.session.add(StudyPlanTask(
+            plan_id=plan.id, order_num=order,
+            title=f'掌握「{kp.name}」并完成配套练习', task_type='knowledge_point',
+            knowledge_point_id=kp.id, estimated_minutes=n.estimated_minutes or 45,
+            question_count=5, due_date=due))
+    path_id, plan_id, tasks_total = path.id, plan.id, order
+    db.session.commit()
+
+    return jsonify({
+        'path_id': path_id, 'plan_id': plan_id, 'course_id': course.id,
+        'kp_created': stats['kp_created'], 'kp_existing': stats['kp_existing'],
+        'edges_created': stats['edges_created'], 'nodes_created': stats['nodes_created'],
+        'tasks_total': tasks_total,
+        'graph_url': f'/learning/graph?path_id={path_id}',
+        'message': (f'已闭环生成：学习路径 + 知识图谱（{stats["kp_created"] + stats["kp_existing"]} 个知识点'
+                    f'/{stats["edges_created"]} 条关联）+ 学习计划（{tasks_total} 个任务）'),
     })
 
 

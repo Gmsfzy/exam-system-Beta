@@ -21,7 +21,8 @@ def api_list_majors():
     if cached_data is not None:
         return jsonify(cached_data)
 
-    majors = Major.query.all()
+    # 排除自我学习“自由学习空间”命名容器（非真实专业，不污染考试目录）
+    majors = Major.query.filter(Major.name != '自由学习空间').all()
     result = [{'id': m.id, 'name': m.name, 'description': m.description} for m in majors]
     set_cache(CacheKey.MAJORS, result, expires=600)
     return jsonify(result)

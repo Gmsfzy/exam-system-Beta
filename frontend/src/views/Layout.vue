@@ -161,7 +161,7 @@ import {
   SwitchButton, ArrowDown, School, Fold, Expand, Grid,
   Star, Calendar, VideoPlay, TrendCharts, Medal, Trophy, Lightning,
   Sunny, Moon, Check, Warning, InfoFilled,
-  Money, EditPen, Tickets, Close, Reading, Connection, Notebook, Memo, ChatDotRound
+  Money, EditPen, Tickets, Close, Reading, Connection, Notebook, Memo, ChatDotRound, Compass
 } from '@element-plus/icons-vue'
 
 const route = useRoute()
@@ -446,7 +446,7 @@ const iconMap = {
   Document, Collection, HomeFilled, Bell, User, Setting,
   SwitchButton, ArrowDown, School, Fold, Expand, Grid,
   Star, Calendar, VideoPlay, TrendCharts, Medal, Trophy, Lightning,
-  Money, EditPen, Tickets, Reading, Connection, Notebook, Memo, Warning, ChatDotRound
+  Money, EditPen, Tickets, Reading, Connection, Notebook, Memo, Warning, ChatDotRound, Compass
 }
 
 // 按模块分组的菜单：与路由 meta.module 对应，新增模块只需在此加分组
@@ -499,6 +499,7 @@ const moduleMenus = {
   },
   learning: {
     teacher: [
+      { path: '/learning/dashboard', label: '学习规划', icon: iconMap.Compass },
       { path: '/learning', label: '学习首页', icon: iconMap.Reading },
       { path: '/learning/today', label: '今日学习', icon: iconMap.Calendar },
       { path: '/learning/paths', label: '专业路径', icon: iconMap.School },
@@ -515,6 +516,7 @@ const moduleMenus = {
       { path: '/learning/ai-governance', label: 'AI 治理', icon: iconMap.Setting },
     ],
     student: [
+      { path: '/learning/dashboard', label: '学习规划', icon: iconMap.Compass },
       { path: '/learning', label: '学习首页', icon: iconMap.Reading },
       { path: '/learning/today', label: '今日学习', icon: iconMap.Calendar },
       { path: '/learning/paths', label: '专业路径', icon: iconMap.School },

@@ -202,7 +202,7 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRouter, useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Connection, Right } from '@element-plus/icons-vue'
 import request from '../utils/request'
@@ -210,6 +210,7 @@ import KnowledgeGraph from '../components/KnowledgeGraph.vue'
 import AIChatDialog from '../components/AIChatDialog.vue'
 
 const router = useRouter()
+const route = useRoute()
 
 // ── 数据源与图谱 ──
 const mode = ref('major')
@@ -440,8 +441,17 @@ const statusLabel = (s) => ({ draft: '草稿', published: '已发布', archived:
 const relationLabel = (t) => ({ prerequisite: '前置依赖', related: '相关', derived: '衍生' }[t] || t)
 
 onMounted(async () => {
-  await loadMajors()
-  loadGraph()
+  // 支持 ?path_id= 直达：自动切到“按路径”模式并加载该路径的知识图谱（自由主题闭环会导流到这里）
+  const qpid = Number(route.query.path_id)
+  if (qpid) {
+    mode.value = 'path'
+    await loadPaths()
+    pathId.value = qpid
+    loadGraph()
+  } else {
+    await loadMajors()
+    loadGraph()
+  }
 })
 </script>
 
@@ -591,6 +601,7 @@ onMounted(async () => {
   color: var(--text-primary);
   display: -webkit-box;
   -webkit-line-clamp: 1;
+  line-clamp: 1;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
