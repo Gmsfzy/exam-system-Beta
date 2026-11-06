@@ -73,6 +73,7 @@ uploads/
 # Trae/Agent 临时文件
 *.tmp
 _tmp_*
+.screenshots/
 
 # 文档文件
 存在隐患.md
