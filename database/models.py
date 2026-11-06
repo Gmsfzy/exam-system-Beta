@@ -1485,3 +1485,94 @@ class CommunityReport(db.Model):
             'status': self.status,
             'created_at': self.created_at.isoformat() if self.created_at else None,
         }
+
+
+# ── v6.6 代码笔记本（Notebook）：Jupyter 式分单元代码/Markdown 混排 + 持久 kernel 执行 ──
+# 枚举单一来源（后端与前端均以此为准）
+CELL_TYPE_LABELS = {'code': '代码', 'markdown': 'Markdown'}
+NOTEBOOK_VISIBILITY_LABELS = {'private': '私有', 'public': '公开'}
+# v6.7 六模块接入：notebook 可绑定的上下文类型（空表示自由笔记本）
+NOTEBOOK_CTX_LABELS = {'homework': '作业', 'exam': '考试', 'competition': '竞赛', 'bounty': '悬赏'}
+
+
+class Notebook(db.Model):
+    """代码笔记本：一个用户可建多个 notebook，每个 notebook 由有序 cell 组成。
+
+    执行走持久 kernel 会话（变量/导入跨 cell 保留），输出快照落 cell.outputs。
+    与考试/作业判分链路正交：notebook 是自由实验/练习空间，不参与自动判分。"""
+    __tablename__ = 'notebook'
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    title = db.Column(db.String(120), nullable=False)
+    description = db.Column(db.Text)
+    # 可选绑定到已有专业/课程（仅用于归类展示，不强制，notebook 本身独立于考试目录）
+    major_id = db.Column(db.Integer, db.ForeignKey('major.id'))
+    course_id = db.Column(db.Integer, db.ForeignKey('course.id'))
+    language = db.Column(db.String(20), nullable=False, default='python')  # 当前仅 python
+    visibility = db.Column(db.String(12), nullable=False, default='private')
+    status = db.Column(db.String(12), nullable=False, default='active')     # active/archived
+    # v6.7 六模块接入：上下文绑定（ctx_type ∈ homework/exam/competition/bounty，ctx_id 为对应主键）；
+    # 自由笔记本两字段均空。同一用户×同一上下文只复用一个（get-or-create）。
+    ctx_type = db.Column(db.String(20))
+    ctx_id = db.Column(db.Integer)
+    forked_from_id = db.Column(db.Integer, db.ForeignKey('notebook.id'))   # 社区 fork 来源（公开本）
+    created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
+    updated_at = db.Column(UTCDateTime, nullable=False, default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (
+        db.CheckConstraint("visibility IN ('private', 'public')", name='_notebook_vis_ck'),
+        db.CheckConstraint("status IN ('active', 'archived')", name='_notebook_status_ck'),
+        db.Index('ix_notebook_user', 'user_id'),
+        db.Index('ix_notebook_ctx', 'user_id', 'ctx_type', 'ctx_id'),
+    )
+
+    cells = db.relationship('NotebookCell', backref='notebook', lazy='dynamic',
+                            cascade='all, delete-orphan', order_by='NotebookCell.order_num')
+
+    def to_dict(self, with_cells=False):
+        d = {
+            'id': self.id, 'user_id': self.user_id, 'title': self.title,
+            'description': self.description, 'major_id': self.major_id,
+            'course_id': self.course_id, 'language': self.language,
+            'visibility': self.visibility, 'status': self.status,
+            'ctx_type': self.ctx_type, 'ctx_id': self.ctx_id,
+            'forked_from_id': self.forked_from_id,
+            'cell_count': self.cells.count(),
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+        }
+        if with_cells:
+            d['cells'] = [c.to_dict() for c in self.cells.order_by(NotebookCell.order_num).all()]
+        return d
+
+
+class NotebookCell(db.Model):
+    """笔记本单元：code（走 kernel 执行并缓存输出）或 markdown（纯文本渲染）。
+
+    outputs 为执行结果快照列表 [{output_type, text?, image?, html?}]，由后端 kernel 写入。"""
+    __tablename__ = 'notebook_cell'
+
+    id = db.Column(db.Integer, primary_key=True)
+    notebook_id = db.Column(db.Integer, db.ForeignKey('notebook.id'), nullable=False)
+    order_num = db.Column(db.Integer, nullable=False, default=0)
+    cell_type = db.Column(db.String(12), nullable=False, default='code')
+    source = db.Column(db.Text)                                    # 代码或 Markdown 原文
+    language = db.Column(db.String(20), nullable=False, default='python')
+    outputs = db.Column(JSONType)                                  # 执行输出快照列表
+    exec_count = db.Column(db.Integer, nullable=False, default=0)  # kernel 执行序号
+    last_run_at = db.Column(UTCDateTime)
+    created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
+
+    __table_args__ = (
+        db.CheckConstraint("cell_type IN ('code', 'markdown')", name='_nbcell_type_ck'),
+        db.Index('ix_nbcell_notebook_order', 'notebook_id', 'order_num'),
+    )
+
+    def to_dict(self):
+        return {
+            'id': self.id, 'notebook_id': self.notebook_id, 'order_num': self.order_num,
+            'cell_type': self.cell_type, 'source': self.source or '', 'language': self.language,
+            'outputs': self.outputs or [], 'exec_count': self.exec_count,
+            'last_run_at': self.last_run_at.isoformat() if self.last_run_at else None,
+        }

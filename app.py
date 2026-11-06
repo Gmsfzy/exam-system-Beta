@@ -74,6 +74,7 @@ from dsci.routes import dsci_bp
 from homework.routes import homework_bp
 from api.community_routes import api_community_bp   # v5.29 社区中心 · Phase 1 论坛 MVP
 from api.stats_routes import api_stats_bp            # v6.1 首页公开统计（只读聚合，零鉴权）
+from api.notebook_routes import api_notebook_bp      # v6.6 代码笔记本（Jupyter 式分单元 + 持久 kernel）
 # 注意：api/routes.py 已废弃，路由已拆分到以上独立模块
 
 api_bps = [api_auth_bp,
@@ -99,7 +100,8 @@ api_bps = [api_auth_bp,
            dsci_bp,
            homework_bp,
            api_community_bp,   # v5.29 社区中心
-           api_stats_bp]       # v6.1 首页公开统计
+           api_stats_bp,       # v6.1 首页公开统计
+           api_notebook_bp]    # v6.6 代码笔记本
 for bp in api_bps:
     # CSRF 由 security._smart_csrf_check 统一处理：Bearer token 请求自动豁免，其余强制校验
     app.register_blueprint(bp, url_prefix='/api')

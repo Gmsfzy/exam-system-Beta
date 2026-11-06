@@ -117,10 +117,14 @@
           <el-input
             v-model="answers[currentQuestion.id]"
             type="textarea"
-            :rows="4"
-            placeholder="请输入您的答案..."
+            :rows="currentQuestion.type === 'programming' ? 10 : 4"
+            :class="{ 'code-input': currentQuestion.type === 'programming' }"
+            :placeholder="currentQuestion.type === 'programming' ? '请输入完整可运行代码...' : '请输入您的答案...'"
             @input="saveAnswer"
           />
+          <!-- v6.7 六模块接入：编程题可开笔记本验证思路，页内抽屉不触发切屏记录 -->
+          <el-button v-if="currentQuestion.type === 'programming'" size="small" type="warning" plain
+                     :icon="Notebook" style="margin-top: 8px" @click="nbVisible = true">笔记本编程</el-button>
         </div>
 
         <div class="question-footer">
@@ -140,6 +144,12 @@
         <el-button type="danger" @click="confirmSubmit">确认提交</el-button>
       </template>
     </el-dialog>
+
+    <!-- v6.7 六模块接入：考试编程题的代码笔记本（同一场考试复用一个上下文本） -->
+    <el-drawer v-model="nbVisible" size="72%" title="代码笔记本 · 验好后点「用作作答」回填" destroy-on-close>
+      <NotebookWorkspace v-if="nbVisible" embedded ctx-type="exam" :ctx-id="route.params.examId"
+                         :ctx-title="'考试笔记本 #' + route.params.examId" answer-mode @use-answer="useNotebookAnswer" />
+    </el-drawer>
   </div>
 </template>
 
@@ -147,9 +157,10 @@
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Clock, Warning } from '@element-plus/icons-vue'
+import { Clock, Warning, Notebook } from '@element-plus/icons-vue'
 import request from '../utils/request'
 import RichContent from '../components/RichContent.vue'
+import NotebookWorkspace from './NotebookWorkspace.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -163,6 +174,18 @@ const sessionId = ref(null)
 const remainingTime = ref(0)
 const showSubmitConfirm = ref(false)
 let timer = null
+
+// v6.7 笔记本接入：编程题页内抽屉实验，回填当前题并即时存档
+const nbVisible = ref(false)
+const useNotebookAnswer = (src) => {
+  const qId = currentQuestion.value.id
+  if (qId) {
+    answers.value[qId] = src
+    saveAnswer()
+  }
+  ElMessage.success('已回填到编程题作答')
+  nbVisible.value = false
+}
 
 // v4.6.1 枚举收敛：题型/难度单一来源 frontend/src/utils/enums.js
 import { QUESTION_TYPE_LABELS, DIFFICULTY_LABELS } from '../utils/enums'
@@ -670,6 +693,11 @@ const confirmSubmit = async () => {
 
 .answer-input {
   margin-bottom: 24px;
+}
+
+/* v6.7 编程题作答区等宽字体（与作业模块 .code 口径一致） */
+.code-input :deep(textarea) {
+  font-family: Consolas, Monaco, monospace;
 }
 
 .question-footer {

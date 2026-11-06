@@ -88,6 +88,9 @@ const routes = [
       { path: 'learning/graph', name: 'KnowledgeGraph', component: () => import('../views/KnowledgeGraphView.vue'), meta: { module: 'learning' } },
       { path: 'learning/wrong', name: 'WrongNotebook', component: () => import('../views/WrongNotebook.vue'), meta: { module: 'learning' } },
       { path: 'learning/notes', name: 'StudyNotes', component: () => import('../views/StudyNotes.vue'), meta: { module: 'learning' } },
+      // v6.6 代码笔记本（Jupyter 式持久 kernel 工作台）：无 id 为列表，带 id 为编辑/只读
+      { path: 'learning/notebook', name: 'NotebookList', component: () => import('../views/NotebookWorkspace.vue'), meta: { module: 'learning' } },
+      { path: 'learning/notebook/:id', name: 'NotebookDetail', component: () => import('../views/NotebookWorkspace.vue'), meta: { module: 'learning' } },
       { path: 'learning/practice', name: 'PracticeList', component: () => import('../views/PracticeList.vue'), meta: { module: 'learning' } },
       { path: 'learning/practice/:sessionId', name: 'PracticeDetail', component: () => import('../views/PracticeDetail.vue'), meta: { module: 'learning' } },
       { path: 'learning/plan', name: 'StudyPlan', component: () => import('../views/StudyPlan.vue'), meta: { module: 'learning' } },

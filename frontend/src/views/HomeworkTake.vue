@@ -160,6 +160,14 @@
                   :disabled="!editable" placeholder="请输入答案" />
         <div class="q-actions">
           <el-button
+            v-if="q.type === 'programming' && editable"
+            size="small"
+            type="warning"
+            plain
+            :icon="Notebook"
+            @click="openNotebook(q)"
+          >笔记本编程</el-button>
+          <el-button
             size="small"
             type="primary"
             plain
@@ -194,18 +202,25 @@
       <AnnotationCanvas v-if="annDialog && submission" readonly
                         :hw-id="hwId" :sub-id="submission.id" :attachment="attachment" />
     </el-dialog>
+
+    <!-- v6.7 六模块接入：编程题用代码笔记本实验（持久 kernel），验好后「用作作答」回填 -->
+    <el-drawer v-model="nbVisible" size="72%" title="代码笔记本 · 实验完成后点「用作作答」回填" destroy-on-close>
+      <NotebookWorkspace v-if="nbVisible" embedded ctx-type="homework" :ctx-id="hwId"
+                         :ctx-title="'作业笔记本 #' + hwId" answer-mode @use-answer="useNotebookAnswer" />
+    </el-drawer>
   </div>
 </template>
 
 <script setup>
 import { ref, reactive, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Back, ChatLineSquare, ChatDotRound, MagicStick, UserFilled } from '@element-plus/icons-vue'
+import { Back, ChatLineSquare, ChatDotRound, MagicStick, UserFilled, Notebook } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import request from '../utils/request'
 import AiReviewContent from '../components/AiReviewContent.vue'
 import HomeworkDiscussion from '../components/HomeworkDiscussion.vue'
 import AnnotationCanvas from '../components/AnnotationCanvas.vue'
+import NotebookWorkspace from './NotebookWorkspace.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -216,6 +231,19 @@ const LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
 const annDialog = ref(false)
 const canAnnotate = (att) => ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.pdf']
   .includes((att?.ext || '').toLowerCase())
+
+// v6.7 笔记本接入：同一作业复用一个上下文笔记本（后端 get-or-create）
+const nbVisible = ref(false)
+const nbTargetQid = ref(0)
+const openNotebook = (q) => {
+  nbTargetQid.value = q.question_id
+  nbVisible.value = true
+}
+const useNotebookAnswer = (src) => {
+  if (nbTargetQid.value) answers[nbTargetQid.value] = src
+  ElMessage.success('已回填到编程题作答，提交作业前请确认')
+  nbVisible.value = false
+}
 
 const loading = ref(false)
 const savingDraft = ref(false)

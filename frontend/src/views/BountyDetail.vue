@@ -173,6 +173,9 @@
           <template v-else>
             <el-form-item label="答案/解析" required>
               <el-input v-model="form.content" type="textarea" :rows="6" placeholder="请给出完整答案与解析过程" />
+              <!-- v6.7 六模块接入：代码类悬赏可在笔记本实验后回填投稿（附运行结果作证） -->
+              <el-button size="small" type="warning" plain :icon="Notebook" style="margin-top: 6px"
+                         @click="nbVisible = true">用笔记本写代码答案</el-button>
             </el-form-item>
           </template>
           <el-form-item label="匿名投稿">
@@ -241,6 +244,12 @@
     <input ref="attachInput" type="file" style="display: none"
            accept=".pdf,.doc,.docx,.txt,.md,.ppt,.pptx,.xls,.xlsx,.csv,.zip,.rar,.7z,.png,.jpg,.jpeg,.gif,.webp,.mp4,.webm,.py,.java,.c,.cpp,.js,.ts,.html,.css,.sql"
            @change="onAttachPicked" />
+
+    <!-- v6.7 六模块接入：悬赏投稿的代码笔记本（同一悬赏复用一个上下文本） -->
+    <el-drawer v-model="nbVisible" size="72%" title="代码笔记本 · 验好后点「用作作答」回填投稿" destroy-on-close>
+      <NotebookWorkspace v-if="nbVisible" embedded ctx-type="bounty" :ctx-id="route.params.id"
+                         :ctx-title="'悬赏笔记本 #' + route.params.id" answer-mode @use-answer="useNotebookAnswer" />
+    </el-drawer>
   </div>
 </template>
 
@@ -248,9 +257,10 @@
 import { ref, reactive, computed, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { GoldMedal, CircleCheck, Promotion, EditPen, Star, Lock, Warning } from '@element-plus/icons-vue'
+import { GoldMedal, CircleCheck, Promotion, EditPen, Star, Lock, Warning, Notebook } from '@element-plus/icons-vue'
 import request from '../utils/request'
 import { useAuthStore } from '../stores/auth'
+import NotebookWorkspace from './NotebookWorkspace.vue'
 
 const route = useRoute()
 const auth = useAuthStore()
@@ -280,6 +290,14 @@ const form = reactive({
   q_type: 'single_choice', q_difficulty: 'medium', q_knowledge: '',
   content: '', is_anonymous: false,
 })
+
+// v6.7 笔记本接入：代码单元回填投稿正文（追加式，保留已写文字）
+const nbVisible = ref(false)
+const useNotebookAnswer = (src) => {
+  form.content = (form.content ? form.content.trimEnd() + '\n\n' : '') + src
+  ElMessage.success('已回填到投稿正文，可继续补充解析')
+  nbVisible.value = false
+}
 const editForm = reactive({ title: '', description: '', tags: '', max_accepts: 1, deadline: '' })
 
 const statusText = (s) => ({ open: '征集中', closed: '已采纳', expired: '已过期', cancelled: '已关闭' }[s] || s)

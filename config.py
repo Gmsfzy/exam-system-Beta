@@ -161,3 +161,19 @@ class Config:
         _rl_redis_default if _redis_explicit else 'memory://')
     RATE_LIMIT_DEFAULT = os.getenv('RATE_LIMIT_DEFAULT', '60 per minute')
     RATE_LIMIT_HEADERS_ENABLED = True
+
+    # ── v6.6 代码笔记本（Notebook）kernel 执行后端 ──
+    # 后端选择：
+    #   auto       : 检测到 docker 则用容器隔离，否则降级子进程（防呆级）。默认。
+    #   docker     : 强制容器隔离（需 Docker 主机 + 预装 numpy/pandas/matplotlib 的镜像），
+    #                未装 docker 时自动降级 subprocess 并告警。
+    #   subprocess : 强制本机子进程（-I 隔离解释器 + 最小 env + 临时 cwd + 静态危险模式拒绝）。
+    NOTEBOOK_BACKEND = os.getenv('NOTEBOOK_BACKEND', 'auto').lower()
+    NOTEBOOK_DOCKER_IMAGE = os.getenv('NOTEBOOK_DOCKER_IMAGE', 'python:3.12-slim')
+    # 单 cell 执行超时（秒），超时则强杀并重启 kernel（跨 cell 状态丢失）
+    NOTEBOOK_KERNEL_TIMEOUT = float(os.getenv('NOTEBOOK_KERNEL_TIMEOUT', '30'))
+    # kernel 会话空闲回收阈值（秒）
+    NOTEBOOK_KERNEL_IDLE_TTL = float(os.getenv('NOTEBOOK_KERNEL_IDLE_TTL', '600'))
+    # 单 notebook 最大 cell 数 / 单 cell 最大源码长度
+    NOTEBOOK_MAX_CELLS = int(os.getenv('NOTEBOOK_MAX_CELLS', '200'))
+    NOTEBOOK_MAX_SOURCE = int(os.getenv('NOTEBOOK_MAX_SOURCE', '20000'))

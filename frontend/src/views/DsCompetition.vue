@@ -31,6 +31,8 @@
             <CodeEditor v-model="code" height="340px" :readonly="!joined || comp.status === 'ended'" />
             <div class="run-bar">
               <el-button type="primary" :loading="running" :disabled="!joined || comp.status === 'ended'" @click="runCode">▶ 运行</el-button>
+              <el-button type="warning" plain :icon="Notebook" :disabled="!joined || comp.status === 'ended'"
+                         @click="nbVisible = true">笔记本预研</el-button>
               <el-button type="success" :disabled="!lastRun || !lastRun.has_submission || comp.status !== 'ongoing'" @click="submitFromRun">用运行结果提交</el-button>
               <el-button :disabled="comp.status !== 'ongoing'" @click="$refs.subFile.click()">上传 prediction.csv 提交</el-button>
               <input ref="subFile" type="file" accept=".csv" style="display:none" @change="onPickSubmission" />
@@ -100,6 +102,12 @@
     <el-empty v-else-if="!loading" description="竞赛不存在或未对你开放">
       <el-button type="primary" @click="$router.push('/competitions')">返回竞赛广场</el-button>
     </el-empty>
+
+    <!-- v6.7 六模块接入：DS 备赛用代码笔记本（持久 kernel 探索数据，验好后回填单脚本工作台） -->
+    <el-drawer v-model="nbVisible" size="72%" title="代码笔记本 · 探索完成后点「用作作答」回填工作台" destroy-on-close>
+      <NotebookWorkspace v-if="nbVisible" embedded ctx-type="competition" :ctx-id="compId"
+                         :ctx-title="'竞赛笔记本 #' + compId" answer-mode @use-answer="useNotebookAnswer" />
+    </el-drawer>
   </div>
 </template>
 
@@ -108,9 +116,10 @@ import { ref, reactive, computed, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import request from '../utils/request'
-import { Trophy, Back } from '@element-plus/icons-vue'
+import { Trophy, Back, Notebook } from '@element-plus/icons-vue'
 import { useAuthStore } from '../stores/auth'
 import CodeEditor from '../components/CodeEditor.vue'
+import NotebookWorkspace from './NotebookWorkspace.vue'
 
 const route = useRoute()
 const auth = useAuthStore()
@@ -126,6 +135,14 @@ const code = ref("# 读取训练集，训练你的模型，再把测试预测写
 const running = ref(false)
 const runResult = ref(null)
 const lastRun = ref(null)
+
+// v6.7 笔记本接入：同一场竞赛复用一个上下文笔记本，回填单脚本工作台
+const nbVisible = ref(false)
+const useNotebookAnswer = (src) => {
+  code.value = src
+  ElMessage.success('已回填到在线工作台，运行后可提交')
+  nbVisible.value = false
+}
 
 const isTeacher = computed(() => auth.user?.role === 'teacher')
 const joined = computed(() => !!comp.value?.my_status)
