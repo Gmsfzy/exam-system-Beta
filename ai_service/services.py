@@ -111,7 +111,7 @@ def ai_grade_exam(session, session_id: int):
         correct_ans = (question.answer or '').strip()
 
         # ── v4.7 编程题 OJ 自动评测：有用例时按 AC 通过率判分，不再送 AI/人工；
-        #    无用例或非 Python 语言回落既有主观题链路 ──
+        #    无用例或语言不可评测（工具链缺失/未注册）回落既有主观题链路 ──
         if question.type == QuestionTypeEnum.PROGRAMMING and getattr(question, 'test_cases', None):
             from oj.services import grade as oj_grade
             if not student_ans:
@@ -120,7 +120,21 @@ def ai_grade_exam(session, session_id: int):
                 answer.score = 0
                 answer.oj_verdict = 'CE'
                 continue
-            oj_result = oj_grade(student_ans, 'python', question.test_cases)
+            # ── v7.0 阶段 3 异步评测：开关开启且工具链就绪 → 置 pending 立即返回（暂定 0 分），
+            #    后台队列（oj/queue.py）完成后回填 verdict/分数并重算 Result，口径不变 ──
+            lang = (getattr(question, 'language', None) or 'python').lower()
+            from oj.queue import async_enabled, PENDING
+            if async_enabled():
+                from oj.adapters import get_adapter
+                _adapter = get_adapter(lang)
+                if _adapter is not None and _adapter.available():
+                    answer.needs_manual_grade = False
+                    answer.is_correct = False
+                    answer.score = 0
+                    answer.oj_verdict = None
+                    answer.oj_status = PENDING
+                    continue
+            oj_result = oj_grade(student_ans, lang, question.test_cases)
             if oj_result['supported']:
                 ratio = (oj_result['passed'] / oj_result['total']) if oj_result['total'] else 0.0
                 answer.needs_manual_grade = False

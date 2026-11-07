@@ -462,6 +462,64 @@ def test_practice_oj_http(ctx):
     assert r.get_json()['is_correct'] is False
 
 
+@pytest.mark.skipif(
+    not (__import__('shutil').which('javac') and __import__('shutil').which('java')),
+    reason='需要 JDK（javac/java）本机已装方可实跑多语言判题')
+def test_practice_oj_java_http(ctx):
+    """v6.9 OJ 多语言：Java 编程题交卷→评测往返（AC/WA），question.language 全链贯通。"""
+    from database import db
+    from database.models import Major, Question
+
+    c = ctx['_client']
+    with ctx['_app'].app_context():
+        m3 = Major(name='E2E-Java专业')
+        db.session.add(m3)
+        db.session.flush()
+        q = Question(content='读入 n 输出 n+1', answer='', type='programming',
+                     difficulty='easy', major_id=m3.id, language='java',
+                     test_cases=[{'input': '41', 'expected': '42'},
+                                 {'input': '0', 'expected': '1'}])
+        db.session.add(q)
+        db.session.commit()
+        java_qid, m3_id = q.id, m3.id
+
+    r = c.post('/api/learning/practice/start',
+               json={'major_id': m3_id, 'count': 5}, headers=_auth(ctx['s1']))
+    assert r.status_code == 200, r.get_json()
+    sess_id = r.get_json()['session_id']
+
+    java_ac = ('import java.util.Scanner;\n'
+               'public class Main {\n'
+               '  public static void main(String[] a) {\n'
+               '    Scanner s = new Scanner(System.in);\n'
+               '    System.out.println(s.nextInt() + 1);\n'
+               '  }\n}')
+    r = c.post(f'/api/learning/practice/{sess_id}/answer',
+               json={'question_id': java_qid, 'student_answer': java_ac},
+               headers=_auth(ctx['s1']))
+    assert r.status_code == 200, r.get_json()
+    body = r.get_json()
+    assert body['is_correct'] is True
+    assert body['oj']['verdict'] == 'AC' and body['oj']['passed'] == 2
+
+    # 输出错误 → WA
+    java_wa = java_ac.replace('s.nextInt() + 1', 's.nextInt() + 2')
+    r = c.post(f'/api/learning/practice/{sess_id}/answer',
+               json={'question_id': java_qid, 'student_answer': java_wa},
+               headers=_auth(ctx['s1']))
+    assert r.get_json()['is_correct'] is False
+    assert r.get_json()['oj']['verdict'] == 'WA'
+
+    # 危险代码被 Java 静态黑名单拦截 → SE（不白给分）
+    java_se = java_ac.replace('System.out.println',
+                              'Runtime.getRuntime().exec("cmd"); System.out.println')
+    r = c.post(f'/api/learning/practice/{sess_id}/answer',
+               json={'question_id': java_qid, 'student_answer': java_se},
+               headers=_auth(ctx['s1']))
+    assert r.get_json()['is_correct'] is False
+    assert r.get_json()['oj']['verdict'] == 'SE'
+
+
 # ─────────────────── 数据科学竞赛全链（v4.11）───────────────────
 
 def _upload_ds_file(c, token, cid, role, name, text):

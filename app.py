@@ -1,8 +1,8 @@
-from flask import Flask, jsonify, request, send_from_directory, abort
+from flask import Flask, jsonify, request, send_from_directory, abort, current_app
 from flask_cors import CORS
 from flask_migrate import Migrate
 from sqlalchemy.exc import IntegrityError
-from config import Config
+from config import Config, resolve_engine_options, backend_of, redact_url
 from database import db, bcrypt
 from utils.timeutil import utcnow, aware_min
 import html
@@ -19,6 +19,17 @@ import utils.security as _security
 app = Flask(__name__, static_folder=None, template_folder=None)
 app.config.from_object(Config)
 app.url_map.strict_slashes = False
+
+# 双后端一致性护栏（v7.1）：引擎选项与后端标识必须跟「实际生效 URI」对齐，而不是直接
+# 沿用 Config 类体里探活后定死的值。因为外部（tests/conftest.py、脚本注入环境变量、
+# dotenv 回读覆盖）完全可能只改 SQLALCHEMY_DATABASE_URI 而不重写派生项：
+#   - 把 PG 的 client_encoding 传给 sqlite3 会直接 TypeError；
+#   - healthz / 启动横幅会谎报一个与实际库不符的后端。
+# 故在此统一按已装入 app.config 的真实 URI 重算三个派生项。
+_uri = app.config.get('SQLALCHEMY_DATABASE_URI', '')
+app.config['SQLALCHEMY_ENGINE_OPTIONS'] = resolve_engine_options(_uri)
+app.config['DB_ACTIVE_BACKEND'] = backend_of(_uri)
+app.config['DB_URL_SAFE'] = redact_url(_uri)
 # 全局请求体上限：Flask 在解析前拦截超大上传/请求（413），防止磁盘/内存被灌满
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
 # CORS 白名单与 Socket.IO 统一来自 Config.CORS_ORIGINS（环境变量/开发预置/生产空）
@@ -33,14 +44,41 @@ migrate = Migrate(app, db)
 # synchronous=NORMAL 是 WAL 官方推荐搭配（崩溃不损库，仅断电极端情况可能丢最后一事务）。
 from sqlalchemy import event as _sa_event
 with app.app_context():
-    @_sa_event.listens_for(db.engine, "connect")
-    def _sqlite_wal_pragma(dbapi_conn, _record):
-        _cur = dbapi_conn.cursor()
-        try:
-            _cur.execute("PRAGMA journal_mode=WAL")
-            _cur.execute("PRAGMA synchronous=NORMAL")
-        finally:
-            _cur.close()
+    # WAL/PRAGMA 为 SQLite 专属，PG 下执行会报错，故仅在 sqlite 方言下注册该 connect 监听；
+    # 双后端（DB_BACKEND=auto/postgres/sqlite）下 PG 分支不注册，保持 SQLite 路径原样。
+    if db.engine.dialect.name == 'sqlite':
+        @_sa_event.listens_for(db.engine, "connect")
+        def _sqlite_wal_pragma(dbapi_conn, _record):
+            _cur = dbapi_conn.cursor()
+            try:
+                _cur.execute("PRAGMA journal_mode=WAL")
+                _cur.execute("PRAGMA synchronous=NORMAL")
+            finally:
+                _cur.close()
+
+    # 启动即声明实际生效的数据库后端（v7.1）：auto 档下 PG 探活失败会静默回落 SQLite，
+    # 光看 .env 无法判断真连的是哪个库，故把去密码 URI 打进日志（密码永不出现在日志/响应）。
+    # 取 app.config 而非 Config：上游可能只改了已装入的 URI，这里才是真实生效值。
+    logger.info(f"[db] 生效后端={app.config['DB_ACTIVE_BACKEND']} "
+                f"url={app.config['DB_URL_SAFE']} "
+                f"(DB_BACKEND={app.config.get('DB_BACKEND')})")
+    # 离线交付模式（v7.5）：这台机器没 PG，拿项目内镜像当主库在跑。
+    # 必须说在明处：否则老师以为自己在用主库，写了一个星期才知道要归并。
+    if app.config.get('DB_OFFLINE_MODE'):
+        logger.warning(f"[db] 离线交付模式：{app.config.get('DB_OFFLINE_REASON')}；"
+                       f"当前写入落在本地 SQLite，回有 PG 的机器后用 "
+                       f"python scripts/offline_merge.py --export / --apply 归并")
+
+# v7.6 便携 Redis：这台机器没装 Redis/Memurai 时，用项目内 tools/redis/ 的 redis-server 顶上
+# （像 tools/mingw64 那样随项目拷走）。必须跑在 init_redis() 之前：它可能改掉生效的
+# host/port，而 redis_cache 与 init_security 读的都是 Config 类属性，顺序反了就连旧端口。
+# 整段包在 try 里：这一层永远不许成为服务起不来的理由——找不到二进制/端口被占/进程秒退
+# 都只记一条日志，后续按原有 auto 链降级 fakeredis 或 DB 穿透（与 PG 的拒起策略刻意相反）。
+try:
+    from utils.redis_portable import apply_runtime
+    apply_runtime(app)
+except Exception as _e:
+    logger.warning(f'便携 Redis 探测异常（忽略，按原配置降级）: {_e}')
 
 init_redis()
 try:
@@ -180,7 +218,11 @@ def healthz():
     仅返回关键依赖的可达性状态，不查库（数据库 ping 由更深层探针处理）：
     - ok          : 服务整体健康，可接受流量
     - db_ok       : SQLAlchemy engine 能执行 SELECT 1
+    - db_backend  : 实际生效的数据库方言（sqlite/postgresql）
+    - db_url      : 去密码的连接串（判断到底连的哪个库，不含密码）
+    - db_error    : db_ok=false 时的可读原因（服务端 GBK 消息已解码）
     - redis       : 缓存层连接状态（None=未配置，True=可达，False=不可达）
+    - redis_runtime : v7.6 便携 Redis 本轮做了什么（reused/spawned/none + 生效端口）
     - socketio    : 实时推送是否已启用
     - scheduler   : 后台调度线程是否存活
     - spa_hosting : 前端托管开关
@@ -190,11 +232,16 @@ def healthz():
 
     # DB 轻量探针：SELECT 1，不触发 ORM session 初始化
     db_ok = True
+    db_error = None
     try:
         with db.engine.connect() as conn:
             conn.execute(db.text('SELECT 1'))
     except Exception as e:
         db_ok = False
+        # 中文 Windows 上 PG 服务端消息可能以 GBK 下发并抛 UnicodeDecodeError，
+        # 直接 str(e) 会把真实原因吞掉，故走同一个解码口径
+        from config import _decode_server_message
+        db_error = _decode_server_message(e)
 
     # 缓存后端类型（None=完全未启用，'real'=真实 Redis 服务，'fake'=Fakeredis）
     # 不再只给布尔值，生产部署时能一眼看出是哪种后端
@@ -217,13 +264,35 @@ def healthz():
     payload = {
         'ok': db_ok,                       # 以 DB 可达性为准的核心健康
         'db_ok': db_ok,
+        'db_backend': current_app.config.get('DB_ACTIVE_BACKEND', Config.DB_ACTIVE_BACKEND),
+        'db_url': current_app.config.get('DB_URL_SAFE', Config.DB_URL_SAFE),  # 去密码展示串
         'redis': redis_status,             # None=未配置
+        # v7.6：这台机器上的 Redis 是复用的还是项目内自己拉起来的、生效在哪个端口。
+        # 换设备排查时第一眼要能看出这个（不含密码）。
+        'redis_runtime': current_app.config.get('REDIS_RUNTIME'),
         'socketio': socketio_alive,
         'scheduler': scheduler_alive,
         'spa_hosting': Config.ENABLE_SPA_HOSTING,
         'app_dir': Config.APP_DIR,
         'frozen': getattr(sys, 'frozen', False),
     }
+    # v7.4：PG→SQLite 镜像实时同步状态（主库为 SQLite 时只报 enabled=false+原因）
+    from utils.sqlite_mirror import mirror_status
+    payload['sqlite_mirror'] = mirror_status()
+    # v7.5：离线交付模式与基线快照状态。只报文件存在性（healthz 要廉价，不跑 diff）
+    if current_app.config.get('DB_OFFLINE_MODE'):
+        from utils.offline_patch import baseline_path
+        bp = baseline_path(current_app.config['OFFLINE_PATCH_DIR'])
+        payload['offline'] = {
+            'mode': True,
+            'reason': current_app.config.get('DB_OFFLINE_REASON', ''),
+            'baseline': os.path.basename(bp) if os.path.isfile(bp) else None,
+            'baseline_size': os.path.getsize(bp) if os.path.isfile(bp) else None,
+            'hint': '写出变更后用 python scripts/offline_merge.py --export 打补丁，'
+                    '拷回有 PG 的机器后 --apply 归并',
+        }
+    if db_error:
+        payload['db_error'] = db_error
     status_code = 200 if db_ok else 503
     return jsonify(payload), status_code
 
@@ -588,6 +657,29 @@ _boot_lock = threading.Lock()
 _boot_done = threading.Event()
 
 
+def _capture_offline_baseline():
+    """离线机第一次启动时记下基线快照，供回本机后导出「老师侧改了什么」。
+
+    已存在则不动（见 capture_baseline 的说明）：每次启动重抓会把上一个离线周期的
+    劳动当成基线本身，导出时永远看不见。
+
+    失败不影响启动：基线只关系事后能不能归并，不该让页面因此起不来。
+    """
+    if not app.config.get('DB_OFFLINE_MODE') or \
+            not app.config.get('OFFLINE_BASELINE_ON_START', True):
+        return None
+    from utils.offline_patch import capture_baseline
+    try:
+        dst, created = capture_baseline(
+            str(db.engine.url.database), app.config['OFFLINE_PATCH_DIR'])
+        if created:
+            logger.info(f'[offline] 已抓离线基线快照：{dst}（本次离线周期的起点）')
+        return dst
+    except Exception as e:
+        logger.warning(f'[offline] 基线快照失败（不影响使用，仅影响事后归并）: {e}')
+        return None
+
+
 def bootstrap_app():
     """幂等启动装配：init_database + 调度线程；失败不置位，下个请求重试。"""
     if _boot_done.is_set():
@@ -595,9 +687,24 @@ def bootstrap_app():
     with _boot_lock:
         if _boot_done.is_set():
             return
+        # v7.4：镜像事件先于任何写操作挂上（init_database 自身也会提交，如课程学分
+        # 自动填充），register_events 幂等且不依赖应用上下文；主库为 SQLite 时
+        # mirror_enabled() 直接为 False，整条链路空转，原有部署行为不变。
+        from utils import sqlite_mirror
+        sqlite_mirror.register_events()
         init_database()
+        # 基线必须在 init_database 之后抓：启动自身会提交（机器人账号、学分补齐），
+        # 那些写在 PG 侧早就存在，当成「老师侧新增」归并回去只会撞主键
+        with app.app_context():
+            _capture_offline_baseline()
         from utils.scheduler import start_scheduler
         start_scheduler(app, interval=60)
+        # v7.0 阶段 3：OJ 异步评测后台线程（幂等；开关 OJ_ASYNC_GRADING 关闭时空转不处理）
+        from oj.queue import start_queue
+        start_queue(app, interval=getattr(Config, 'OJ_QUEUE_INTERVAL', 5.0))
+        # 首次启动把 PG 存量数据整库铺进 SQLite 镜像（已齐备则不动，不反复重刷）
+        with app.app_context():
+            sqlite_mirror.ensure_bootstrap()
         _boot_done.set()
 
 

@@ -85,7 +85,8 @@ class TestGrade:
         assert r['verdict'] == 'SE'
 
     def test_unsupported_language_or_no_cases(self):
-        assert oj_services.grade('x', 'java', [{'input': '', 'expected': ''}])['supported'] is False
+        # 未注册语言（非适配器表成员）→ supported=False；java 已于 v6.9 注册故不再用它做反例
+        assert oj_services.grade('x', 'ruby', [{'input': '', 'expected': ''}])['supported'] is False
         assert oj_services.grade('x', 'python', [])['supported'] is False
         assert oj_services.grade('x', 'python', None)['supported'] is False
 

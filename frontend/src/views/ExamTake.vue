@@ -54,6 +54,7 @@
         <div class="question-header">
           <div class="question-meta">
             <span class="badge-type" :class="currentQuestion.type">{{ typeLabels[currentQuestion.type] }}</span>
+            <span v-if="currentQuestion.type === 'programming'" class="badge-lang">{{ languageLabel(currentQuestion.language) }}</span>
             <span class="badge-diff" :class="currentQuestion.difficulty">{{ diffLabels[currentQuestion.difficulty] }}</span>
           </div>
           <span class="question-number">第 {{ currentIndex + 1 }} / {{ questions.length }} 题</span>
@@ -188,7 +189,7 @@ const useNotebookAnswer = (src) => {
 }
 
 // v4.6.1 枚举收敛：题型/难度单一来源 frontend/src/utils/enums.js
-import { QUESTION_TYPE_LABELS, DIFFICULTY_LABELS } from '../utils/enums'
+import { QUESTION_TYPE_LABELS, DIFFICULTY_LABELS, languageLabel } from '../utils/enums'
 
 const typeLabels = QUESTION_TYPE_LABELS
 
@@ -389,8 +390,12 @@ const confirmSubmit = async () => {
   try {
     await request.post(`/api/exam/${route.params.examId}/submit`, {
       session_id: sessionId.value
+    }).then(res => {
+      // v7.0 阶段 3：编程题已转后台异步评测时给出明确预期（完成后铃铛/Socket 通知）
+      ElMessage.success(res.data?.oj_pending
+        ? '提交成功！编程题已加入后台评测队列，完成后成绩自动更新'
+        : '提交成功！')
     })
-    ElMessage.success('提交成功！')
     setTimeout(() => {
       router.push('/')
     }, 1500)
@@ -594,7 +599,7 @@ const confirmSubmit = async () => {
   gap: 10px;
 }
 
-.badge-type, .badge-diff {
+.badge-type, .badge-lang, .badge-diff {
   padding: 4px 12px;
   border-radius: 20px;
   font-size: 12px;
@@ -604,6 +609,11 @@ const confirmSubmit = async () => {
 .badge-type {
   background: #e0e7ff;
   color: #6366f1;
+}
+
+.badge-lang {
+  background: #fef3c7;
+  color: #b45309;
 }
 
 .badge-diff.easy {
@@ -770,6 +780,11 @@ const confirmSubmit = async () => {
 .dark .badge-type {
   background: rgba(99, 102, 241, 0.2);
   color: #a5b4fc;
+}
+
+.dark .badge-lang {
+  background: rgba(245, 158, 11, 0.2);
+  color: #fbbf24;
 }
 
 .dark .badge-diff.easy {

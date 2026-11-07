@@ -60,7 +60,7 @@ def grade_submission(hw, sub):
                 a.oj_verdict, a.is_correct, a.auto_score = 'CE', False, 0.0
             else:
                 from oj.services import grade as oj_grade
-                r = oj_grade(text, 'python', q.test_cases)
+                r = oj_grade(text, getattr(q, 'language', None) or 'python', q.test_cases)
                 if r['supported']:
                     ratio = (r['passed'] / r['total']) if r['total'] else 0.0
                     a.oj_verdict = r['verdict']

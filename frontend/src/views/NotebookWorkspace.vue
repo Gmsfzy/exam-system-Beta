@@ -10,6 +10,8 @@
             <el-radio-button label="public">公开</el-radio-button>
           </el-radio-group>
           <el-button type="primary" style="margin-left: 12px" :icon="Plus" @click="createVisible = true">新建笔记本</el-button>
+          <el-button style="margin-left: 8px" :icon="Upload" :loading="importing" @click="triggerImport">导入 .ipynb</el-button>
+          <input ref="importInput" type="file" accept=".ipynb,application/json" style="display: none" @change="onImportFile" />
         </div>
       </div>
       <el-alert type="info" :closable="false" show-icon style="margin-bottom: 14px"
@@ -65,6 +67,7 @@
           {{ meta.backend === 'docker' ? '容器隔离' : '本机防呆级' }}
         </el-tag>
         <span class="nb-spacer"></span>
+        <el-button size="small" :icon="Download" @click="exportIpynb">导出 .ipynb</el-button>
         <template v-if="!readonly">
           <el-button size="small" :icon="Plus" @click="addCell('code')">代码单元</el-button>
           <el-button size="small" :icon="DocumentAdd" @click="addCell('markdown')">Markdown 单元</el-button>
@@ -77,7 +80,7 @@
 
       <NotebookCell v-for="(c, i) in cells" :key="c.id" :cell="c" :index="i" :total="cells.length"
                     :running="runningId === c.id" :answer-mode="answerMode" @run="runCell" @delete="deleteCell"
-                    @use-answer="(src) => emit('use-answer', src)"
+                    @use-answer="(src) => emit('use-answer', src)" @interrupt="stopCell"
                     @move-up="moveCell($event, -1)" @move-down="moveCell($event, 1)" />
       <el-empty v-if="!cells.length" description="还没有单元，点上方按钮添加" />
     </template>
@@ -93,7 +96,7 @@
 import { ref, reactive, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, Delete, Back, VideoPlay, RefreshLeft, Checked, DocumentAdd, CopyDocument } from '@element-plus/icons-vue'
+import { Plus, Delete, Back, VideoPlay, RefreshLeft, Checked, DocumentAdd, CopyDocument, Upload, Download } from '@element-plus/icons-vue'
 import request from '../utils/request'
 import NotebookCell from '../components/NotebookCell.vue'
 import { useAuthStore } from '../stores/auth'
@@ -118,6 +121,9 @@ const list = ref([])
 const createVisible = ref(false)
 const creating = ref(false)
 const form = reactive({ title: '', description: '', visibility: 'private' })
+// v6.9 阶段 4：.ipynb 导入/导出
+const importing = ref(false)
+const importInput = ref(null)
 
 const notebook = ref(null)
 const cells = ref([])
@@ -156,6 +162,42 @@ const forkNotebook = async (nb) => {
   const { data } = await request.post(`/notebooks/${nb.id}/fork`)
   ElMessage.success('已 fork 为我的副本')
   router.push(`/learning/notebook/${data.id}`)
+}
+
+// v6.9 阶段 4：上传 .ipynb 导入为本人的可编辑笔记本
+const triggerImport = () => importInput.value && importInput.value.click()
+const onImportFile = async (ev) => {
+  const file = ev.target.files && ev.target.files[0]
+  if (!file) return
+  importing.value = true
+  try {
+    const fd = new FormData()
+    fd.append('file', file)
+    const { data } = await request.post('/notebooks/import', fd, {
+      headers: { 'Content-Type': 'multipart/form-data' }, timeout: 60000,
+    })
+    ElMessage.success(`已导入「${data.title}」（${(data.cells || []).length} 个单元）`)
+    router.push(`/learning/notebook/${data.id}`)
+  } catch (e) { /* 拦截器已提示 */ } finally {
+    importing.value = false
+    ev.target.value = ''   // 允许重复导入同一文件
+  }
+}
+
+// v6.9 阶段 4：导出当前笔记本为 .ipynb（本人或公开只读本均可）
+const exportIpynb = async () => {
+  if (!notebook.value) return
+  try {
+    const resp = await request.get(`/notebooks/${notebook.value.id}/export`, { responseType: 'blob' })
+    const url = window.URL.createObjectURL(new Blob([resp.data]))
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `${(notebook.value.title || 'notebook').replace(/[\\/:*?"<>|]+/g, '_')}.ipynb`
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    window.URL.revokeObjectURL(url)
+  } catch (e) { /* 拦截器已提示 */ }
 }
 
 // ── 打开 / 路由同步 ─────────────────────────────────────────
@@ -237,6 +279,15 @@ const runCell = async (cell) => {
     if (data.timed_out) ElMessage.warning('执行超时，kernel 已重启（跨单元状态丢失）')
     if (data.backend && data.backend !== meta.backend) meta.backend = data.backend
   } catch (e) { /* 拦截器已提示 */ } finally { runningId.value = 0 }
+}
+
+// v6.9 阶段 5：「停止」向持久 kernel 下发软中断（纯 Python 计算可打断；卡在 C 调用则由 runCell 超时兑底）
+// 与 runCell 阻塞等待响应并发，故不持前端锁，fire-and-forget，失败静默（拦截器已提示）
+const stopCell = async () => {
+  if (!notebook.value) return
+  try {
+    await request.post(`/notebooks/${notebook.value.id}/kernel/interrupt`)
+  } catch (e) { /* 拦截器已提示 */ }
 }
 
 const runAll = async () => {

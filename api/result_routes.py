@@ -179,6 +179,7 @@ def api_result_detail(result_id):
                 'manual_comment': ans.manual_comment,
                 'needs_manual_grade': ans.needs_manual_grade,
                 'oj_verdict': ans.oj_verdict,
+                'oj_status': ans.oj_status,          # v7.0 异步评测态 pending/grading/done/failed（同步链路 None）
                 'analysis': q.analysis if answers_released else ''
             })
         else:
@@ -195,6 +196,7 @@ def api_result_detail(result_id):
                 'manual_comment': ans.manual_comment,
                 'needs_manual_grade': ans.needs_manual_grade,
                 'oj_verdict': ans.oj_verdict,
+                'oj_status': ans.oj_status,
                 'analysis': ''
             })
 
@@ -294,6 +296,7 @@ def api_grading_detail(exam_id, student_id):
                 'manual_comment': ans.manual_comment,
                 'needs_manual_grade': ans.needs_manual_grade,
                 'oj_verdict': ans.oj_verdict,
+                'oj_status': ans.oj_status,
                 'score_weight': eq.score if eq else 0
             })
         

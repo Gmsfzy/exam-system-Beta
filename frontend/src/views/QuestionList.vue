@@ -393,6 +393,12 @@
         <!-- v4.7 编程题 OJ：配置 stdin/stdout 用例后交卷自动评测，不送 AI/人工 -->
         <el-form-item v-if="form.type === 'programming'" label="OJ 用例">
           <div style="width: 100%">
+            <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 10px">
+              <span style="font-size: 13px; color: #606266">判题语言</span>
+              <el-select v-model="form.language" size="small" style="width: 160px">
+                <el-option v-for="l in ojLanguages" :key="l.value" :label="l.label" :value="l.value" />
+              </el-select>
+            </div>
             <div v-for="(c, i) in ojCases" :key="i" style="display: flex; gap: 8px; margin-bottom: 8px; align-items: flex-start">
               <el-input v-model="c.input" type="textarea" :rows="2" placeholder="标准输入（stdin）" style="flex: 1" />
               <el-input v-model="c.expected" type="textarea" :rows="2" placeholder="预期输出（stdout）" style="flex: 1" />
@@ -401,7 +407,7 @@
             <el-button size="small" @click="ojCases.push({ input: '', expected: '' })">+ 添加用例</el-button>
             <el-button v-if="isEdit" size="small" type="primary" :loading="ojRunning" @click="runOjTrial">用当前答案试跑</el-button>
             <span v-if="ojResult" style="margin-left: 8px; font-size: 12px">{{ ojResult }}</span>
-            <div style="font-size: 12px; color: #909399; margin-top: 4px">Python 代码；每用例限时 5 秒。无用例时回落 AI/人工评分</div>
+            <div style="font-size: 12px; color: #909399; margin-top: 4px">{{ languageHintText }}；每用例限时 5 秒。无用例时回落 AI/人工评分</div>
           </div>
         </el-form-item>
 
@@ -645,13 +651,28 @@ const handleTypeChange = () => {
 const form = ref({
   id: null, content: '', type: 'single_choice', difficulty: 'medium',
   major_id: '', course_id: '', options: '', answer: '', analysis: '', source: 'manual',
-  material: '', material_group: '', tags: []
+  material: '', material_group: '', tags: [], language: 'python'
 })
 
 // v4.7 编程题 OJ 用例编辑态
 const ojCases = ref([])
 const ojRunning = ref(false)
 const ojResult = ref('')
+// v6.9 OJ 多语言：与后端适配器注册表对齐（阶段 2 追加 c/cpp）
+const ojLanguages = [
+  { value: 'python', label: 'Python', hint: 'Python 代码' },
+  { value: 'java', label: 'Java', hint: 'Java 代码（public class Main）' },
+  { value: 'javascript', label: 'JavaScript', hint: 'JavaScript 代码（Node）' },
+  { value: 'c', label: 'C', hint: 'C 代码（main.c）' },
+  { value: 'cpp', label: 'C++', hint: 'C++ 代码（main.cpp）' },
+  { value: 'asm', label: 'x86-64 汇编', hint: 'NASM win64（入口 global main，仅 Windows+MinGW 自动判题，否则回落人工）' },
+  { value: 'sql', label: 'SQL', hint: 'SQLite 内存实例（用例 input=建表/种子 SQL，expected=结果集文本，列以空格分隔）' },
+  { value: 'avr', label: 'AVR 单片机', hint: 'avr-gcc+simavr（支持 C/汇编/Intel HEX 三形态；需装工具链并开 OJ_AVR_ENABLED，否则回落人工）' },
+]
+const languageHintText = computed(() => {
+  const l = ojLanguages.find(x => x.value === (form.value.language || 'python'))
+  return l ? l.hint : '代码'
+})
 const syncOjCases = (q) => {
   ojCases.value = Array.isArray(q?.test_cases) ? q.test_cases.map(c => ({ input: c.input || '', expected: c.expected || '' })) : []
   ojResult.value = ''
@@ -661,7 +682,7 @@ const runOjTrial = async () => {
   ojRunning.value = true
   ojResult.value = ''
   try {
-    const res = await request.post(`/api/questions/${form.value.id}/oj_run`, { code: form.value.answer })
+    const res = await request.post(`/api/questions/${form.value.id}/oj_run`, { code: form.value.answer, language: form.value.language })
     const d = res.data
     ojResult.value = d.supported ? `${d.verdict}：通过 ${d.passed}/${d.total} 用例` : '未返回评测结果'
   } catch (e) {
@@ -727,7 +748,7 @@ const fetchCourses = async () => {
 
 const openAddDialog = () => {
   isEdit.value = false
-  form.value = { id: null, content: '', type: 'single_choice', difficulty: 'medium', major_id: majors.value[0]?.id || '', course_id: '', options: '', answer: '', analysis: '', source: 'manual', is_public: false, tags: [], material: '', material_group: '' }
+  form.value = { id: null, content: '', type: 'single_choice', difficulty: 'medium', major_id: majors.value[0]?.id || '', course_id: '', options: '', answer: '', analysis: '', source: 'manual', is_public: false, tags: [], material: '', material_group: '', language: 'python' }
   optionList.value = ['', '', '', '']
   uploadedFiles.value = []
   syncOjCases(null)

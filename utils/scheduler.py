@@ -27,6 +27,7 @@ def _run(app):
             homework_expiry_tick, homework_series_tick, peer_review_deadline_tick,
         )
         from utils.backup import database_backup_tick
+        from utils.sqlite_mirror import sqlite_mirror_tick
 
         while not _stop_event.is_set():
             # 各任务独立 try/except，单点失败不阻塞其余任务
@@ -41,6 +42,7 @@ def _run(app):
                 ('homework_series_tick', homework_series_tick),
                 ('peer_review_deadline_tick', peer_review_deadline_tick),
                 ('database_backup_tick', database_backup_tick),
+                ('sqlite_mirror_tick', sqlite_mirror_tick),
             ):
                 try:
                     task()

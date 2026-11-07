@@ -37,3 +37,25 @@ export const OPTION_TYPES = ['single_choice', 'multiple_choice']
 export const typeLabel = (t) => QUESTION_TYPE_LABELS[t] || t || ''
 export const difficultyLabel = (d) => DIFFICULTY_LABELS[d] || d || ''
 export const hasOptions = (t) => OPTION_TYPES.includes(t)
+
+/**
+ * v6.9 OJ 判题语言单一来源，与后端 oj/adapters/__init__.py 注册表一一对应：
+ * 新增语言（如阶段 2 的 c/cpp）时两侧同步修改。
+ * Monaco 语言 id 与 value 同名（python/java/javascript/c/cpp），直接用于编辑器高亮。
+ */
+export const OJ_LANGUAGE_LABELS = {
+  python: 'Python',
+  java: 'Java',
+  javascript: 'JavaScript',
+  c: 'C',
+  cpp: 'C++',
+  asm: 'x86-64 汇编',
+  sql: 'SQL',
+  avr: 'AVR 单片机',
+}
+
+/** 下拉选项（题目用例编辑器用），顺序与后端 adapter 注册表一致 */
+export const OJ_LANGUAGE_OPTIONS = ['python', 'java', 'javascript', 'c', 'cpp', 'asm', 'sql', 'avr']
+  .map(value => ({ value, label: OJ_LANGUAGE_LABELS[value] }))
+
+export const languageLabel = (l) => OJ_LANGUAGE_LABELS[l] || l || 'Python'

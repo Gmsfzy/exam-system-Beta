@@ -8,6 +8,9 @@ SQLAlchemy==2.0.52
 Flask-Migrate==4.1.0
 alembic==1.19.2
 
+# ── 数据库驱动（PostgreSQL 后端；DB_BACKEND=auto 回落 SQLite 时装了也无害）──
+psycopg2-binary==2.9.10
+
 # ── 认证 & 密码 ──
 Flask-Bcrypt==1.0.1
 bcrypt==5.0.0
@@ -25,6 +28,8 @@ Flask-Limiter==4.1.1
 # ── 配置 & 缓存 ──
 python-dotenv==1.2.3
 redis==5.3.1
+# 缓存降级档（REDIS_BACKEND=auto：真实 Redis → Fakeredis → DB 穿透）；纯 Python 无服务进程，装了也无害
+fakeredis==2.40.0
 
 # ── 文档处理（题库导入导出）──
 openpyxl==3.1.5
@@ -46,3 +51,12 @@ websocket-client==1.9.2
 
 # 开发模式（FLASK_DEBUG=true）仍用 Werkzeug，不受影响
 waitress==3.0.2
+
+# ── 可选后端依赖（默认不启用，装上即解锁对应 NOTEBOOK_BACKEND 档）──
+# NOTEBOOK_BACKEND=ipython（v7.0 阶段 6 真·Jupyter kernel）：ipykernel + jupyter_client(+pyzmq)；
+# 未安装时显式指定 ipython 也会自动降级 subprocess 并告警，故不入硬依赖。
+# ipykernel==7.1.0
+# jupyter_client==8.6.3
+# pyzmq==27.1.0
+# Notebook 画图 cell 出图（subprocess/ipython 后端的 image/png 展示）：
+# matplotlib==3.11.2

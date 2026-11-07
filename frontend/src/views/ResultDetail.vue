@@ -64,6 +64,7 @@
           <span class="question-number">第 {{ index + 1 }} 题</span>
           <span class="badge-type">{{ typeLabels[answer.type] }}</span>
           <span v-if="answer.oj_verdict" class="badge-oj" :class="{ ac: answer.oj_verdict === 'AC' }">OJ {{ answer.oj_verdict }}</span>
+          <span v-else-if="isOjPending(answer)" class="badge-oj grading">OJ 评测中…</span>
           <span v-if="answer.is_correct" class="badge-result correct">
             <el-icon><Check /></el-icon>正确
           </span>
@@ -120,7 +121,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { InfoFilled, Check, Close, Minus, Clock, ChatDotRound } from '@element-plus/icons-vue'
@@ -146,7 +147,25 @@ const typeLabels = QUESTION_TYPE_LABELS
 onMounted(async () => {
   const resultId = parseInt(route.params.id)
   await loadResult(resultId)
+  startOjPolling(resultId)
 })
+
+// v7.0 阶段 3：异步评测轮询 —— 存在 pending/grading 作答时每 3s 重拉详情，直到全部出 verdict
+const isOjPending = (answer) => answer.oj_status === 'pending' || answer.oj_status === 'grading'
+let ojTimer = null
+const startOjPolling = (id) => {
+  if (!resultData.value.answers?.some(isOjPending)) return
+  let ticks = 0
+  ojTimer = setInterval(async () => {
+    if (++ticks > 60) { clearInterval(ojTimer); ojTimer = null; return }
+    await loadResult(id)
+    if (!resultData.value.answers?.some(isOjPending)) {
+      clearInterval(ojTimer); ojTimer = null
+      ElMessage.success('编程题评测已完成，成绩已更新')
+    }
+  }, 3000)
+}
+onBeforeUnmount(() => { if (ojTimer) clearInterval(ojTimer) })
 
 const loadResult = async (id) => {
   try {
@@ -345,6 +364,15 @@ const submitReview = async () => {
 .badge-oj.ac {
   background: #dcfce7;
   color: #16a34a;
+}
+
+.badge-oj.grading {
+  animation: oj-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes oj-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
 }
 
 .badge-result {

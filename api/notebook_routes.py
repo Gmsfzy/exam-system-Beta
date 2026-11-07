@@ -8,7 +8,9 @@
 全民可用（不分教师/学生），仅校验登录；notebook 归属本人，public 仅放宽只读可见。
 执行后端由 utils.kernel 可插拔解析（docker 优先、无则降级 subprocess 防呆级）。
 """
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, Response
+import json
+import re
 
 from database import db
 from database.models import (Notebook, NotebookCell, CELL_TYPE_LABELS,
@@ -16,7 +18,8 @@ from database.models import (Notebook, NotebookCell, CELL_TYPE_LABELS,
 from utils.security import limiter, verify_token
 from utils.timeutil import utcnow
 from utils.logger import logger
-from utils.kernel import kernel_manager, run_cell, resolve_backend
+from utils.kernel import kernel_manager, run_cell, resolve_backend, interrupt_cell
+from utils.ipynb import notebook_to_ipynb, ipynb_to_cells
 from config import Config
 
 api_notebook_bp = Blueprint('api_notebook', __name__)
@@ -145,6 +148,81 @@ def api_notebook_delete(nid):
     db.session.delete(nb)
     db.session.commit()
     return jsonify({'message': '已删除'})
+
+
+# ── v6.9 阶段 4：.ipynb 导入 / 导出（与 Jupyter 文件互通）───────────
+def _safe_filename(title):
+    """由标题生成安全文件名（去 Windows/类 Unix 非法字符，回退 notebook）。"""
+    name = re.sub(r'[\\/:*?"<>|\r\n]+', '_', (title or '').strip()) or 'notebook'
+    return name[:80]
+
+
+@api_notebook_bp.route('/notebooks/import', methods=['POST'])
+@limiter.limit('20 per minute')
+def api_notebook_import():
+    """上传 .ipynb → 为本用户建 notebook + 有序 cells（输出快照一并导入，不重跑 kernel）。
+
+    接受 multipart 文件字段 file，或 JSON 体 {nb: {...}} / 原始 ipynb JSON。"""
+    user = _cur_user()
+    if not user:
+        return jsonify({'message': '请先登录'}), 401
+    nb_json = None
+    title = None
+    f = request.files.get('file')
+    if f is not None and f.filename:
+        title = re.sub(r'\.ipynb$', '', f.filename, flags=re.I)
+        try:
+            nb_json = json.loads(f.read().decode('utf-8'))
+        except (UnicodeDecodeError, ValueError):
+            return jsonify({'message': '.ipynb 解析失败：非合法 UTF-8 JSON'}), 400
+    else:
+        data = request.get_json(silent=True)
+        if isinstance(data, dict) and 'cells' in data:
+            nb_json = data
+        elif isinstance(data, dict) and isinstance(data.get('nb'), dict):
+            nb_json = data['nb']
+            title = data.get('title')
+    if nb_json is None:
+        return jsonify({'message': '请上传 .ipynb 文件'}), 400
+
+    try:
+        language, cells = ipynb_to_cells(nb_json, max_cells=Config.NOTEBOOK_MAX_CELLS,
+                                         max_source=Config.NOTEBOOK_MAX_SOURCE)
+    except ValueError as e:
+        return jsonify({'message': str(e)}), 400
+    if not cells:
+        return jsonify({'message': '.ipynb 无有效单元'}), 400
+
+    # 本系统 notebook 当前仅支持 python 内核，非 python 仍按 python 建本（源码原样保留）
+    nb = Notebook(user_id=user.id, title=(title or '导入的笔记本')[:120],
+                  language='python', visibility='private')
+    db.session.add(nb)
+    db.session.flush()
+    for i, c in enumerate(cells, start=1):
+        db.session.add(NotebookCell(notebook_id=nb.id, order_num=i, cell_type=c['cell_type'],
+                                    source=c['source'], language='python', outputs=c['outputs']))
+    db.session.commit()
+    return jsonify(nb.to_dict(with_cells=True)), 201
+
+
+@api_notebook_bp.route('/notebooks/<int:nid>/export', methods=['GET'])
+def api_notebook_export(nid):
+    """导出 notebook 为 .ipynb 下载（权限同 detail：本人或公开本）。"""
+    user = _cur_user()
+    if not user:
+        return jsonify({'message': '请先登录'}), 401
+    nb = Notebook.query.get(nid)
+    if not nb:
+        return jsonify({'message': '笔记本不存在'}), 404
+    if nb.user_id != user.id and nb.visibility != 'public':
+        return jsonify({'message': '无权查看该笔记本'}), 403
+    ipynb = notebook_to_ipynb(nb.to_dict(with_cells=True), language=nb.language)
+    body = json.dumps(ipynb, ensure_ascii=False, indent=1)
+    fname = _safe_filename(nb.title) + '.ipynb'
+    from urllib.parse import quote
+    resp = Response(body, mimetype='application/x-ipynb+json')
+    resp.headers['Content-Disposition'] = f"attachment; filename*=UTF-8''{quote(fname)}"
+    return resp
 
 
 # ── v6.7 六模块接入：上下文笔记本 get-or-create ───────────────────
@@ -293,6 +371,17 @@ def api_cell_run(nid, cid):
         outputs.append({'output_type': 'stream', 'name': 'stderr', 'text': res['stderr']})
     if res.get('error'):
         outputs.append({'output_type': 'error', 'traceback': res['error']})
+    # v6.9 阶段 5：display() 多 mime bundle → 逐条 display_data（与 execute_result 同构）
+    for bundle in (res.get('displays') or []):
+        mime = ('image/png' if bundle.get('image/png')
+                else 'text/html' if bundle.get('text/html') else 'text/plain')
+        data = bundle.get(mime)
+        if mime == 'image/png':
+            outputs.append({'output_type': 'image', 'mime': 'image/png', 'data': data})
+        elif mime == 'text/html':
+            outputs.append({'output_type': 'html', 'html': data})
+        else:
+            outputs.append({'output_type': 'text', 'text': data})
     for img in (res.get('images') or []):
         outputs.append({'output_type': 'image', 'mime': 'image/png', 'data': img})
     if res.get('html'):
@@ -315,3 +404,13 @@ def api_kernel_reset(nid):
         return err
     kernel_manager.drop((nb.user_id, nb.id))
     return jsonify({'message': 'kernel 已重置，跨 cell 状态已清空'})
+
+
+@api_notebook_bp.route('/notebooks/<int:nid>/kernel/interrupt', methods=['POST'])
+def api_kernel_interrupt(nid):
+    """v6.9 阶段 5：软中断当前正在执行的 cell（尽力）；无活跃执行返回 interrupted=False，
+    卡 C 扩展打不断时由前端回退到超时强杀。"""
+    _u, nb, err = _get_own_notebook(nid)
+    if err:
+        return err
+    return jsonify({'interrupted': interrupt_cell(nb.user_id, nb.id)})

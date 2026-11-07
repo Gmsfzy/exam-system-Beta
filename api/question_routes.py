@@ -54,6 +54,12 @@ def _normalize_cases(value):
            for c in value if isinstance(c, dict)]
     return out or None
 
+def _normalize_language(value):
+    """OJ 题目语言（v6.9）：以适配器注册表为单一事实源校验，非法/缺省回落 python。"""
+    lang = (value or 'python').strip().lower()
+    from oj.adapters import get_adapter
+    return lang if get_adapter(lang) is not None else 'python'
+
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
@@ -135,6 +141,7 @@ def _serialize_question(q, is_teacher, uid):
         'material_group': q.material_group,      # v4.3 同组题共享同一材料
         # v4.7 OJ 用例含预期输出，仅教师可见
         'test_cases': (q.test_cases if is_teacher else None),
+        'language': q.language or 'python',       # v6.9 OJ 多语言（非敏感，两端可见）
         'creator_id': q.creator_id,
         'creator_name': q.creator.username if q.creator else '',
         'is_public': q.is_public,
@@ -235,6 +242,7 @@ def api_add_question():
         material=(data.get('material') or None),           # v4.3 材料题
         material_group=(data.get('material_group') or None),
         test_cases=_normalize_cases(data.get('test_cases')),  # v4.7 OJ 用例
+        language=_normalize_language(data.get('language')),    # v6.9 OJ 多语言
         tags=tags_val or None,                                # v5.23 自由标签
     )
     db.session.add(q)
@@ -276,6 +284,8 @@ def api_update_question(id):
         q.material_group = (data.get('material_group') or None) if q.material else None
     if 'test_cases' in data:                     # v4.7 OJ 用例
         q.test_cases = _normalize_cases(data.get('test_cases'))
+    if 'language' in data:                       # v6.9 OJ 多语言
+        q.language = _normalize_language(data.get('language'))
     if 'is_public' in data:
         q.is_public = bool(data['is_public'])
     db.session.commit()
@@ -300,7 +310,7 @@ def api_question_oj_run(id):
         return jsonify({'message': '本题未配置评测用例，请先在题库编辑中添加'}), 400
     from oj.services import grade as oj_grade
     data = request.get_json(silent=True) or {}
-    result = oj_grade(str(data.get('code') or ''), 'python', q.test_cases)
+    result = oj_grade(str(data.get('code') or ''), (data.get('language') or q.language), q.test_cases)
     return jsonify(result)
 
 @api_question_bp.route('/questions/<int:id>', methods=['DELETE'])

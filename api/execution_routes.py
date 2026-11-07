@@ -37,11 +37,14 @@ def _finalize_submission(sess):
     2. 记录本次得分 session.score，按 best/last 策略幂等落 Result；
     3. 成绩已发布才发成绩通知（含 Socket 推送），未发布留待教师统一发布时通知；
     4. 自动收录错题 + 知识点掌握度联动（非关键，异常不阻塞）。
+    v7.0 阶段 3：异步评测开启时编程题仅置 pending（暂定 0 分），此处唤醒队列并
+    暂缓错题/掌握度联动，由 oj.queue._resettle 在回填终值后补做。
     返回 Result。
     """
     from database.models import Result
     from api.notification_routes import create_exam_result_notification
     from api.learning_routes import sync_wrong_from_exam
+    from oj.queue import has_pending, wake
 
     exam = db.session.get(Exam, sess.exam_id)
     earned_score, total_score = ai_grade_exam(db.session, sess.id)
@@ -53,16 +56,24 @@ def _finalize_submission(sess):
         notify_student_result_published(sess.student_id, sess.exam_id, result.id)
     db.session.commit()
 
-    # 自动收录错题（批改已提交、Answer.is_correct 已落库；非关键路径）
-    try:
-        sync_wrong_from_exam(sess.student_id, sess.exam_id, session_id=sess.id)
-    except Exception:
-        logger.exception("错题自动收录失败（非关键）exam_id=%s", sess.exam_id)
-    # v4.3 知识点掌握度联动
-    try:
-        update_mastery_from_exam(sess.student_id, sess.id)
-    except Exception:
-        logger.exception("掌握度联动失败（非关键）session_id=%s", sess.id)
+    # 异步评测：唤醒后台队列立即排空（未被唤醒也会按间隔轮询兜底）
+    deferred = has_pending(sess.id)
+    if deferred:
+        wake()
+
+    # 自动收录错题（批改已提交、Answer.is_correct 已落库；非关键路径）；
+    # 存在 pending 时暂缓，防把暂定 0 分误收录为错题
+    if not deferred:
+        try:
+            sync_wrong_from_exam(sess.student_id, sess.exam_id, session_id=sess.id)
+        except Exception:
+            logger.exception("错题自动收录失败（非关键）exam_id=%s", sess.exam_id)
+    # v4.3 知识点掌握度联动（同上，异步未完结时由队列补做）
+    if not deferred:
+        try:
+            update_mastery_from_exam(sess.student_id, sess.id)
+        except Exception:
+            logger.exception("掌握度联动失败（非关键）session_id=%s", sess.id)
     return result
 
 
@@ -161,6 +172,7 @@ def api_take_exam(exam_id):
             'material': q.material,
             'material_group': q.material_group,
             'score': eq.score if eq else None,
+            'language': q.language or 'python',
         })
 
     invited = ExamStudent.query.filter_by(exam_id=exam_id, student_id=user.id).first()
@@ -252,10 +264,35 @@ def api_submit_exam(exam_id):
     _notify_teacher_exam(exam, user)
     try:
         _finalize_submission(session)
-        return jsonify({'message': '提交成功，正在批改...'})
+        from oj.queue import async_enabled, has_pending
+        oj_pending = async_enabled() and has_pending(session.id)
+        return jsonify({'message': '提交成功，正在批改...', 'oj_pending': oj_pending})
     except Exception:
         logger.exception("AI 批改异常 session_id=%s", session.id)
         return jsonify({'message': '提交已保存，批改处理中，请稍后刷新查看成绩'}), 200
+
+
+@api_execution_bp.route('/exam/session/<int:session_id>/oj_status', methods=['GET'])
+@limiter.limit('30 per minute')
+def api_session_oj_status(session_id):
+    """异步评测轮询（v7.0 阶段 3）：返回本会话编程题的评测态列表。
+
+    仅本人（学生）或教师可查；pending=True 表示仍有未完成的后台评测，前端据此轮询。
+    同步模式（开关关）下无 pending 行，items 为空、pending=False，前端自然降级不轮询。"""
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    sess = db.session.get(ExamSession, session_id)
+    if not sess:
+        return jsonify({'message': '会话不存在'}), 404
+    if user.is_student():
+        if sess.student_id != user.id:
+            return jsonify({'message': '无权访问'}), 403
+    elif not user.is_teacher():
+        return jsonify({'message': '无权访问'}), 403
+    from oj.queue import pending_info
+    info = pending_info(session_id)
+    return jsonify({'success': True, 'data': info})
 
 
 @api_execution_bp.route('/exam/<int:exam_id>/report_switch', methods=['POST'])

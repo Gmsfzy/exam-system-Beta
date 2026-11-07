@@ -283,7 +283,7 @@ def api_practice_answer(session_id):
         return jsonify({'message': '题目不存在'}), 404
 
     # v4.10 编程题 OJ 自动评测（与考试判分链路一致）：有用例且非空代码直接判 AC/WA，
-    # 未作答判 CE；无用例/非 Python 语言回落原链路（主观题 is_correct=None 待人工）
+    # 未作答判 CE；无用例/工具链不可用语言回落原链路（主观题 is_correct=None 待人工）
     oj_info = None
     is_correct = None
     if question.type == 'programming' and getattr(question, 'test_cases', None):
@@ -293,7 +293,7 @@ def api_practice_answer(session_id):
                        'total': len(question.test_cases), 'score_ratio': 0}
             is_correct = False
         else:
-            r = oj_grade(student_answer, 'python', question.test_cases)
+            r = oj_grade(student_answer, getattr(question, 'language', None) or 'python', question.test_cases)
             if r['supported']:
                 is_correct = r['verdict'] == 'AC'
                 oj_info = {'verdict': r['verdict'], 'passed': r['passed'], 'total': r['total'],

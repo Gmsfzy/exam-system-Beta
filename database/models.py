@@ -197,6 +197,8 @@ class Question(db.Model):
     material_group = db.Column(db.String(50))
     # OJ 评测用例（v4.7 编程题）：[{input, expected}] stdin/stdout 判分；空=无自动评测，回落 AI/人工评分
     test_cases = db.Column(JSONType)
+    # 编程语言（v6.9 OJ 多语言）：python/java/javascript（阶段 2 扩 c/cpp）；仅编程题有意义，默认 python 兼容存量
+    language = db.Column(db.String(20), nullable=False, default='python')
     created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
 
     creator = db.relationship('User', backref='questions', lazy=True)
@@ -304,6 +306,10 @@ class Answer(db.Model):
     manual_comment = db.Column(db.Text)          # 教师评语
     needs_manual_grade = db.Column(db.Boolean, default=False)  # 是否需要人工评分
     oj_verdict = db.Column(db.String(10))          # OJ 自动评测结果 AC/WA/TLE/RE（仅编程题有用例时写入）
+    # v7.0 阶段 3 异步评测队列：pending=排队中 grading=评测中 done=已回填 failed=重放超限
+    # （仅交卷链路异步模式写入；同步模式与练习/作业链路保持 NULL，读端按「非 pending/grading 即终态」处理）
+    oj_status = db.Column(db.String(10))
+    oj_attempts = db.Column(db.Integer, nullable=False, default=0)  # 异步评测已尝试次数（失败重放判据）
 
     @property
     def effective_score(self):

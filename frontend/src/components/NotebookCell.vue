@@ -6,6 +6,9 @@
       <template v-if="cell.cell_type === 'code'">
         <el-button size="small" type="primary" :icon="CaretRight"
                    :loading="running" @click="$emit('run', cell)">运行</el-button>
+        <!-- v6.9 阶段 5：运行中提供「停止」，尽力软中断当前 cell（纯 Python 可打断，卡 C 调用则由超时兑底） -->
+        <el-button v-if="running" size="small" type="danger" plain :icon="SwitchButton"
+                   @click="$emit('interrupt', cell)">停止</el-button>
         <el-button v-if="answerMode" size="small" type="warning" plain
                    @click="$emit('use-answer', cell.source)">用作作答</el-button>
       </template>
@@ -45,7 +48,7 @@
 // html 输出源自 kernel 内库生成的表格标记，仍经 DOMPurify 净化后注入（与 RichContent 同一防 XSS 口径）。
 import { ref } from 'vue'
 import DOMPurify from 'dompurify'
-import { CaretRight, Top, Bottom, Delete } from '@element-plus/icons-vue'
+import { CaretRight, Top, Bottom, Delete, SwitchButton } from '@element-plus/icons-vue'
 import CodeEditor from './CodeEditor.vue'
 import RichContent from './RichContent.vue'
 
@@ -57,7 +60,7 @@ defineProps({
   // v6.7 六模块接入：嵌入式作答模式下每个代码单元附「用作作答」按钮
   answerMode: { type: Boolean, default: false },
 })
-defineEmits(['run', 'delete', 'move-up', 'move-down', 'use-answer'])
+defineEmits(['run', 'delete', 'move-up', 'move-down', 'use-answer', 'interrupt'])
 
 const mdPreview = ref(false)
 
