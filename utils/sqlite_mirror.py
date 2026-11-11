@@ -569,10 +569,97 @@ def _ensure_dst_table(t, src, dst):
                        f'镜像仍按 ORM 结构重建（models.py 与迁移未对齐，请核对）')
     logger.warning(f'[mirror] 镜像侧表 {name} 结构需重建：'
                    f'{"缺表" if have is None else "缺列 " + str(sorted(want - have)) + " / 多列 " + str(sorted(have - want))}')
-    # DDL 单开连接：不能在调用方已持有的 dst 写事务里抢锁
-    t.drop(bind=dst, checkfirst=True)
-    t.create(bind=dst, checkfirst=True)
+    # DDL 单开连接：不能在调用方已持有的 dst 写事务里抢锁。
+    # 但 DROP 与 CREATE 必须「同一连接、同一事务」做完，不能分两次 bind=engine 发：
+    # 旧写法是两条连接、两个事务，实时 apply_ops（不持 _lock）与每日 tick 撞车时有
+    # 两种坏相，都在沙箱实测复现过：
+    #   ① 甲 drop→create(表+索引) 期间乙也进来，乙的 create 见「表已在」整块跳过，
+    #      而乙的 drop 已把甲建好的索引连带删掉 → 表结构对、索引全光、且不报错
+    #      （6 线程 × 12 秒压测：36 次重建 0 报错，收尾索引为空）；
+    #   ② 甲的 CREATE INDEX 落在乙已建好同名索引之后 → OperationalError:
+    #      index ix_notebook_ctx already exists（2026-11-07 error.log 17 次即此，
+    #      当时 notebook 每次对账都修不好，拷给老师的库一直停在旧结构）。
+    # 一个事务里做完，外部连接看不到中间态；再套 _lock 让同进程串行（RLock，tick
+    # 已持锁时重入无害），两个窗口一起堵死。
+    with _lock, dst.begin() as conn:
+        conn.exec_driver_sql('DROP TABLE IF EXISTS "%s"' % name.replace('"', '""'))
+        t.create(bind=conn, checkfirst=False)
+    # 重建顺带把索引带回来；建完仍缺就明说，别让它静默变成「镜像少索引」
+    still = _orm_index_names(t) - _dst_index_names(dst, name)
+    if still:
+        logger.warning(f'[mirror] 表 {name} 重建后仍缺索引 {sorted(still)}，'
+                       f'将在每日索引对账时补建')
     return True
+
+
+def _orm_index_names(t):
+    """ORM 侧该表应有的索引名。拿不到名字的（未命名表达式索引）不参与比对，避免误判。"""
+    return {i.name for i in t.indexes if i.name}
+
+
+def _dst_index_names(bind, name):
+    """镜像侧该表实际有的索引名；表不存在或反射失败返回空集（由列对账那条路处理）。"""
+    from sqlalchemy import inspect as sa_inspect
+    try:
+        return {i['name'] for i in sa_inspect(bind).get_indexes(name)}
+    except Exception:
+        return set()
+
+
+def reconcile_indexes(src, dst, tables=None):
+    """索引对账：返回 {表名: [镜像缺失的索引名]}。
+
+    为什么列对账不够：索引不在列集里。models.py 后来给某列补 `index=True` 时列集不变，
+    `reconcile_schema` 永远看不见——本机实测镜像有 9 张 community_* 表缺 PG 与 ORM
+    都有的 ix_*_id 索引，行数列结构两道对账全绿，漂移照旧。
+    更要紧的是 `_ensure_dst_table` 的并发窗口会把整张表的索引静默删光（见其注释），
+    没有这一道，「镜像少索引」既不报错也永不自愈。
+
+    额外表（EXTRA_TABLES）不比：它们结构靠反射 PG 得到，索引名两边同源，比了没意义。
+    """
+    tables = tables or _mirror_tables(src)
+    bad = {}
+    for name, t in tables.items():
+        if name in _SKIP_TABLES or name in _reflected:
+            continue
+        want = _orm_index_names(t)
+        if not want:
+            continue
+        miss = want - _dst_index_names(dst, name)
+        if miss:
+            bad[name] = sorted(miss)
+    return bad
+
+
+def repair_indexes(src, dst, tables=None, bad=None):
+    """只补建缺失索引（CREATE INDEX，不动一行数据），返回 {表名: [已补索引名]}。
+
+    不整表重刷：索引缺失与数据无关，重刷要 delete+insert 全表，既慢又把「拷走的库」
+    在无关表上重写一遍，没必要。
+    """
+    tables = tables or _mirror_tables(src)
+    bad = reconcile_indexes(src, dst, tables) if bad is None else bad
+    done = {}
+    for name, miss in bad.items():
+        t = tables.get(name)
+        if t is None:
+            continue
+        want = _orm_index_names(t)
+        made = []
+        with _lock, dst.begin() as conn:
+            for ix in t.indexes:
+                if ix.name is None or ix.name not in set(miss) or ix.name not in want:
+                    continue
+                try:
+                    ix.create(bind=conn, checkfirst=True)   # 幂等：已在就跳过
+                    made.append(ix.name)
+                except Exception as e:
+                    logger.error(f'[mirror] 表 {name} 索引 {ix.name} 补建失败: {e}')
+        if made:
+            done[name] = made
+            logger.warning(f'[mirror] 表 {name} 补建缺失索引 {made}：'
+                           f'列对账看不见索引，这一步是自愈路径')
+    return done
 
 
 def _copy_rows(t, s, d, batch=_BATCH):
@@ -795,6 +882,7 @@ def sqlite_mirror_tick():
             diff = reconcile_counts(db.engine, get_mirror_engine(), tables)
             sec_bad = reconcile_secondary(db.engine, get_mirror_engine())
             schema_bad = reconcile_schema(db.engine, get_mirror_engine(), tables)
+            idx_bad = reconcile_indexes(db.engine, get_mirror_engine(), tables)
             unknown = unknown_extra_tables(db.engine)
         except Exception as e:
             logger.error(f'[mirror] 对账失败: {e}', exc_info=True)
@@ -807,14 +895,15 @@ def sqlite_mirror_tick():
                            f'需要随项目目录交付的话：补模型或登记进 EXTRA_TABLES')
         _degraded.clear()
         _last_reconcile[0] = today
-        if not diff and not sec_bad and not schema_bad:
-            logger.info('[mirror] 对账一致：PG 与 SQLite 镜像逐表行数、列结构与'
-                        '中间表主键集合均相同')
+        if not diff and not sec_bad and not schema_bad and not idx_bad:
+            logger.info('[mirror] 对账一致：PG 与 SQLite 镜像逐表行数、列结构、'
+                        '索引与中间表主键集合均相同')
             return
         logger.warning(f'[mirror] 对账发现 {len(diff)} 张表行数不一致、'
                        f'{len(schema_bad)} 张表结构不一致（缺表/缺列）、'
-                       f'{len(sec_bad)} 张中间表主键集合不一致，逐表重刷修复：'
-                       f'{diff[:8]} / {schema_bad[:8]} / {sec_bad[:8]}')
+                       f'{len(sec_bad)} 张中间表主键集合不一致、'
+                       f'{len(idx_bad)} 张表缺索引，逐表重刷修复：'
+                       f'{diff[:8]} / {schema_bad[:8]} / {sec_bad[:8]} / {list(idx_bad)[:8]}')
         counted = {n for n, _, _ in diff}
         fixed_schema = set()
         for name in schema_bad:
@@ -841,6 +930,13 @@ def sqlite_mirror_tick():
                 resync_table(tables[name], db.engine, get_mirror_engine())
             except Exception as e:
                 logger.error(f'[mirror] 中间表 {name} 重刷失败: {e}', exc_info=True)
+        # 索引单独补：上面重刷过的表已连带把索引建回来，这里只拾重刷没覆盖到的
+        # （列集相同、仅索引缺失的那些表，重刷它们只会白白重写整表数据）
+        if idx_bad:
+            try:
+                repair_indexes(db.engine, get_mirror_engine(), tables)
+            except Exception as e:
+                logger.error(f'[mirror] 索引补建失败: {e}', exc_info=True)
         copy_alembic_version(db.engine, get_mirror_engine())
         flush_wal()
 

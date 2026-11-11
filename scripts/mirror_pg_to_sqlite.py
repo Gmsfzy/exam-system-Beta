@@ -89,24 +89,27 @@ def main(argv=None):
         if args.resync:
             per, ver = m.resync_all(db.engine, m.get_mirror_engine(),
                                     backup=not args.no_backup)
-            _echo(f'[resync] 已重刷 {len(per)} 张表 / {sum(per.values())} 行，'
-                  f'alembic_version={",".join(ver) or "无"}')
             diff = m.reconcile_counts(db.engine, m.get_mirror_engine())
             sec_bad = m.reconcile_secondary(db.engine, m.get_mirror_engine())
             schema_bad = m.reconcile_schema(db.engine, m.get_mirror_engine())
+            idx_bad = m.reconcile_indexes(db.engine, m.get_mirror_engine())
+            _echo(f'[resync] 已重刷 {len(per)} 张表 / {sum(per.values())} 行，'
+                  f'alembic_version={",".join(ver) or "无"}')
             _echo(f'[resync] 对账差异表 {len(diff)} 张 / 中间表主键不一致 {len(sec_bad)} 张'
-                  f' / 结构不一致 {len(schema_bad)} 张'
+                  f' / 结构不一致 {len(schema_bad)} 张 / 缺索引 {len(idx_bad)} 张'
                   + (f'：{diff[:10]}' if diff else ''))
             _echo_unknown(db.engine)
-            return 0 if not diff and not sec_bad and not schema_bad else 1
+            return 0 if not diff and not sec_bad and not schema_bad and not idx_bad else 1
 
         if args.reconcile:
             diff = m.reconcile_counts(db.engine, m.get_mirror_engine())
             sec_bad = m.reconcile_secondary(db.engine, m.get_mirror_engine())
             schema_bad = m.reconcile_schema(db.engine, m.get_mirror_engine())
+            idx_bad = m.reconcile_indexes(db.engine, m.get_mirror_engine())
             unknown = _echo_unknown(db.engine)
-            if not diff and not sec_bad and not schema_bad:
-                _echo('[reconcile] 逐表行数、列结构与中间表主键集合均一致，镜像与主库同步'
+            if not diff and not sec_bad and not schema_bad and not idx_bad:
+                _echo('[reconcile] 逐表行数、列结构、索引与中间表主键集合均一致，'
+                      '镜像与主库同步'
                       + (f'（另有 {len(unknown)} 张清单外表未镜像，见上）' if unknown else ''))
                 return 0
             if schema_bad:
@@ -120,6 +123,11 @@ def main(argv=None):
             if sec_bad:
                 _echo(f'[reconcile] {len(sec_bad)} 张中间表主键集合不一致（行数可能相同）：'
                       f'{sec_bad[:20]}')
+            if idx_bad:
+                # 单独报这一道：索引不在列集里，列对账全绿也可能整张表没索引
+                _echo(f'[reconcile] {len(idx_bad)} 张表镜像侧缺索引（不动数据，--fix 只补建）：')
+                for name, miss in list(idx_bad.items())[:20]:
+                    _echo(f'           {name:<44} {miss}')
             if not args.fix:
                 _echo('[reconcile] 未加 --fix，仅报告不修改。')
                 return 1
@@ -147,14 +155,20 @@ def main(argv=None):
                     n = m.resync_table(t, db.engine, m.get_mirror_engine())
                     _echo(f'[fix] 中间表 {name} 重刷 {n} 行')
                 m.copy_alembic_version(db.engine, m.get_mirror_engine())
+                fixed_idx = m.repair_indexes(db.engine, m.get_mirror_engine(),
+                                             tables, bad=idx_bad)
+                for name, made in list(fixed_idx.items())[:20]:
+                    _echo(f'[fix] {name} 补建索引 {made}')
             left = m.reconcile_counts(db.engine, m.get_mirror_engine())
             left_sec = m.reconcile_secondary(db.engine, m.get_mirror_engine())
             left_sch = m.reconcile_schema(db.engine, m.get_mirror_engine())
+            left_idx = m.reconcile_indexes(db.engine, m.get_mirror_engine())
             _echo(f'[fix] 修复后仍不一致 行数{len(left)} 张 / 中间表{len(left_sec)} 张'
-                  f' / 结构{len(left_sch)} 张'
+                  f' / 结构{len(left_sch)} 张 / 索引{len(left_idx)} 张'
                   + (f'：{left[:10]}' if left else '')
-                  + (f'；结构：{left_sch[:10]}' if left_sch else ''))
-            return 0 if not left and not left_sec and not left_sch else 1
+                  + (f'；结构：{left_sch[:10]}' if left_sch else '')
+                  + (f'；索引：{list(left_idx.items())[:10]}' if left_idx else ''))
+            return 0 if not left and not left_sec and not left_sch and not left_idx else 1
 
         # 默认：状态
         st = m.mirror_status()

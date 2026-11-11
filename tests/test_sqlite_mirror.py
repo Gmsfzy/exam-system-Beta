@@ -7,6 +7,8 @@
 """
 import os
 import sqlite3
+import threading
+import time
 
 import pytest
 from sqlalchemy import create_engine, select, text
@@ -348,6 +350,15 @@ def _dst_columns(name):
     return {c['name'] for c in insp.get_columns(name)}
 
 
+def _dst_indexes(name):
+    from sqlalchemy import inspect as sa_inspect
+    return {i['name'] for i in sa_inspect(sm.get_mirror_engine()).get_indexes(name)}
+
+
+def _orm_indexes(name):
+    return {i.name for i in _tbl(name).indexes if i.name}
+
+
 def test_realtime_write_creates_missing_table(bootstrapped):
     """未来加了新表：镜像文件里还没有这张表，业务首次写入就该当场建表并落数据。
 
@@ -399,6 +410,76 @@ def test_ensure_dst_table_detects_missing_and_stale(bootstrapped):
         d.exec_driver_sql('ALTER TABLE notebook ADD COLUMN ghost_col VARCHAR')
     assert sm._ensure_dst_table(_tbl('notebook'), db.engine, eng) is True
     assert 'ghost_col' not in _dst_columns('notebook')
+
+
+def test_ensure_dst_table_rebuild_keeps_indexes(bootstrapped):
+    """重建必须把索引一起带回来：旧写法 DROP/CREATE 分两个事务发，并发时
+    会把表建回来但索引全光（且不报错），拷走的库从此没有索引。"""
+    eng = sm.get_mirror_engine()
+    assert _dst_indexes('notebook') == _orm_indexes('notebook'), '前置：初始索引齐备'
+    with eng.begin() as d:
+        d.exec_driver_sql('ALTER TABLE notebook ADD COLUMN ghost_col VARCHAR')
+    assert sm._ensure_dst_table(_tbl('notebook'), db.engine, eng) is True
+    assert 'ghost_col' not in _dst_columns('notebook')
+    assert _dst_indexes('notebook') == _orm_indexes('notebook'), '重建后索引不能丢'
+
+
+def test_ensure_dst_table_concurrent_rebuild_is_atomic(bootstrapped):
+    """并发重建同一张结构落后的表：既不能报 index already exists，
+    也不能静默把索引删光（两条都是旧写法的实测坏相）。"""
+    eng = sm.get_mirror_engine()
+    src = db.engine          # db.engine 需要应用上下文，工作线程拿不到，先取好再开线程
+    errs = []
+    stop = time.time() + 2.0
+
+    def one():
+        while time.time() < stop:
+            try:
+                with eng.begin() as c:
+                    c.exec_driver_sql('ALTER TABLE notebook ADD COLUMN ghost_x TEXT')
+            except Exception:
+                time.sleep(0.005)
+                continue      # 该列已在 = 上一轮重建还没结束，重试
+            try:
+                sm._ensure_dst_table(_tbl('notebook'), src, eng)
+            except Exception as e:
+                errs.append(str(e).splitlines()[0][:120])
+
+    ths = [threading.Thread(target=one) for _ in range(4)]
+    for t in ths:
+        t.start()
+    for t in ths:
+        t.join()
+    assert not errs, f'并发重建报错：{errs[:3]}'
+    assert 'ghost_x' not in _dst_columns('notebook'), '收尾必须是新结构'
+    assert _dst_indexes('notebook') == _orm_indexes('notebook'), '收尾索引不能丢'
+
+
+def test_reconcile_indexes_detects_and_repairs(bootstrapped):
+    """列集相同、仅索引缺失：列对账看不见，索引对账要能报出来并只补建不重刷。"""
+    eng = sm.get_mirror_engine()
+    with eng.begin() as d:
+        d.exec_driver_sql('DROP INDEX IF EXISTS ix_notebook_ctx')
+    assert _dst_columns('notebook') == {c.name for c in _tbl('notebook').columns}, \
+        '列集仍一致——证明列对账拦不住这类漂移'
+    assert not sm.reconcile_schema(db.engine, eng), '列对账确实看不见索引'
+    bad = sm.reconcile_indexes(db.engine, eng)
+    assert 'notebook' in bad and bad['notebook'] == ['ix_notebook_ctx'], bad
+    rows_before = _mirror_count('notebook')
+    done = sm.repair_indexes(db.engine, eng)
+    assert done.get('notebook') == ['ix_notebook_ctx']
+    assert _mirror_count('notebook') == rows_before, '补索引不该动数据'
+    assert not sm.reconcile_indexes(db.engine, eng), '补完就该收敛'
+
+
+def test_tick_repairs_missing_index(bootstrapped):
+    """每日对账把缺的索引自愈回来（交付前只跑服务不跑 CLI 也要能收敛）。"""
+    with sm.get_mirror_engine().begin() as d:
+        d.exec_driver_sql('DROP INDEX IF EXISTS ix_notebook_user')
+    assert 'notebook' in sm.reconcile_indexes(db.engine, sm.get_mirror_engine())
+    sm._last_reconcile[0] = None
+    sm.sqlite_mirror_tick()
+    assert not sm.reconcile_indexes(db.engine, sm.get_mirror_engine())
 
 
 # ────────────────── 无 ORM 模型的表（EXTRA_TABLES） ──────────────────
