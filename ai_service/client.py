@@ -1,6 +1,7 @@
 import requests
 import json
 import re
+import time
 import logging
 from config import Config
 
@@ -13,6 +14,23 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 
+class AITimeoutError(Exception):
+    """AI 在给定读超时内没答完。
+
+    负载问题（体量大 / 模型侧慢），不是配置问题：同一个请求再发一次，
+    只会让用户多等一个整超时并双倍消耗额度，所以这条不再重试。
+    seconds：本次生效的读超时，供上层拼准确文案。
+    """
+
+    def __init__(self, message, seconds=None):
+        super().__init__(message)
+        self.seconds = seconds
+
+
+class AINetworkError(Exception):
+    """连不上方舟 / 接口报错（含密钥失效、限流等 4xx、5xx），与「答得慢」区分开。"""
+
+
 class AIClient:
     def __init__(self):
         self.api_key = Config.DOUBAN_API_KEY
@@ -22,8 +40,8 @@ class AIClient:
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.api_key}"
         }
-        self.timeout = 60  # 超时60秒，AI生成多道题时可能较慢
-        self.max_retries = 2  # 超时自动重试1次
+        self.timeout = int(getattr(Config, 'AI_TIMEOUT', 60))  # 默认 60 秒，长文档/出题由调用方按 AI_DOC_TIMEOUT、AI_EXAM_TIMEOUT 放宽
+        self.max_retries = 2  # 只对连接类错误重试；读超时不重试（见 AITimeoutError）
 
     DEFAULT_SYSTEM = "你是专业出题阅卷老师，只输出用户要求的标准JSON，不要多余文字、标题、注释、换行说明"
 
@@ -38,44 +56,63 @@ class AIClient:
             return match_res.group()
         return raw_text
 
-    def _post_ark(self, payload: dict) -> str:
-        """发送火山方舟请求（含超时重试），返回模型原始回复文本"""
+    def _post_ark(self, payload: dict, timeout: int = None) -> str:
+        """发送火山方舟请求，返回模型原始回复文本。
+
+        timeout：本次调用的读超时，不给则用实例默认值。出题与长文档体量差一个数量级，
+        共用一个全局超时会让长文档恒降级（真机实锤），故按调用粒度可覆盖。
+
+        重试策略按错误性质分流：连不上（连接超时/连接失败）值得再试一次；
+        读超时是“模型还在写”，重发必然再等一个整超时，直接失败更快也更省额度。
+        """
+        t = int(timeout or self.timeout)
         last_err = None
         for attempt in range(1, self.max_retries + 1):
+            started = time.time()
             try:
-                logger.info(f"API请求（第{attempt}次）...")
+                logger.info(f"API请求（第{attempt}次，读超时 {t}s，max_tokens={payload.get('max_tokens')}）...")
                 resp = requests.post(
                     url=self.api_url,
                     headers=self.headers,
                     json=payload,
-                    timeout=self.timeout,
+                    timeout=t,
                     proxies=_NO_PROXY
                 )
-                logger.info(f"API状态码: {resp.status_code}")
+                cost = time.time() - started
+                logger.info(f"API状态码: {resp.status_code}，用时 {cost:.1f}s")
                 resp.raise_for_status()  # 4xx/5xx直接抛异常
                 raw_content = resp.json()["choices"][0]["message"]["content"]
                 logger.info(f"AI原始返回文本:\n{raw_content}")
                 return raw_content
-            except requests.exceptions.Timeout as e:
+            except requests.exceptions.ConnectTimeout as e:
+                # ConnectTimeout 同时继承 Timeout 和 ConnectionError，必须排在 Timeout 前
                 last_err = e
-                logger.warning(f"第{attempt}次请求超时: {str(e)}")
-                if attempt < self.max_retries:
-                    logger.info("自动重试中...")
-                    continue
+                logger.warning(f"第{attempt}次连接超时: {str(e)}")
+            except requests.exceptions.ConnectionError as e:
+                last_err = e
+                logger.warning(f"第{attempt}次连接失败: {str(e)}")
+            except requests.exceptions.Timeout as e:
+                cost = time.time() - started
+                logger.warning(f"读超时：{t}s 内未返回（实际等待 {cost:.1f}s，本次不重试）")
+                raise AITimeoutError(f"AI 响应超时：{t}s 内未返回", seconds=t)
             except requests.exceptions.RequestException as e:
+                # HTTPError（密钥失效、限流、方舟侧 5xx）等归为网络/配置异常
                 err_msg = f"网络请求失败: {str(e)}"
                 logger.error(err_msg)
-                raise Exception(err_msg)
+                raise AINetworkError(err_msg)
             except Exception as e:
+                # 响应体结构不对等：归接口异常，不混进“网络”文案
                 err_msg = f"AI接口处理异常: {str(e)}"
                 logger.error(err_msg)
-                raise Exception(err_msg)
-        # 所有重试都超时
-        raise Exception(f"网络请求失败（重试{self.max_retries}次均超时）: {str(last_err)}")
+                raise AINetworkError(err_msg)
+            if attempt < self.max_retries:
+                logger.info("连接类失败，自动重试中...")
+        # 连接重试耗尽
+        raise AINetworkError(f"网络连接失败（已重试{self.max_retries}次）: {str(last_err)}")
 
     def _send_ark_request(self, prompt: str, temp: float = 0.7, max_tok: int = 2000,
-                          system: str = None, clean_json: bool = True) -> str:
-        """通用单轮请求封装：system 可自定义，clean_json 控制是否提取JSON"""
+                          system: str = None, clean_json: bool = True, timeout: int = None) -> str:
+        """通用单轮请求封装：system 可自定义，clean_json 控制是否提取JSON，timeout 按负载放宽"""
         payload = {
             "model": self.model_ep_id,
             "messages": [
@@ -85,18 +122,25 @@ class AIClient:
             "temperature": temp,
             "max_tokens": max_tok
         }
-        raw_content = self._post_ark(payload)
+        raw_content = self._post_ark(payload, timeout=timeout)
         if not clean_json:
             return raw_content.strip()
         clean_content = self._clean_json_text(raw_content)
         logger.info(f"清洗后JSON字符串:\n{clean_content}")
         return clean_content
 
-    def generate_json(self, system: str, prompt: str, temp: float = 0.5, max_tok: int = 4000) -> str:
-        """通用JSON生成：自定义system角色，返回清洗后的标准JSON字符串（对象或数组）"""
-        return self._send_ark_request(prompt, temp=temp, max_tok=max_tok, system=system, clean_json=True)
+    def generate_json(self, system: str, prompt: str, temp: float = 0.5, max_tok: int = 4000,
+                      timeout: int = None) -> str:
+        """通用JSON生成：自定义system角色，返回清洗后的标准JSON字符串（对象或数组）。
 
-    def chat(self, messages: list, temp: float = 0.6, max_tok: int = 1500) -> str:
+        timeout：本次调用的读超时。长产出（如心得初稿 2000 token）沿用默认 60s 会每次
+        掐断，与长文档同理必须按负载放宽，不给则沿用实例默认值。
+        """
+        return self._send_ark_request(prompt, temp=temp, max_tok=max_tok, system=system,
+                                      clean_json=True, timeout=timeout)
+
+    def chat(self, messages: list, temp: float = 0.6, max_tok: int = 1500,
+             timeout: int = None) -> str:
         """多轮对话：messages=[{role, content}]（含system），返回纯文本回复（不做JSON清洗）"""
         payload = {
             "model": self.model_ep_id,
@@ -104,7 +148,7 @@ class AIClient:
             "temperature": temp,
             "max_tokens": max_tok
         }
-        return self._post_ark(payload).strip()
+        return self._post_ark(payload, timeout=timeout).strip()
 
     def chat_stream(self, messages: list, temp: float = 0.6, max_tok: int = 1500):
         """流式多轮对话：逐块 yield 增量文本（方舟 OpenAI 兼容 SSE）；失败抛异常由调用方降级。"""
@@ -135,8 +179,12 @@ class AIClient:
                 if delta:
                     yield delta
 
-    def generate_question(self, major: str, question_type: str, difficulty: str, count: int = 5, description: str = None, source: str = 'ai'):
-        """AI批量生成考试题目，返回可直接loads的纯JSON数组字符串"""
+    def generate_question(self, major: str, question_type: str, difficulty: str, count: int = 5, description: str = None, source: str = 'ai', timeout: int = None):
+        """AI批量生成考试题目，返回可直接loads的纯JSON数组字符串
+
+        timeout：本次出题的读超时。推理模型下 5 道题实测近 75s，
+        不给就会沿用 60s 默认值每次掐断，由调用方按道数算好传进来。
+        """
         # 题型/中文名单一事实源：QuestionTypeEnum/DifficultyEnum（v4.7 收敛，不再自带映射）
         from database.models import QuestionTypeEnum, DifficultyEnum
         type_cn = QuestionTypeEnum.label(question_type)
@@ -193,7 +241,7 @@ class AIClient:
     }}
 ]
         """
-        return self._send_ark_request(prompt, temp=0.7, max_tok=4000)
+        return self._send_ark_request(prompt, temp=0.7, max_tok=4000, timeout=timeout)
 
     def grade_answer(self, question_content: str, correct_answer: str, student_answer: str):
         """AI批改作答，返回固定JSON字符串"""
@@ -209,12 +257,22 @@ class AIClient:
         """
         return self._send_ark_request(prompt, temp=0.3, max_tok=800)
 
-    def generate_analysis(self, question_content: str, correct_answer: str, student_answer: str):
-        """生成详细答题解析"""
-        prompt = f"""
-题目：{question_content}
-标准答案：{correct_answer}
-学生作答：{student_answer}
-输出详细知识点解析，无需JSON，纯中文文本即可
+    def generate_analysis(self, question_content: str, correct_answer: str, student_answer: str,
+                          doubt: str = None):
+        """生成详细答题解析。
+
+        doubt：学生自己的疑问。v7.20 才真正接进来——以前路由收了疑问却根本不传给本函数，
+        学生写「卡在第二步移项」与什么都不写得回一模一样的泛用解析，看着像正常工作。
+        没有标准答案（纯题面提问）时不能输出「标准答案：None」那种脏 prompt，故分开拼。
         """
+        lines = [f"题目：{question_content}"]
+        if (correct_answer or '').strip():
+            lines.append(f"标准答案：{correct_answer}")
+        if (student_answer or '').strip():
+            lines.append(f"学生作答：{student_answer}")
+        if (doubt or '').strip():
+            lines.append(f"学生的疑问：{doubt}")
+            lines.append('请先直接回答学生的疑问，再补上完整解题思路与考点，不要只把题重述一遍。')
+        lines.append('输出详细知识点解析，无需JSON，纯中文文本即可')
+        prompt = '\n' + '\n'.join(lines) + '\n'
         return self._send_ark_request(prompt, temp=0.5, max_tok=1200)

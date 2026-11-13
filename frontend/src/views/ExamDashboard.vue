@@ -441,9 +441,20 @@
           </div>
           
           <div class="search-bar">
+            <!-- v7.7 按课程筛选（隐式"班级"：该课程的历史考生群） -->
+            <el-select
+              v-model="studentCourseFilter"
+              placeholder="按课程筛选（显示该课程历史考生）"
+              clearable
+              filterable
+              @change="loadAllStudents"
+              style="width: 100%; margin-bottom: 10px"
+            >
+              <el-option v-for="c in courses" :key="c.id" :label="c.name" :value="c.id" />
+            </el-select>
             <el-input
               v-model="studentSearchText"
-              placeholder="搜索用户名或邮箱..."
+              placeholder="搜索用户名或邮箱（与课程筛选可叠加）..."
               prefix-icon="Search"
               clearable
               @input="searchStudents"
@@ -525,10 +536,12 @@ const showSmartModal = ref(false)
 const showQuestionsModal = ref(false)
 const showStudentsModal = ref(false)
 const currentExamId = ref(null)
+const currentExam = ref(null)   // v7.7 存当前考试完整对象（拿 course_id）
 const examQuestions = ref([])
 const examStudents = ref([])
 const allStudents = ref([])
 const selectedStudents = ref([])
+const studentCourseFilter = ref(null)  // v7.7 邀请弹窗课程筛选
 const addQuestionsForm = ref({ question_ids: [] })
 const availableQuestions = ref([])
 const allAvailableQuestions = ref([])
@@ -809,6 +822,9 @@ const handleDropdownAction = async (action, exam) => {
       break
     case 'students':
       currentExamId.value = exam.id
+      currentExam.value = exam    // v7.7 存完整对象拿 course_id
+      // v7.7 如果考试本身关联了课程，默认按该课程筛选
+      studentCourseFilter.value = exam.course_id || null
       loadExamStudents()
       loadAllStudents()
       showStudentsModal.value = true
@@ -913,7 +929,10 @@ const loadExamStudents = async () => {
 
 const loadAllStudents = async () => {
   try {
-    const res = await request.get('/api/students')
+    const params = {}
+    if (studentCourseFilter.value) params.course_id = studentCourseFilter.value
+    if (studentSearchText.value.trim()) params.search = studentSearchText.value.trim()
+    const res = await request.get('/api/students', { params })
     const existingIds = examStudents.value.map(s => s.id)
     allStudents.value = res.data.filter(s => !existingIds.includes(s.id))
     selectedStudents.value = []
@@ -940,7 +959,10 @@ const inviteStudents = async () => {
   }
 }
 
-const searchStudents = () => {}
+const searchStudents = () => {
+  // v7.7 空函数改为真正触发后端加载（带 search 参数）
+  loadAllStudents()
+}
 
 const handleStudentSelection = (selectedItems) => {
   selectedStudents.value = selectedItems.map(item => item.id)

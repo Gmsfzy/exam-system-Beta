@@ -207,9 +207,10 @@ def bounty_submissions(bounty_id):
 
 @bounty_bp.route('/bounties', methods=['POST'])
 def bounty_create():
-    user = _get_user()
-    if not user:
-        return jsonify({'message': '未登录'}), 401
+    # v7.7 权限收紧：仅教师/管理员可发布悬赏（之前普通学生也能发布，审核队列被非教学类内容占用）
+    user, err = require_teacher(deny_msg='仅教师可发布悬赏', unauth_msg='未登录', unauth_status=401)
+    if err:
+        return err
     data = request.get_json(silent=True) or {}
 
     title = (data.get('title') or '').strip()
@@ -786,10 +787,11 @@ def submission_accept(sid):
 
     # v6.1 跨模块掌握度信号：中标答案作者对相关知识点的掌握验证
     # 题目悬赏用投稿的 q_knowledge 名称解析；答案悬赏用目标题已关联的知识点 ID
-    # 权重 0.3（弱于考试/作业的 1.0），避免刷悬赏冲掌握度
+    # 采纳即视为"答对"信号，权重 1.0；并顺带结算学习徽章（事务随本接口统一提交）
     try:
         from api.learning_engine import (
             update_mastery, resolve_kp_ids_by_names, kp_ids_of_question,
+            grant_learning_badges,
         )
         kp_ids = []
         if bounty.bounty_type == BountyTypeEnum.QUESTION and sub.q_knowledge:
@@ -797,7 +799,8 @@ def submission_accept(sid):
         elif bounty.bounty_type == BountyTypeEnum.ANSWER and bounty.target_question_id:
             kp_ids = kp_ids_of_question(bounty.target_question_id)
         if kp_ids:
-            update_mastery(sub.submitter_id, kp_ids, 0.3)
+            update_mastery(user_id=sub.submitter_id, kp_ids=kp_ids, correct_ratio=1.0)
+        grant_learning_badges(sub.submitter_id)
     except Exception as e:
         from utils.logger import logger
         logger.warning('bounty accept mastery update failed: %s', e)

@@ -18,9 +18,10 @@
 - **失败不影响业务**：镜像写发生在业务事务已提交之后（after_commit），任何异常只记
   日志并置降级标记，交由调度 tick 对账修复；绝不让请求因镜像失败而 500。
 - **零 PG 侧 DDL**：不加触发器、不建变更日志表，主库保持干净。
-- **结构也追平**：镜像侧缺表、或列集落后于代码（未来加新表/新字段）时，实时写与
-  对账两条路径都会先按 ORM 元数据重建该表再灌数据（_ensure_dst_table）。行数对账
-  看不见“加了字段但旧行照旧”这种漂移，故每日对账额外跑一道 reconcile_schema。
+- **结构也追平**：镜像侧缺表、列集落后于代码（未来加新表/新字段）、或命名 CHECK
+  白名单落后（只改枚举不改列的迁移）时，实时写与对账两条路径都会先按 ORM 元数据重
+  建该表再灌数据（_ensure_dst_table）。行数对账看不见“加了字段但旧行照旧”这种漂移，
+  故每日对账额外跑一道 reconcile_schema。
 - **镜像清单来自代码，不来自 PG**：建表/重灌/对账都以 db.metadata（= models.py 里
   的模型）为清单。一张只在 migrations 里 create_table、没有对应模型的表，镜像既不
   知道它存在、也永远不会同步它，而且不报错不告警（老师侧一读就是 no such table）。
@@ -28,6 +29,7 @@
   的未知表列出来提醒（unknown_extra_tables）。
 """
 import os
+import re
 import threading
 
 from sqlalchemy import create_engine, delete, func, inspect as sa_inspect, select, tuple_
@@ -185,6 +187,31 @@ def _state_of(obj):
     return state if hasattr(state, 'mapper') else None
 
 
+def _pk_from_dict(state, table):
+    """直读实例字典 `state.dict` 取主键元组；拿不到返回 None。
+
+    为什么需要单独一路：改过主键的 UPDATE（如把 `homework_student.student_id`
+    从被清理的号并到另一个号——该列本身就是主键）在 after_flush 时
+    `state.key` 仍是**旧** identity key（新键要等 `finalize_flush_changes()`），只拿
+    key 会去源库按旧主键回读 → 读不到 → 把镜像里那行删掉，而新主键那行从未写入，
+    表现为「PG 有、镜像少一行、日志一句没报」（v7.17 实机踩到）。
+    不碰描述器取属性，避免 flush 事件里惰取查询再引发 autoflush 递归。
+    """
+    mapper = state.mapper
+    inst = state.dict
+    vals = []
+    for c in table.primary_key.columns:
+        try:
+            prop = mapper.get_property_by_column(c)
+        except Exception:
+            return None
+        v = inst.get(prop.key)
+        if v is None:
+            return None
+        vals.append(v)
+    return tuple(vals)
+
+
 def _pk_of_state(state, table):
     """取实例在某表主键列上的值元组；拿不到返回 None。
 
@@ -206,19 +233,7 @@ def _pk_of_state(state, table):
         pk = tuple(key[1])
         if len(pk) == len(cols) and not any(v is None for v in pk):
             return pk
-    mapper = state.mapper
-    inst = state.dict
-    vals = []
-    for c in cols:
-        try:
-            prop = mapper.get_property_by_column(c)
-        except Exception:
-            return None
-        v = inst.get(prop.key)
-        if v is None:
-            return None
-        vals.append(v)
-    return tuple(vals)
+    return _pk_from_dict(state, table)
 
 
 def _secondary_tables_of(mapper):
@@ -280,6 +295,12 @@ def _capture(session, flush_context):
                     continue
                 slot = bucket.setdefault(table.name, {'u': set(), 'd': set()})
                 slot[kind].add(pk)
+                if kind == 'u':
+                    # 主键被改：旧键去删、新键去写，两条都要记，否则新行永不进镜像
+                    new_pk = _pk_from_dict(state, table)
+                    if new_pk is not None and new_pk != pk:
+                        slot['u'].add(new_pk)
+                        slot['d'].add(pk)
             # 本轮动过的实体→其名下中间表全部列入“需主键集合比对”集合
             bucket.setdefault('__sec', set()).update(_secondary_tables_of(mapper))
 
@@ -447,6 +468,10 @@ def apply_ops(ops, src, dst, tables=None):
     """把捕获到的主键集合镜像到目标库：回读源库真实行 → 覆盖写目标行。
 
     同一轮内既改又删的主键按删除处理（最终态就是没有这行）。
+    **先删后插**（v7.17）：改了主键的那一行会同时留下旧键与新键，而表上往往还有与
+    主键无关的 UNIQUE（`user.username` 就是）——先插新行会把旧行还占着的唯一键撞坏，
+    整笔镜像写报错、连同一轮里其它表也一起没写进去（degraded）。先把 d 面清掉再写 u 面
+    才是最终态，且对「u - d」的既有语义无影响。
     清单只用 ORM 表：ops 来自 mapper.tables，额外表没有 ORM 事件不会出现在这里，
     在这里多反射一次只是白白多连一条库（本函数跑在业务提交后的请求路径上）。
     """
@@ -471,6 +496,9 @@ def apply_ops(ops, src, dst, tables=None):
                     continue
                 up = set(slot.get('u') or ()) - set(slot.get('d') or ())
                 de = set(slot.get('d') or ())
+                for chunk in _chunks(de):
+                    d.execute(delete(t).where(_pk_predicate(t, chunk)))
+                    deleted += len(chunk)
                 for chunk in _chunks(up):
                     rows = s.execute(select(t).where(_pk_predicate(t, chunk))).all()
                     d.execute(delete(t).where(_pk_predicate(t, chunk)))
@@ -480,9 +508,6 @@ def apply_ops(ops, src, dst, tables=None):
                         d.execute(t.insert(), payload)
                         written += len(payload)
                     deleted += len(chunk) - len(rows)   # 源库已无此行 → 目标也须无
-                for chunk in _chunks(de):
-                    d.execute(delete(t).where(_pk_predicate(t, chunk)))
-                    deleted += len(chunk)
     return written, deleted
 
 
@@ -540,8 +565,53 @@ def _cols_of(bind, name):
     return {c['name'] for c in insp.get_columns(name)}
 
 
+_LIT_RE = re.compile(r"'([^']*)'")
+
+
+def _check_literals(text):
+    """从 CHECK 表达式里抽字面量集合：只比白名单内容，不比语法。"""
+    return frozenset(_LIT_RE.findall(text or ''))
+
+
+def _orm_checks(t):
+    """ORM 侧该表的命名 CHECK：{约束名: 字面量集合}；无 Comparable 约束返回 None。
+
+    只收「有名字且表达式里确实列了字面量」的白名单约束（`kind IN (...)` 这一类）；
+    `a > 0` 这种没字面量的、Enum 那种由类型自动生成的、以及 callable/dialect-dict 写法
+    一律不参与（它们两边语法不可比，误判会让镜像反复重建整张表）。
+    """
+    out = {}
+    for c in t.constraints:
+        if type(c).__name__ != 'CheckConstraint' or not c.name:
+            continue
+        raw = getattr(c, 'sqltext', None)
+        if callable(raw) or isinstance(raw, dict):
+            return None
+        lits = _check_literals(None if raw is None else str(raw))
+        if lits:
+            out[c.name] = lits
+    return out or None
+
+
+def _dst_checks(bind, name):
+    """镜像侧该表的命名 CHECK；反射失败返回 None（宁可漏修，不可凭猜拆表）。"""
+    try:
+        insp = sa_inspect(bind)
+        if name not in insp.get_table_names():
+            return {}
+        out = {}
+        for c in insp.get_check_constraints(name):
+            lits = _check_literals(c.get('sqltext'))
+            if c.get('name') and lits:
+                out[c['name']] = lits
+        return out
+    except Exception:
+        return None
+
+
 def _ensure_dst_table(t, src, dst):
-    """核对镜像侧表结构：缺表或列集与代码不一致 → 按 ORM 元数据重建，返回是否重建。
+    """核对镜像侧表结构：缺表、列集与代码不一致、或命名 CHECK 白名单落后 → 按 ORM
+    元数据重建，返回是否重建。
 
     为什么必须有这一步：三条修复路径（实时 apply_ops、对账 resync_table、CLI --fix）
     原本都只做 delete+insert，而只有 resync_all 里的 create_all 会发 DDL——于是
@@ -558,7 +628,25 @@ def _ensure_dst_table(t, src, dst):
     name = t.name
     want = {c.name for c in t.columns}
     have = _cols_of(dst, name)
-    if have == want:
+    why = None
+    if have != want:
+        why = ('缺表' if have is None
+               else '缺列 ' + str(sorted(want - have)) + ' / 多列 ' + str(sorted(have - want)))
+    else:
+        # v7.14 新堵的一类漂移：列集一字不差，但 CHECK 白名单旧了一格。
+        # 只加形态不改列的迁移（study_material.kind 加 'lesson_plan'）恰好落在
+        # 列对账的盲区里：PG 已经能写教案，镜像侧仍带着旧 CHECK，于是每一条教案
+        # 行写镜像都报 CHECK constraint failed、置 _degraded，整表永不自愈——
+        # 老师拷走的库里就是静默少掉全部教案。
+        w_ck = _orm_checks(t)
+        if w_ck:
+            h_ck = _dst_checks(dst, name)
+            if h_ck is not None and h_ck != w_ck:
+                why = ('CHECK 白名单落后于代码：' + str(
+                    {k: sorted(v) for k, v in list(w_ck.items())[:4]}).replace('\n', ' ') +
+                    ' ≠ 镜像 ' + str(
+                    {k: sorted(v) for k, v in list(h_ck.items())[:4]}).replace('\n', ' '))
+    if why is None:
         return False
     try:
         src_cols = _cols_of(src, name)
@@ -567,8 +655,7 @@ def _ensure_dst_table(t, src, dst):
     if src_cols is not None and want - src_cols:
         logger.warning(f'[mirror] 表 {name} 有列在 PG 里不存在：{sorted(want - src_cols)}，'
                        f'镜像仍按 ORM 结构重建（models.py 与迁移未对齐，请核对）')
-    logger.warning(f'[mirror] 镜像侧表 {name} 结构需重建：'
-                   f'{"缺表" if have is None else "缺列 " + str(sorted(want - have)) + " / 多列 " + str(sorted(have - want))}')
+    logger.warning(f'[mirror] 镜像侧表 {name} 结构需重建：{why}')
     # DDL 单开连接：不能在调用方已持有的 dst 写事务里抢锁。
     # 但 DROP 与 CREATE 必须「同一连接、同一事务」做完，不能分两次 bind=engine 发：
     # 旧写法是两条连接、两个事务，实时 apply_ops（不持 _lock）与每日 tick 撞车时有
@@ -604,6 +691,31 @@ def _dst_index_names(bind, name):
         return {i['name'] for i in sa_inspect(bind).get_indexes(name)}
     except Exception:
         return set()
+
+
+def reconcile_checks(src, dst, tables=None):
+    """命名 CHECK 白名单对账：返回 {表名: [与代码不一致的约束名]}。
+
+    为什么另开一道：只改枚举不改列的迁移（v7.14 给 study_material.kind 加
+    'lesson_plan'）在列对账里看不出来，而 CHECK 是两边都真强制的：PG 已能写教案，
+    镜像侧旧白名单会把每一行都拒掉。与索引对账同理，没有这一道则既不报错也不收敛。
+    只比带字面量的命名约束，语法不可比的一律跳过（见 _orm_checks）。
+    """
+    tables = tables or _mirror_tables(src)
+    bad = {}
+    for name, t in tables.items():
+        if name in _SKIP_TABLES or name in _reflected:
+            continue
+        want = _orm_checks(t)
+        if not want:
+            continue
+        have = _dst_checks(dst, name)
+        if have is None:
+            continue
+        diff = [k for k in set(want) | set(have) if want.get(k) != have.get(k)]
+        if diff:
+            bad[name] = sorted(diff)
+    return bad
 
 
 def reconcile_indexes(src, dst, tables=None):
@@ -883,6 +995,7 @@ def sqlite_mirror_tick():
             sec_bad = reconcile_secondary(db.engine, get_mirror_engine())
             schema_bad = reconcile_schema(db.engine, get_mirror_engine(), tables)
             idx_bad = reconcile_indexes(db.engine, get_mirror_engine(), tables)
+            chk_bad = reconcile_checks(db.engine, get_mirror_engine(), tables)
             unknown = unknown_extra_tables(db.engine)
         except Exception as e:
             logger.error(f'[mirror] 对账失败: {e}', exc_info=True)
@@ -895,18 +1008,19 @@ def sqlite_mirror_tick():
                            f'需要随项目目录交付的话：补模型或登记进 EXTRA_TABLES')
         _degraded.clear()
         _last_reconcile[0] = today
-        if not diff and not sec_bad and not schema_bad and not idx_bad:
+        if not diff and not sec_bad and not schema_bad and not idx_bad and not chk_bad:
             logger.info('[mirror] 对账一致：PG 与 SQLite 镜像逐表行数、列结构、'
-                        '索引与中间表主键集合均相同')
+                        '索引、CHECK 白名单与中间表主键集合均相同')
             return
         logger.warning(f'[mirror] 对账发现 {len(diff)} 张表行数不一致、'
                        f'{len(schema_bad)} 张表结构不一致（缺表/缺列）、'
                        f'{len(sec_bad)} 张中间表主键集合不一致、'
-                       f'{len(idx_bad)} 张表缺索引，逐表重刷修复：'
-                       f'{diff[:8]} / {schema_bad[:8]} / {sec_bad[:8]} / {list(idx_bad)[:8]}')
+                       f'{len(idx_bad)} 张表缺索引、{len(chk_bad)} 张表 CHECK 白名单落后，'
+                       f'逐表重刷修复：{diff[:8]} / {schema_bad[:8]} / {sec_bad[:8]} / '
+                       f'{list(idx_bad)[:8]} / {list(chk_bad.items())[:8]}')
         counted = {n for n, _, _ in diff}
         fixed_schema = set()
-        for name in schema_bad:
+        for name in list(schema_bad) + [n for n in chk_bad if n not in schema_bad]:
             # 缺表 / 旧结构靠重刷追平：resync_table 会先把镜像侧表按代码重建
             if name in counted:
                 continue        # 已在下面行数差异里，不重刷第二遍

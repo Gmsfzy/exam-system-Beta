@@ -61,18 +61,22 @@ function buildElements() {
       const fill = props.mastery ? masteryColor(n) : (DIFF_COLORS[n.difficulty] || '#10b981')
       // 掌握模式下遗忘风险节点用红色描边提示
       const riskEdge = props.mastery && n.decay_risk
+      // 状态用 class 表达，不把样式值当数据塞进 node.data：
+      // 原先 `background-opacity / border-width / border-color: data(...)` 会被渲染器
+      // 逐条判为无效写法并回落默认值，掌握度淡化与风险描边其实一直没生效。
+      const cls = []
+      if (props.mastery && (n.mastery ?? 0) === 0) cls.push('unlearned')
+      if (highlight.has(n.id)) cls.push('hl')
+      if (riskEdge) cls.push('risk')
       return {
         data: {
           id: `kp-${n.id}`,
           name: n.name,
           color: fill,
-          'background-opacity': props.mastery && (n.mastery ?? 0) === 0 ? 0.45 : 0.92,
-          'border-color': riskEdge ? '#ef4444' : (highlight.has(n.id) ? ACCENT : (isDark() ? '#334155' : '#ffffff')),
-          'border-width': riskEdge ? 3.5 : (highlight.has(n.id) ? 4 : 2.5),
           size: 38 + Math.min(d, 8) * 3,
           raw: n,
         },
-        classes: highlight.has(n.id) ? 'hl' : '',
+        classes: cls.join(' '),
       }
     }),
     ...props.edges
@@ -141,9 +145,10 @@ const render = () => {
           width: 'data(size)',
           height: 'data(size)',
           'background-color': 'data(color)',
-          'background-opacity': 'data(background-opacity)',
-          'border-width': 'data(border-width)',
-          'border-color': 'data(border-color)',
+          // 基准态（原走 data 映射的三个属性改为级联常量，状态由下面的 class 规则覆盖）
+          'background-opacity': 0.92,
+          'border-width': 2.5,
+          'border-color': dark ? '#334155' : '#ffffff',
           // 发光底层：掌握/聚焦节点泛青色光晕
           'underlay-color': ACCENT,
           'underlay-opacity': 0,
@@ -165,8 +170,18 @@ const render = () => {
         },
       },
       {
+        // 掌握模式下未学习的知识点：淡出但不隐藏，保留拓扑感
+        selector: 'node.unlearned',
+        style: { 'background-opacity': 0.45 },
+      },
+      {
         selector: 'node.hl',
-        style: { 'underlay-opacity': 0.35 },
+        style: { 'underlay-opacity': 0.35, 'border-width': 4, 'border-color': ACCENT },
+      },
+      {
+        // 遗忘风险优先于高亮：同特异性下靠级联顺序覆盖上面那条描边
+        selector: 'node.risk',
+        style: { 'border-width': 3.5, 'border-color': '#ef4444' },
       },
       {
         selector: 'node.node-focus',

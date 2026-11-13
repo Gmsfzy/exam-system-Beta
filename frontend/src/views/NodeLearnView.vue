@@ -109,6 +109,21 @@
         </div>
       </div>
 
+      <!-- 配套代码笔记本 -->
+      <div v-if="node.notebook_id" class="panel notebook-panel">
+        <div class="panel-head">
+          <h2>配套代码笔记本</h2>
+          <el-button size="small" type="primary" @click="openNotebook">
+            打开 Notebook →
+          </el-button>
+        </div>
+        <div class="notebook-info">
+          <el-icon :size="18" class="notebook-icon"><EditPen /></el-icon>
+          <span class="notebook-title">{{ node.notebook_title || '代码笔记本' }}</span>
+          <span class="notebook-hint">跟着节点示例边学边跑代码</span>
+        </div>
+      </div>
+
       <!-- 我的笔记（按知识点一篇总结） -->
       <div v-if="node.knowledge_point_id" class="panel note-panel">
         <div class="panel-head">
@@ -413,6 +428,10 @@ const updateProgress = async (status) => {
 
 const goPathEnroll = () => router.push(`/learning/paths/${pathId}`)
 
+const openNotebook = () => {
+  if (node.value?.notebook_id) router.push(`/learning/notebook?open=${node.value.notebook_id}`)
+}
+
 const openVideo = (r) => {
   currentVideo.value = r
   videoDlg.value = true
@@ -712,6 +731,31 @@ onMounted(() => {
 
 .note-panel {
   margin-top: 18px;
+}
+
+.notebook-panel {
+  margin-top: 18px;
+}
+
+.notebook-info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.notebook-icon {
+  color: #06b6d4;
+}
+
+.notebook-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.notebook-hint {
+  font-size: 12px;
+  color: var(--text-muted);
 }
 
 .note-updated {

@@ -83,7 +83,9 @@
           <span v-if="myCert" class="fb-sub">编号 {{ myCert.serial_no }} · 终测 {{ Math.round((myCert.final_score || 0) * 100) }} 分</span>
           <span v-else class="fb-sub">结业测评达到 80% 通过，从核心知识点自动组卷，可反复重考</span>
         </div>
-        <el-button v-if="myCert" type="warning" @click="$router.push(`/learning/certificates/${myCert.id}`)">查看证书 →</el-button>
+        <!-- 详情路由是 /learning/certificates/:kind/:id 两段（v6.4 多源证书），
+             本路径结业证书属 system 源；此处曾只拼 id 一段，点了直接掉 404 兜底页 -->
+        <el-button v-if="myCert" type="warning" @click="$router.push(`/learning/certificates/system/${myCert.id}`)">查看证书 →</el-button>
         <el-button v-else type="primary" @click="finalDlg = true">参加结业测评</el-button>
       </div>
 

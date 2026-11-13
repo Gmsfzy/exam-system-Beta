@@ -358,6 +358,11 @@ class HomeworkAnswer(db.Model):
     oj_verdict = db.Column(db.String(10))     # AC/WA/TLE/RE/CE（仅编程题有用例时写入）
     needs_manual_grade = db.Column(db.Boolean, nullable=False, default=False)
     comment = db.Column(db.Text)              # 逐题评语
+    # v7.20 AI 批改建议留痕：教师采纳与否都要存下来，否则「AI 建议 8 分、教师给 5 分」
+    # 这 3 分差在哪永远查不出来。建议分与人工分分列存放、互不覆盖。
+    ai_suggested_score = db.Column(db.Float)     # AI 建议分（已按本题满分换算）
+    ai_suggested_comment = db.Column(db.Text)    # AI 建议批语
+    ai_suggested_at = db.Column(UTCDateTime)     # 本次建议生成时间（区分于重批覆盖）
     updated_at = db.Column(UTCDateTime, nullable=False, default=utcnow, onupdate=utcnow)
 
     question = db.relationship('Question')
@@ -377,7 +382,12 @@ class HomeworkAnswer(db.Model):
         if for_teacher:
             d.update({'auto_score': self.auto_score, 'manual_score': self.manual_score,
                       'comment': self.comment or '', 'max_score': max_score,
-                      'effective_score': self.effective_score})
+                      'effective_score': self.effective_score,
+                      # v7.20 AI 建议只给教师：学生看到「AI 说 8 分而我拿 5 分」只会起争议，
+                      # 而这块数据本来就是为事后审计判分差异用的，不是给分学生的另一套成绩
+                      'ai_suggested_score': self.ai_suggested_score,
+                      'ai_suggested_comment': self.ai_suggested_comment or '',
+                      'ai_suggested_at': iso_local(self.ai_suggested_at) if self.ai_suggested_at else None})
         elif not self.needs_manual_grade:
             # 学生可见已自动判分部分（未批改时 total_score 仍隐藏）
             d['auto_score'] = self.auto_score

@@ -14,6 +14,15 @@ from competition.gamification import (
 team_bp = Blueprint('teams', __name__)
 
 
+# ──────────────────── 通用（登录即可） ────────────────────
+
+def _require_login():
+    user = verify_token()
+    return (user, None) if user else (None, (jsonify({'message': '未登录'}), 401))
+
+
+# ──────────────────── 学生专属（加入/退出/转让） ────────────────────
+
 def _require_student():
     user = verify_token()
     if not user or not user.is_student():
@@ -52,6 +61,7 @@ def _team_dict(team, season):
         'captain': team.captain.username if team.captain else '',
         'member_count': len(members),
         'points': sum(m['points'] for m in members),
+        'shared_streak_days': team.shared_streak_days or 0,
         'members': members,
         'created_at': iso_local(team.created_at),
     }
@@ -82,20 +92,27 @@ def team_mine():
     user = verify_token()
     if not user:
         return jsonify({'message': '未登录'}), 401
-    m = _my_membership(user.id)
-    if not m:
-        return jsonify(None)
-    return jsonify(_team_dict(m.team, current_season()))
+    # v7.7 教师返回自己创建的战队（即使未加入成员）；学生返回自己加入的战队
+    if user.is_student():
+        m = _my_membership(user.id)
+        if not m:
+            return jsonify(None)
+        return jsonify(_team_dict(m.team, current_season()))
+    # 教师：找 captain_id=自己 的战队
+    team = Team.query.filter_by(captain_id=user.id).first()
+    return jsonify(_team_dict(team, current_season()) if team else None)
 
 
 # ═══════════════ 操作 ═══════════════
 
 @team_bp.route('/teams', methods=['POST'])
 def create_team():
-    user, err = _require_student()
+    """v7.7 教师也可创建战队（作为"教练/发起人"，不加进队员列表）；学生创建仍是队长。"""
+    user, err = _require_login()
     if err:
         return err
-    if _my_membership(user.id):
+    # 学生不能重复加入已有战队
+    if user.is_student() and _my_membership(user.id):
         return jsonify({'message': '你已在战队中，不能重复创建'}), 400
     data = request.get_json(silent=True) or {}
     name = (data.get('name') or '').strip()
@@ -108,9 +125,10 @@ def create_team():
                 captain_id=user.id)
     db.session.add(team)
     db.session.flush()
-    db.session.add(TeamMember(team_id=team.id, user_id=user.id, role='captain'))
-    db.session.commit()
-    check_and_grant(user.id, {'team_found'})
+    # 只有学生创建者自动成为队长；教师作为发起者不占队员名额
+    if user.is_student():
+        db.session.add(TeamMember(team_id=team.id, user_id=user.id, role='captain'))
+        check_and_grant(user.id, {'team_found'})
     db.session.commit()
     return jsonify(_team_dict(team, current_season())), 201
 
@@ -169,14 +187,15 @@ def transfer_captain(team_id):
 
 @team_bp.route('/teams/<int:team_id>', methods=['DELETE'])
 def dissolve_team(team_id):
-    user, err = _require_student()
+    """v7.7 战队解散：学生队长或教师创建者都可解散。"""
+    user, err = _require_login()
     if err:
         return err
     team = db.session.get(Team, team_id)
     if not team:
         return jsonify({'message': '战队不存在'}), 404
     if team.captain_id != user.id:
-        return jsonify({'message': '仅队长可解散战队'}), 403
+        return jsonify({'message': '仅队长或创建教师可解散战队'}), 403
     db.session.delete(team)  # TeamMember 级联删除
     db.session.commit()
     return jsonify({'message': '战队已解散'})

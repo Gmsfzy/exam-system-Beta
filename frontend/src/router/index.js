@@ -22,7 +22,11 @@ const routes = [
     // 动态 redirect：有 token 直奔 Portal，无 token 回 Home，避免「/ -> /portal -> /home」双跳
     redirect: () => {
       try {
-        return localStorage.getItem('token') ? '/portal' : '/home'
+        if (!localStorage.getItem('token')) return '/home'
+        // v7.8 会话级记忆：登录状态下访问 / 时回上次访问的模块；sessionStorage 关浏览器自动清空 → 下次开浏览器回 Portal 门户
+        const last = sessionStorage.getItem('lastModule')
+        if (last && last.startsWith('/') && !last.startsWith('//') && last !== '/') return last
+        return '/portal'
       } catch (e) {
         return '/home'
       }
@@ -82,12 +86,16 @@ const routes = [
       { path: 'learning/my-knowledge', name: 'MyKnowledge', component: () => import('../views/MyKnowledge.vue'), meta: { module: 'learning' } },
       { path: 'learning/certificates', name: 'Certificates', component: () => import('../views/CertificateView.vue'), meta: { module: 'learning' } },
       { path: 'learning/certificates/:kind/:id', name: 'CertificateDetail', component: () => import('../views/CertificateView.vue'), meta: { module: 'learning' } },
+      // v7.19 证书广场：全站公开证书卡片墙（他人公开的那部分走脱敏视图，不展示编号与佐证）
+      { path: 'learning/cert-square', name: 'CertificateSquare', component: () => import('../views/CertificateSquare.vue'), meta: { module: 'learning' } },
       { path: 'learning/paths', name: 'MajorPaths', component: () => import('../views/MajorPathsView.vue'), meta: { module: 'learning' } },
       { path: 'learning/paths/:id', name: 'PathDetail', component: () => import('../views/PathDetailView.vue'), meta: { module: 'learning' } },
       { path: 'learning/node/:nodeId', name: 'NodeLearn', component: () => import('../views/NodeLearnView.vue'), meta: { module: 'learning' } },
       { path: 'learning/graph', name: 'KnowledgeGraph', component: () => import('../views/KnowledgeGraphView.vue'), meta: { module: 'learning' } },
       { path: 'learning/wrong', name: 'WrongNotebook', component: () => import('../views/WrongNotebook.vue'), meta: { module: 'learning' } },
       { path: 'learning/notes', name: 'StudyNotes', component: () => import('../views/StudyNotes.vue'), meta: { module: 'learning' } },
+      // v7.19 学习心得：固定三段（感悟与收获 / 心得与总结 / 反思创造）+ 周期归档
+      { path: 'learning/insights', name: 'StudyInsights', component: () => import('../views/StudyInsights.vue'), meta: { module: 'learning' } },
       // v6.6 代码笔记本（Jupyter 式持久 kernel 工作台）：无 id 为列表，带 id 为编辑/只读
       { path: 'learning/notebook', name: 'NotebookList', component: () => import('../views/NotebookWorkspace.vue'), meta: { module: 'learning' } },
       { path: 'learning/notebook/:id', name: 'NotebookDetail', component: () => import('../views/NotebookWorkspace.vue'), meta: { module: 'learning' } },
@@ -95,6 +103,8 @@ const routes = [
       { path: 'learning/practice/:sessionId', name: 'PracticeDetail', component: () => import('../views/PracticeDetail.vue'), meta: { module: 'learning' } },
       { path: 'learning/plan', name: 'StudyPlan', component: () => import('../views/StudyPlan.vue'), meta: { module: 'learning' } },
       { path: 'learning/report', name: 'StudyReport', component: () => import('../views/StudyReport.vue'), meta: { module: 'learning' } },
+      // 查看他人公开的学习报告（后端按 is_study_report_public 门控）
+      { path: 'learning/report/:uid', name: 'StudyReportPublic', component: () => import('../views/StudyReport.vue'), meta: { module: 'learning' } },
       { path: 'learning/materials', name: 'MaterialLibrary', component: () => import('../views/MaterialLibrary.vue'), meta: { module: 'learning' } },
       { path: 'learning/explore', name: 'ExploreSquare', component: () => import('../views/ExploreSquare.vue'), meta: { module: 'learning' } },
       { path: 'learning/user/:uid', name: 'LearningUserHome', component: () => import('../views/UserHome.vue'), meta: { module: 'learning' } },
@@ -176,6 +186,17 @@ router.beforeEach((to, from, next) => {
 
   // 4) 其他登录后路由：放行
   next()
+})
+
+// v7.8 会话级记忆：记录每次访问的模块路径（除登录/注册/Portal/Home 这些"框架页"）
+// sessionStorage 关浏览器自动清空 → 下次开浏览器访问 / 时回 Portal 门户
+router.afterEach((to) => {
+  try {
+    const skip = ['/', '/portal', '/home', '/login', '/register']
+    if (!skip.includes(to.path) && !to.meta.public) {
+      sessionStorage.setItem('lastModule', to.fullPath)
+    }
+  } catch (e) { /* sessionStorage 不可用时静默降级 */ }
 })
 
 export default router

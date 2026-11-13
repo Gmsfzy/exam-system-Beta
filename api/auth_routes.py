@@ -78,8 +78,60 @@ def api_register():
 def api_current_user():
     user = verify_token()
     if user:
-        return jsonify({'id': user.id, 'username': user.username, 'role': user.role})
+        return jsonify({'id': user.id, 'username': user.username, 'role': user.role, 'email': user.email,
+                        'is_study_report_public': bool(user.is_study_report_public)})
     return jsonify({'message': '未登录'}), 401
+
+
+@api_auth_bp.route('/user/me', methods=['PUT'])
+@log_errors
+def api_update_current_user():
+    """v7.7 个人资料更新：当前可改邮箱（后续可扩展 nickname/avatar 等）。"""
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    data = request.get_json(silent=True) or {}
+    if 'email' in data:
+        new_email = (data.get('email') or '').strip() or None
+        if new_email:
+            # 格式最基本校验（含 @）
+            if '@' not in new_email or '.' not in new_email.split('@')[-1]:
+                return jsonify({'message': '邮箱格式不正确'}), 400
+            # 唯一性校验（排除自己）
+            dup = User.query.filter_by(email=new_email).filter(User.id != user.id).first()
+            if dup:
+                return jsonify({'message': '该邮箱已被其他用户使用'}), 400
+        user.email = new_email
+    if 'is_study_report_public' in data:
+        user.is_study_report_public = bool(data.get('is_study_report_public'))
+    db.session.commit()
+    return jsonify({'id': user.id, 'username': user.username, 'role': user.role, 'email': user.email,
+                    'is_study_report_public': bool(user.is_study_report_public)})
+
+
+@api_auth_bp.route('/change-password', methods=['POST'])
+@limiter.limit(RateLimitConfig.AUTH)
+@log_errors
+def api_change_password():
+    """修改密码：验证旧密码 → 更新 hash → 自动吊销所有旧 token（立即生效）。v7.7 新增。"""
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    data = request.get_json(silent=True) or {}
+    old_pwd = (data.get('old_password') or '').strip()
+    new_pwd = data.get('new_password') or ''
+    if not old_pwd or not new_pwd:
+        return jsonify({'message': '旧密码和新密码不能为空'}), 400
+    if len(new_pwd) < 6:
+        return jsonify({'message': '新密码至少 6 位'}), 400
+    if not user.check_password(old_pwd):
+        return jsonify({'message': '旧密码不正确'}), 400
+    user.set_password(new_pwd)
+    # 吊销水位前进 1 秒，保证所有之前签发的 JWT 立即失效（包括当前请求的 token）
+    user.token_valid_at = utcnow().replace(microsecond=0) + dt.timedelta(seconds=1)
+    db.session.commit()
+    logger.info('User %s changed password (tokens revoked)', user.id)
+    return jsonify({'message': '密码修改成功，请重新登录'})
 
 
 @api_auth_bp.route('/logout', methods=['POST'])

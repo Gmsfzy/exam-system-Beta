@@ -482,6 +482,64 @@ def test_tick_repairs_missing_index(bootstrapped):
     assert not sm.reconcile_indexes(db.engine, sm.get_mirror_engine())
 
 
+def _narrow_dst_check(name='notebook', ck='_notebook_vis_ck',
+                      text="visibility IN ('private')"):
+    """把镜像侧表按“列完全相同、只把某个 CHECK 白名单改窄一格”重建（v7.14 场景）。"""
+    import sqlalchemy as sa
+    t = _tbl(name)
+    md = sa.MetaData()
+    args = [sa.Column(c.name, c.type, nullable=c.nullable, primary_key=c.primary_key,
+                      server_default=c.server_default) for c in t.columns]
+    for c in t.constraints:
+        if type(c).__name__ != 'CheckConstraint':
+            continue
+        args.append(sa.CheckConstraint(text if c.name == ck else str(c.sqltext), name=c.name))
+    nt = sa.Table(name, md, *args)
+    with sm.get_mirror_engine().begin() as d:
+        d.exec_driver_sql('DROP TABLE IF EXISTS "%s"' % name)
+        nt.create(d)
+
+
+def test_ensure_dst_table_detects_stale_check(bootstrapped):
+    """列一字不差、只有 CHECK 白名单旧了一格：也要触发自愈重建并收敛。
+
+    v7.14 给 study_material.kind 加 'lesson_plan' 就是这个形状：PG 已能写教案，
+    镜像侧旧白名单会把每一行都拒掉，列对账与行数对账全都看不见。"""
+    eng = sm.get_mirror_engine()
+    assert sm._ensure_dst_table(_tbl('notebook'), db.engine, eng) is False, '前置：一致不该重建'
+    _narrow_dst_check()
+    assert _dst_columns('notebook') == {c.name for c in _tbl('notebook').columns}, \
+        '列集没变——本例故意落在列对账的盲区里'
+    assert not sm.reconcile_schema(db.engine, eng), '列结构对账确实看不见这类漂移'
+    assert sm._ensure_dst_table(_tbl('notebook'), db.engine, eng) is True, 'CHECK 落后要重建'
+    assert sm._ensure_dst_table(_tbl('notebook'), db.engine, eng) is False, '重建后收敛，不反复拆表'
+    want = sm._orm_checks(_tbl('notebook'))['_notebook_vis_ck']
+    assert sm._dst_checks(eng, 'notebook')['_notebook_vis_ck'] == want
+
+
+def test_reconcile_checks_and_tick_self_heal(bootstrapped):
+    """对账要报出 CHECK 漂移，每日 tick 不跑 CLI 也能修回来。"""
+    eng = sm.get_mirror_engine()
+    assert not sm.reconcile_checks(db.engine, eng), '前置：无漂移不该报错'
+    _narrow_dst_check()
+    bad = sm.reconcile_checks(db.engine, eng)
+    assert bad.get('notebook') == ['_notebook_vis_ck'], bad
+    sm._last_reconcile[0] = None
+    sm.sqlite_mirror_tick()
+    assert not sm.reconcile_checks(db.engine, sm.get_mirror_engine()), 'tick 后应收敛'
+
+
+def test_orm_checks_skips_uncomparable_constraints(bootstrapped):
+    """无字面量的约束（如 a > 0）不参与比对，否则两边语法差异会造成反复重建。"""
+    import sqlalchemy as sa
+    t = sa.Table('cmp_x', sa.MetaData(),
+                 sa.Column('id', sa.Integer, primary_key=True),
+                 sa.Column('n', sa.Integer, nullable=False),
+                 sa.CheckConstraint('n > 0', name='_cmp_n_ck'))
+    assert sm._orm_checks(t) is None
+    assert sm._check_literals("kind IN ('a', 'b')") == frozenset({'a', 'b'})
+
+
 # ────────────────── 无 ORM 模型的表（EXTRA_TABLES） ──────────────────
 
 def _make_modelless_table(name='ops_metric', rows=3):
@@ -557,4 +615,54 @@ def test_mirror_tables_skips_reflection_without_source(bootstrapped, monkeypatch
     monkeypatch.setattr(sm, 'EXTRA_TABLES', (name,))
     assert name not in sm._mirror_tables(), 'src=None 时不应去反射'
     assert name in sm._mirror_tables(db.engine)
+
+
+def test_pk_changing_update_is_mirrored(bootstrapped):
+    """改了主键的 UPDATE 必须「删旧键 + 写新键」两条都记（v7.17 实机踩到）。
+
+    起因：清理测试账号时把 `homework_student.student_id`（该列本身就是主键）从一个号
+    并到另一个号，PG 侧 2 行而镜像只剩 1 行且**一句日志都没报**。根因是 after_flush
+    时 `state.key` 仍是旧 identity key（新键要等 finalize_flush_changes），旧写法只拿
+    key → 回源按旧主键读 → 读不到 → 把镜像那行删掉，新主键行从未写入。
+    """
+    from database.models import User
+    u = User(username='acct_old', role='teacher')
+    u.set_password('pw')
+    db.session.add(u)
+    db.session.commit()
+    old_id, new_id = u.id, u.id + 9000
+    assert (old_id,) in _mirror_pks('user'), '前置：新建立的行应已在镜像里'
+
+    u.id = new_id
+    db.session.commit()
+
+    pks = _mirror_pks('user')
+    assert (new_id,) in pks, '主键被改后，新主键那行必须写进镜像'
+    assert (old_id,) not in pks, '旧主键那行必须从镜像消失（不能两边各留一份）'
+    assert (new_id,) in _src_pks('user'), '主库侧也应是新主键（防止只测了镜像一头）'
+
+
+def test_pk_changing_composite_row_is_mirrored(bootstrapped):
+    """复合主键同理：名单行的 student_id 换了人，镜像不能只删不写。"""
+    from database.models import User
+    from homework.models import HomeworkStudent
+
+    a = User(username='stu_a', role='student')
+    a.set_password('pw')
+    b = User(username='stu_b', role='student')
+    b.set_password('pw')
+    db.session.add_all([a, b])
+    db.session.commit()
+
+    row = HomeworkStudent(homework_id=70001, student_id=a.id)
+    db.session.add(row)
+    db.session.commit()
+    assert (70001, a.id) in _mirror_pks('homework_student')
+
+    row.student_id = b.id          # 改的就是主键列
+    db.session.commit()
+
+    pks = _mirror_pks('homework_student')
+    assert (70001, b.id) in pks, '换人后的新主键行应在镜像里'
+    assert (70001, a.id) not in pks, '换人前的旧主键行应从镜像消失'
 

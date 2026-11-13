@@ -71,9 +71,35 @@ def api_remove_student(id, student_id):
 
 @api_student_bp.route('/students', methods=['GET'])
 def api_list_students():
+    """v7.7 学生列表：支持 ?course_id= 按课程历史考生过滤 + ?search= 关键词。
+
+    - course_id 给出时，只返回曾在该课程下参加过考试的学生（隐式"班级"概念）。
+      要加新人？清除筛选或用 search 关键词精确搜。
+    - search 对 username/email 做 LIKE。
+    - 两个参数可叠加。"""
     user, err = require_teacher(deny_msg='无权访问', unauth_msg='无权访问', unauth_status=403)
     if err:
         return err
-    
-    students = User.query.filter_by(role='student').all()
+
+    course_id = request.args.get('course_id', type=int)
+    search = (request.args.get('search') or '').strip()
+
+    query = User.query.filter_by(role='student')
+
+    if course_id:
+        from database.models import Exam, ExamStudent
+        exam_ids = [e.id for e in Exam.query.filter_by(course_id=course_id).all()]
+        if not exam_ids:
+            # 这门课还没人考过试 → 返回空，提示教师换筛选条件或用搜索
+            return jsonify([])
+        historical_ids = [es.student_id for es in ExamStudent.query.filter(ExamStudent.exam_id.in_(exam_ids)).all()]
+        if not historical_ids:
+            return jsonify([])
+        query = query.filter(User.id.in_(historical_ids))
+
+    if search:
+        like = f"%{search}%"
+        query = query.filter(db.or_(User.username.like(like), User.email.like(like)))
+
+    students = query.order_by(User.username).all()
     return jsonify([{'id': s.id, 'username': s.username, 'email': s.email} for s in students])

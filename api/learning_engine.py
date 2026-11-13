@@ -253,7 +253,34 @@ def touch_checkin(user_id, minutes=0, tasks_delta=0):
     db.session.flush()
     # 打卡时顺带检查连击/证书/路径完成徽章（内部已静默降级，不影响主流程）
     grant_learning_badges(user_id)
+    # 战队共同打卡：若该生属于战队且今日未同步，战队 shared_streak_days+1
+    team_shared_checkin(user_id)
     return c
+
+
+def team_shared_checkin(user_id):
+    """学生打卡时同步战队共同打卡：该生所属战队当天未同步过则 shared_streak_days+1，
+    并更新 last_sync_date=today；当天已同步则跳过（每日最多 +1）。
+    同步后若达到战队徽章门槛则给全体队员发徽章。失败静默降级，不影响打卡主流程。
+    """
+    try:
+        from competition.models import Team, TeamMember
+        membership = TeamMember.query.filter_by(user_id=user_id).first()
+        if not membership:
+            return
+        team = db.session.get(Team, membership.team_id)
+        if not team:
+            return
+        today = local_today()
+        if team.last_sync_date == today:
+            return
+        team.shared_streak_days = (team.shared_streak_days or 0) + 1
+        team.last_sync_date = today
+        db.session.flush()
+        from competition.gamification import grant_team_streak_badges
+        grant_team_streak_badges(team)
+    except Exception:
+        logger.exception('战队共同打卡同步失败 user=%s', user_id)
 
 
 def compute_streak(user_id, today=None):

@@ -365,6 +365,8 @@ class Team(db.Model):
     description = db.Column(db.Text)
     captain_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
+    shared_streak_days = db.Column(db.Integer, default=0)      # 战队共同打卡天数
+    last_sync_date = db.Column(db.Date, nullable=True)         # 最近一次共同打卡同步日（每日只 +1）
 
     captain = db.relationship('User', foreign_keys=[captain_id], backref='captained_teams')
     members = db.relationship('TeamMember', backref='team',

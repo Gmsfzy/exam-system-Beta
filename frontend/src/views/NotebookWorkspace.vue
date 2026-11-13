@@ -136,7 +136,7 @@ const fmtTime = (iso) => { try { return new Date(iso).toLocaleString() } catch (
 
 // ── 列表 ────────────────────────────────────────────────────
 const loadList = async () => {
-  const { data } = await request.get('/notebooks', { params: { scope: scope.value } })
+  const { data } = await request.get('/api/notebooks', { params: { scope: scope.value } })
   list.value = data.items || []
 }
 
@@ -144,7 +144,7 @@ const doCreate = async () => {
   if (!form.title.trim()) { ElMessage.warning('请填写标题'); return }
   creating.value = true
   try {
-    const { data } = await request.post('/notebooks', { ...form })
+    const { data } = await request.post('/api/notebooks', { ...form })
     createVisible.value = false
     form.title = ''; form.description = ''
     router.push(`/learning/notebook/${data.id}`)
@@ -153,13 +153,13 @@ const doCreate = async () => {
 
 const removeNotebook = async (nb) => {
   await ElMessageBox.confirm(`确定删除笔记本「${nb.title}」？单元与输出将一并删除`, '提示', { type: 'warning' })
-  await request.delete(`/notebooks/${nb.id}`)
+  await request.delete(`/api/notebooks/${nb.id}`)
   ElMessage.success('已删除')
   loadList()
 }
 
 const forkNotebook = async (nb) => {
-  const { data } = await request.post(`/notebooks/${nb.id}/fork`)
+  const { data } = await request.post(`/api/notebooks/${nb.id}/fork`)
   ElMessage.success('已 fork 为我的副本')
   router.push(`/learning/notebook/${data.id}`)
 }
@@ -173,7 +173,7 @@ const onImportFile = async (ev) => {
   try {
     const fd = new FormData()
     fd.append('file', file)
-    const { data } = await request.post('/notebooks/import', fd, {
+    const { data } = await request.post('/api/notebooks/import', fd, {
       headers: { 'Content-Type': 'multipart/form-data' }, timeout: 60000,
     })
     ElMessage.success(`已导入「${data.title}」（${(data.cells || []).length} 个单元）`)
@@ -188,7 +188,7 @@ const onImportFile = async (ev) => {
 const exportIpynb = async () => {
   if (!notebook.value) return
   try {
-    const resp = await request.get(`/notebooks/${notebook.value.id}/export`, { responseType: 'blob' })
+    const resp = await request.get(`/api/notebooks/${notebook.value.id}/export`, { responseType: 'blob' })
     const url = window.URL.createObjectURL(new Blob([resp.data]))
     const link = document.createElement('a')
     link.href = url
@@ -205,7 +205,7 @@ const openNotebook = (id) => router.push(`/learning/notebook/${id}`)
 const goBack = () => router.push('/learning/notebook')
 
 const loadNotebook = async (id) => {
-  const { data } = await request.get(`/notebooks/${id}`)
+  const { data } = await request.get(`/api/notebooks/${id}`)
   notebook.value = data
   cells.value = data.cells || []
   readonly.value = data.user_id !== currentUserId.value
@@ -213,7 +213,7 @@ const loadNotebook = async (id) => {
 
 // v6.7 嵌入式：按上下文 get-or-create，同一用户×同一作业/考试/竞赛/悬赏复用一个笔记本
 const loadCtx = async () => {
-  const { data } = await request.get('/notebooks/ctx', {
+  const { data } = await request.get('/api/notebooks/ctx', {
     params: { ctx_type: props.ctxType, ctx_id: props.ctxId, title: props.ctxTitle || undefined },
   })
   notebook.value = data.notebook
@@ -223,7 +223,7 @@ const loadCtx = async () => {
 
 const loadMeta = async () => {
   try {
-    const { data } = await request.get('/notebooks/meta')
+    const { data } = await request.get('/api/notebooks/meta')
     Object.assign(meta, data)
   } catch (e) { /* meta 失败不阻塞主流程 */ }
 }
@@ -235,23 +235,25 @@ watch(() => route.params.id, (id) => {
 onMounted(async () => {
   await loadMeta()
   if (props.embedded) { loadCtx(); return }
+  // 支持 ?open=<id> 从学习路径节点等入口直达指定笔记本工作区
+  if (route.query.open) { loadNotebook(route.query.open); return }
   if (route.params.id) { loadNotebook(route.params.id) } else { loadList() }
 })
 
 // ── 编辑态操作 ──────────────────────────────────────────────
 const saveMeta = async () => {
   if (readonly.value || !notebook.value) return
-  try { await request.put(`/notebooks/${notebook.value.id}`, { title: notebook.value.title }) } catch (e) { /* 拦截器已提示 */ }
+  try { await request.put(`/api/notebooks/${notebook.value.id}`, { title: notebook.value.title }) } catch (e) { /* 拦截器已提示 */ }
 }
 
 const addCell = async (cellType) => {
-  const { data } = await request.post(`/notebooks/${notebook.value.id}/cells`, { cell_type: cellType, source: '' })
+  const { data } = await request.post(`/api/notebooks/${notebook.value.id}/cells`, { cell_type: cellType, source: '' })
   cells.value.push(data)
 }
 
 const deleteCell = async (cell) => {
   await ElMessageBox.confirm('确定删除该单元？', '提示', { type: 'warning' })
-  await request.delete(`/notebooks/${notebook.value.id}/cells/${cell.id}`)
+  await request.delete(`/api/notebooks/${notebook.value.id}/cells/${cell.id}`)
   cells.value = cells.value.filter(c => c.id !== cell.id)
 }
 
@@ -262,7 +264,7 @@ const moveCell = async (cell, delta) => {
   const arr = cells.value.slice()
   const [it] = arr.splice(idx, 1)
   arr.splice(to, 0, it)
-  const { data } = await request.post(`/notebooks/${notebook.value.id}/cells/reorder`, { order: arr.map(c => c.id) })
+  const { data } = await request.post(`/api/notebooks/${notebook.value.id}/cells/reorder`, { order: arr.map(c => c.id) })
   cells.value = data.cells
 }
 
@@ -270,8 +272,8 @@ const moveCell = async (cell, delta) => {
 const runCell = async (cell) => {
   runningId.value = cell.id
   try {
-    await request.put(`/notebooks/${notebook.value.id}/cells/${cell.id}`, { source: cell.source })
-    const { data } = await request.post(`/notebooks/${notebook.value.id}/cells/${cell.id}/run`, {}, {
+    await request.put(`/api/notebooks/${notebook.value.id}/cells/${cell.id}`, { source: cell.source })
+    const { data } = await request.post(`/api/notebooks/${notebook.value.id}/cells/${cell.id}/run`, {}, {
       timeout: (Number(meta.timeout) || 30) * 1000 + 40000,
     })
     const idx = cells.value.findIndex(c => c.id === cell.id)
@@ -286,7 +288,7 @@ const runCell = async (cell) => {
 const stopCell = async () => {
   if (!notebook.value) return
   try {
-    await request.post(`/notebooks/${notebook.value.id}/kernel/interrupt`)
+    await request.post(`/api/notebooks/${notebook.value.id}/kernel/interrupt`)
   } catch (e) { /* 拦截器已提示 */ }
 }
 
@@ -301,7 +303,7 @@ const runAll = async () => {
 
 const resetKernel = async () => {
   await ElMessageBox.confirm('重置后跨单元保留的变量/导入将全部清空（相当于 Restart Kernel），确定？', '提示', { type: 'warning' })
-  await request.post(`/notebooks/${notebook.value.id}/kernel/reset`)
+  await request.post(`/api/notebooks/${notebook.value.id}/kernel/reset`)
   ElMessage.success('kernel 已重置')
 }
 
@@ -310,7 +312,7 @@ const saveAll = async () => {
   try {
     for (const c of cells.value) {
       if (c.cell_type === 'code' || c.source != null) {
-        await request.put(`/notebooks/${notebook.value.id}/cells/${c.id}`, { source: c.source })
+        await request.put(`/api/notebooks/${notebook.value.id}/cells/${c.id}`, { source: c.source })
       }
     }
     ElMessage.success('已保存')

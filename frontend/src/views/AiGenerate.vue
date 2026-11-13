@@ -173,6 +173,15 @@ onMounted(async () => {
   }
 })
 
+// 出题要等多久：推理模型下 5 道编程题实测 74s，20 道成倍拉长。
+// 公式与后端 ai_service/services.py 的 exam_timeout 一致（AI_EXAM_TIMEOUT=180 基准，
+// 超出 5 道每道 +12s），再加 30s 余量。必须比后端宽，否则浏览器先掉线，
+// 页面上只剩一句没头没尾的“生成失败”，后端那句具体原因根本送回不来。
+const examTimeoutMs = () => {
+  const c = Number(form.value.count) || 5
+  return (180 + Math.max(0, c - 5) * 12 + 30) * 1000
+}
+
 const generateQuestions = async () => {
   if (!form.value.major_name) {
     ElMessage.warning('请输入专业名称')
@@ -199,7 +208,7 @@ const generateQuestions = async () => {
       count: form.value.count,
       description: form.value.description,
       question_mode: form.value.question_mode
-    })
+    }, { timeout: examTimeoutMs() })
     
     ElMessage.success(res.data.message)
     history.value.unshift({
@@ -210,7 +219,12 @@ const generateQuestions = async () => {
       status: 'success'
     })
   } catch (e) {
-    const msg = e.response?.data?.message || '生成失败'
+    // 后端自己报的原因优先；只有浏览器侧掉线（无 response）才拼超时文案
+    const timeoutLike = !e.response && (e.code === 'ECONNABORTED' || e.code === 'ETIMEDOUT' || /timeout/i.test(e.message || ''))
+    const msg = e.response?.data?.message
+      || (timeoutLike
+        ? `等待 AI 响应超时（已等 ${Math.round(examTimeoutMs() / 1000)}s），可减少题目数量或稍后重试`
+        : '生成失败')
     ElMessage.error(msg)
     history.value.unshift({
       time: startTime.toLocaleString(),

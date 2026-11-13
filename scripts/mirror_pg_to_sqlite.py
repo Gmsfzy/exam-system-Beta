@@ -93,22 +93,26 @@ def main(argv=None):
             sec_bad = m.reconcile_secondary(db.engine, m.get_mirror_engine())
             schema_bad = m.reconcile_schema(db.engine, m.get_mirror_engine())
             idx_bad = m.reconcile_indexes(db.engine, m.get_mirror_engine())
+            chk_bad = m.reconcile_checks(db.engine, m.get_mirror_engine())
             _echo(f'[resync] 已重刷 {len(per)} 张表 / {sum(per.values())} 行，'
                   f'alembic_version={",".join(ver) or "无"}')
             _echo(f'[resync] 对账差异表 {len(diff)} 张 / 中间表主键不一致 {len(sec_bad)} 张'
                   f' / 结构不一致 {len(schema_bad)} 张 / 缺索引 {len(idx_bad)} 张'
+                  f' / CHECK 白名单落后 {len(chk_bad)} 张'
                   + (f'：{diff[:10]}' if diff else ''))
             _echo_unknown(db.engine)
-            return 0 if not diff and not sec_bad and not schema_bad and not idx_bad else 1
+            return 0 if not diff and not sec_bad and not schema_bad and not idx_bad \
+                and not chk_bad else 1
 
         if args.reconcile:
             diff = m.reconcile_counts(db.engine, m.get_mirror_engine())
             sec_bad = m.reconcile_secondary(db.engine, m.get_mirror_engine())
             schema_bad = m.reconcile_schema(db.engine, m.get_mirror_engine())
             idx_bad = m.reconcile_indexes(db.engine, m.get_mirror_engine())
+            chk_bad = m.reconcile_checks(db.engine, m.get_mirror_engine())
             unknown = _echo_unknown(db.engine)
-            if not diff and not sec_bad and not schema_bad and not idx_bad:
-                _echo('[reconcile] 逐表行数、列结构、索引与中间表主键集合均一致，'
+            if not diff and not sec_bad and not schema_bad and not idx_bad and not chk_bad:
+                _echo('[reconcile] 逐表行数、列结构、索引、CHECK 白名单与中间表主键集合均一致，'
                       '镜像与主库同步'
                       + (f'（另有 {len(unknown)} 张清单外表未镜像，见上）' if unknown else ''))
                 return 0
@@ -128,13 +132,19 @@ def main(argv=None):
                 _echo(f'[reconcile] {len(idx_bad)} 张表镜像侧缺索引（不动数据，--fix 只补建）：')
                 for name, miss in list(idx_bad.items())[:20]:
                     _echo(f'           {name:<44} {miss}')
+            if chk_bad:
+                # 单独报这一道：只改枚举不改列的迁移（如 kind 加教案）列对账看不见
+                _echo(f'[reconcile] {len(chk_bad)} 张表镜像侧 CHECK 白名单落后于代码'
+                      f'（不修则这类行写进镜像会 CHECK failed，--fix 重刷）：')
+                for name, miss in list(chk_bad.items())[:20]:
+                    _echo(f'           {name:<44} {miss}')
             if not args.fix:
                 _echo('[reconcile] 未加 --fix，仅报告不修改。')
                 return 1
             tables = m._mirror_tables(db.engine)     # ORM 表 + EXTRA_TABLES 登记的额外表
             counted = {name for name, _, _ in diff}
             with m._lock:
-                for name in schema_bad:
+                for name in list(schema_bad) + [n for n in chk_bad if n not in schema_bad]:
                     # 缺表/旧结构：resync_table 会先按代码重建镜像侧表再灌数据
                     if name in counted:
                         continue
@@ -163,12 +173,16 @@ def main(argv=None):
             left_sec = m.reconcile_secondary(db.engine, m.get_mirror_engine())
             left_sch = m.reconcile_schema(db.engine, m.get_mirror_engine())
             left_idx = m.reconcile_indexes(db.engine, m.get_mirror_engine())
+            left_chk = m.reconcile_checks(db.engine, m.get_mirror_engine())
             _echo(f'[fix] 修复后仍不一致 行数{len(left)} 张 / 中间表{len(left_sec)} 张'
                   f' / 结构{len(left_sch)} 张 / 索引{len(left_idx)} 张'
+                  f' / CHECK{len(left_chk)} 张'
                   + (f'：{left[:10]}' if left else '')
                   + (f'；结构：{left_sch[:10]}' if left_sch else '')
-                  + (f'；索引：{list(left_idx.items())[:10]}' if left_idx else ''))
-            return 0 if not left and not left_sec and not left_sch and not left_idx else 1
+                  + (f'；索引：{list(left_idx.items())[:10]}' if left_idx else '')
+                  + (f'；CHECK：{list(left_chk.items())[:10]}' if left_chk else ''))
+            return 0 if not left and not left_sec and not left_sch and not left_idx \
+                and not left_chk else 1
 
         # 默认：状态
         st = m.mirror_status()

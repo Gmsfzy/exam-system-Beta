@@ -224,7 +224,10 @@ const send = async (preset) => {
       const res = await request.post('/api/learning/ai-chat', {
         messages: [...history, { role: 'user', content: text }].slice(-12),
         context: props.context,
+        // v7.20：兜底这一轮后端也会归进会话落库，回传的 id 要接住才能继续聊在同一串里
+        conversation_id: conversationId.value,
       })
+      if (res.data.conversation_id) conversationId.value = res.data.conversation_id
       messages.value.push({ role: 'assistant', content: res.data.reply || '（AI 未返回内容）' })
     } catch (e2) {
       const msg = e2?.response?.data?.message || 'AI 服务暂时不可用，请稍后再试'

@@ -88,6 +88,7 @@ class User(db.Model):
     sanctioned_at = db.Column(UTCDateTime)          # 竞技处罚时间（NULL=正常）
     sanction_reason = db.Column(db.String(200))     # 受限原因公示
     token_valid_at = db.Column(UTCDateTime)         # 令牌吊销水位（v4.6.1）：早于此时刻签发的 JWT 一律失效，NULL=从未吊销
+    is_study_report_public = db.Column(db.Boolean, default=False, nullable=False)  # 学习报告是否公开（True=他人可查看）
     created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
 
     @property
@@ -577,6 +578,7 @@ class LearningPathNode(db.Model):
     order_num = db.Column(db.Integer, nullable=False, default=0)
     role = db.Column(db.String(20), nullable=False, default='core')  # core/elective/review
     estimated_minutes = db.Column(db.Integer, default=30)
+    notebook_id = db.Column(db.Integer, db.ForeignKey('notebook.id'), nullable=True)  # 配套代码笔记本
 
     __table_args__ = (
         # 知识点与章节至少挂一个
@@ -589,6 +591,7 @@ class LearningPathNode(db.Model):
 
     knowledge_point = db.relationship('KnowledgePoint')
     chapter = db.relationship('Chapter')
+    notebook = db.relationship('Notebook', foreign_keys=[notebook_id])
 
 
 class UserPathEnrollment(db.Model):
@@ -836,6 +839,92 @@ class UserCertificate(db.Model):
     verifier = db.relationship('User', foreign_keys=[verified_by])
 
 
+# ── v7.19 证书公开分享 / 学习心得 ────────────────────────────────
+
+# 三源证书的类型标识与中文名：证书墙/证书广场/分享文案共用，与 learning_routes 的 kind 分发同源
+CERT_KIND_LABELS = {'system': '系统结业', 'module': '跨模块', 'social': '社会第三方'}
+
+# 心得三段结构的段名单一来源：前端分区标题、AI 提示词、社区帖正文都取这里，不再各写一套
+INSIGHT_SECTION_LABELS = {
+    'gains': '学习感悟与收获',
+    'summary': '我的心得与总结',
+    'reflection': '反思创造',
+}
+INSIGHT_PERIOD_LABELS = {
+    'day': '按日', 'week': '按周', 'month': '按月', 'stage': '阶段', 'custom': '自定义',
+}
+
+
+class CertificateDisplay(db.Model):
+    """证书展示态旁表（v7.19）：公开开关 / 浏览数 / 已分享的社区帖。
+
+    刻意不动三张证书原表：系统结业与赛季证书是平台颁发的只读资产，社会证书已有自己的
+    核验字段，再往上叠「怎么展示」会把证书本体和展示意图混在一起。按 (cert_kind, cert_id)
+    唯一，一份证书最多一行，没设置过就没有行（读侧按缺省私有处理），对既有证书零侵入。"""
+    __tablename__ = 'certificate_display'
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    cert_kind = db.Column(db.String(10), nullable=False)     # system / module / social
+    cert_id = db.Column(db.Integer, nullable=False)          # 对应证书表主键（不加 FK，三表共享一列）
+    is_public = db.Column(db.Boolean, nullable=False, default=False)
+    views = db.Column(db.Integer, nullable=False, default=0)
+    share_post_id = db.Column(db.Integer)                    # 分享到社区中心生成的帖子 id
+    created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
+    updated_at = db.Column(UTCDateTime, nullable=False, default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (
+        db.CheckConstraint(
+            "cert_kind IN ('system', 'module', 'social')", name='_cert_display_kind_ck'),
+        db.UniqueConstraint('cert_kind', 'cert_id', name='uq_cert_display_kind_cert'),
+        db.Index('ix_cert_display_user', 'user_id'),
+        db.Index('ix_cert_display_public', 'is_public'),
+    )
+
+    user = db.relationship('User', backref='certificate_displays')
+
+
+class StudyInsight(db.Model):
+    """学习心得：固定三段（感悟与收获 / 心得与总结 / 反思创造）+ 周期归档。
+
+    与 StudyNote 的分工：笔记是随时记的知识碎片，心得是**回望一段周期**的复盘产出，故必须
+    带周期字段且三段分开存——分开才能按段统计，也才能在卡片上并列三段。三段都允许留空
+    （空段是常态），但至少要有一段有内容，该校验放 API 层而非 DB 层。"""
+    __tablename__ = 'study_insight'
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    title = db.Column(db.String(200), nullable=False)
+    gains = db.Column(db.Text, nullable=False, default='')        # 学习感悟与收获
+    summary = db.Column(db.Text, nullable=False, default='')      # 我的心得与总结
+    reflection = db.Column(db.Text, nullable=False, default='')   # 反思创造
+    period_type = db.Column(db.String(10), nullable=False, default='week')
+    period_start = db.Column(UTCDateTime)
+    period_end = db.Column(UTCDateTime)
+    period_note = db.Column(db.String(80))                        # 阶段名/自定义说明
+    tags = db.Column(JSONType)                                    # 标签字符串数组
+    plan_id = db.Column(db.Integer, db.ForeignKey('study_plan.id'))
+    knowledge_point_id = db.Column(db.Integer, db.ForeignKey('knowledge_point.id'))
+    source = db.Column(db.String(10), nullable=False, default='manual')  # manual 手写 / ai_draft AI 初稿改定
+    is_public = db.Column(db.Boolean, nullable=False, default=False)
+    views = db.Column(db.Integer, nullable=False, default=0)
+    share_post_id = db.Column(db.Integer)                         # 分享到社区中心生成的帖子 id
+    created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
+    updated_at = db.Column(UTCDateTime, nullable=False, default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (
+        db.CheckConstraint(
+            "period_type IN ('day', 'week', 'month', 'stage', 'custom')", name='_insight_period_ck'),
+        db.CheckConstraint("source IN ('manual', 'ai_draft')", name='_insight_source_ck'),
+        db.Index('ix_insight_user_updated', 'user_id', 'updated_at'),
+        db.Index('ix_insight_public', 'is_public'),
+    )
+
+    user = db.relationship('User', backref='study_insights')
+    plan = db.relationship('StudyPlan')
+    knowledge_point = db.relationship('KnowledgePoint')
+
+
 class DailyTask(db.Model):
     """每日学习任务：用户自己创建或采纳 AI 学习建议生成，按天归属展示在今日学习页"""
     id = db.Column(db.Integer, primary_key=True)
@@ -977,13 +1066,23 @@ class StudyMaterial(db.Model):
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     folder_id = db.Column(db.Integer, db.ForeignKey('study_folder.id'))
     kind = db.Column(db.String(20), nullable=False, default='manual')
-    # video_script 视频脚本包 / mindmap 讲义+思维导图 / lecture 结构化讲义 / summary 高浓度摘要 / quiz 练习题集 / manual 手写
+    # video_script 视频脚本包 / mindmap 讲义+思维导图 / lecture 结构化讲义 / summary 高浓度摘要 / quiz 练习题集 /
+    # lesson_plan 教案（v7.14）/ manual 手写
     title = db.Column(db.String(200), nullable=False)
     content = db.Column(db.Text, nullable=False, default='')   # Markdown（mindmap 含 mermaid 代码块）
     subject = db.Column(db.String(50))
     difficulty = db.Column(db.String(20))                       # entry/normal/exam 与题库难度语义对齐
     knowledge_point_id = db.Column(db.Integer, db.ForeignKey('knowledge_point.id'))  # 命中库内知识点时回填
+    # v7.9 批量讲义：来源学习计划/任务的可空关联。只靠 knowledge_point_id 反查会
+    # 漏掉 practice/custom 型任务（它们没有 KP），且跨计划同 KP 会串，故显式建列。
+    plan_id = db.Column(db.Integer, db.ForeignKey('study_plan.id'))
+    task_id = db.Column(db.Integer, db.ForeignKey('study_plan_task.id'))
     source = db.Column(db.String(10), nullable=False, default='manual')  # manual 手写 / ai 生成
+    # v7.18 资料附件：用户自行添加的文档/表格/PPT/PDF/链接/视频/图片/思维导图文件。
+    # 结构 [{name,type,ext,stored_name|url,size,uploaded_at}]，与 StudyNote.attachment_json
+    # 同构。用 JSON 列而不建新表：附件只是资料的附属展示物，没有独立查询/权限/统计
+    # 需求，建表要多背一套镜像对账与级联清理。
+    attachment_json = db.Column(JSONType)
     is_public = db.Column(db.Boolean, nullable=False, default=False)
     views = db.Column(db.Integer, nullable=False, default=0)
     status = db.Column(db.String(10), nullable=False, default='active')  # active/removed（举报下架）
@@ -991,17 +1090,62 @@ class StudyMaterial(db.Model):
     updated_at = db.Column(UTCDateTime, nullable=False, default=utcnow, onupdate=utcnow)
 
     __table_args__ = (
-        db.CheckConstraint("kind IN ('video_script', 'mindmap', 'lecture', 'summary', 'quiz', 'manual')",
+        db.CheckConstraint("kind IN ('video_script', 'mindmap', 'lecture', 'summary', 'quiz', "
+                           "'lesson_plan', 'manual')",
                            name='_material_kind_ck'),
         db.CheckConstraint("source IN ('manual', 'ai')", name='_material_source_ck'),
         db.CheckConstraint("status IN ('active', 'removed')", name='_material_status_ck'),
         db.Index('ix_material_user_updated', 'user_id', 'updated_at'),
         db.Index('ix_material_public', 'is_public', 'status'),
+        db.Index('ix_material_plan', 'plan_id'),
     )
 
     user = db.relationship('User', backref='study_materials')
     folder = db.relationship('StudyFolder', backref='materials')
     knowledge_point = db.relationship('KnowledgePoint')
+
+
+class MaterialGenJob(db.Model):
+    """批量讲义生成队列行（v7.9）：一条学习计划任务对应一行，后台线程逐份消费。
+
+    为什么不复用 StudyMaterial 的状态列做队列：资料行只在内容生成成功后才建，
+    否则半成品会直接污染资料库/公开广场/收藏与举报链路（那些查询都没想过要过滤
+    “生成中”）。队列与成品分两张表，失败原因、重试次数也有地方存。
+
+    状态机以 DB 列为唯一事实源（对齐 oj/queue.py，不引外部 MQ）：
+    pending→running→done/failed；抢占靠条件 UPDATE，重复投递/多 worker 不双生成。
+    """
+    __tablename__ = 'material_gen_job'
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    batch_id = db.Column(db.String(32), nullable=False)      # 同一次批量受理共用，进整批完成判定
+    plan_id = db.Column(db.Integer, db.ForeignKey('study_plan.id'), nullable=False)
+    task_id = db.Column(db.Integer, db.ForeignKey('study_plan_task.id'), nullable=False)
+    kind = db.Column(db.String(20), nullable=False, default='mindmap')
+    title = db.Column(db.String(200), nullable=False)        # 成品资料标题（取任务标题）
+    prompt = db.Column(db.String(500), nullable=False)       # 喂 AI 的知识点主题
+    subject = db.Column(db.String(50))
+    difficulty = db.Column(db.String(20))
+    knowledge_point_id = db.Column(db.Integer, db.ForeignKey('knowledge_point.id'))
+    status = db.Column(db.String(12), nullable=False, default='pending')  # pending/running/done/failed
+    attempts = db.Column(db.Integer, nullable=False, default=0)
+    material_id = db.Column(db.Integer, db.ForeignKey('study_material.id'))
+    error = db.Column(db.String(200))
+    created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
+    updated_at = db.Column(UTCDateTime, nullable=False, default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (
+        db.CheckConstraint("status IN ('pending', 'running', 'done', 'failed')",
+                           name='_material_job_status_ck'),
+        db.Index('ix_material_job_status', 'status'),
+        db.Index('ix_material_job_batch', 'batch_id'),
+        db.Index('ix_material_job_user_created', 'user_id', 'created_at'),
+    )
+
+    user = db.relationship('User')
+    plan = db.relationship('StudyPlan')
+    task = db.relationship('StudyPlanTask')
+    material = db.relationship('StudyMaterial')
 
 
 class MaterialFavorite(db.Model):
@@ -1088,6 +1232,43 @@ class AiQuota(db.Model):
     reset_date = db.Column(db.Date, nullable=False)
 
     user = db.relationship('User', backref='ai_quotas')
+
+
+class AiAskRecord(db.Model):
+    """AI 答疑留痕（v7.20）：存「问了什么 + 答了什么」，同一疑问短期内重问直接复用上次的解析。
+
+    为何单开一张表而不往 `ai_usage_log` 加正文字段：那张表是治理统计表，每次调用（含
+    fail/degraded）都写一行，成本页要整表扫；把 Text 正文塞进去会让统计查询拖着大字段跑。
+    留痕与统计是两种读路径，分家才对。
+
+    为何要复用而不只是存：答疑一次要烧一次额度与十几秒外呼。命中判定用「用户 + 题 +
+    疑问 + 作答」四元组指纹，换一道题、换一个问法、改一次作答都会重新生成，不会把旧
+    解析硬套到新问题上。
+
+    `question_content` 存题面快照而不是只靠外键：删题路由只守了 ExamQuestion，一道被错题本
+    引用过的题随时可能被删；FK 因此取 SET NULL（不阻塞删题），题面快照保证删完仍看得懂当时在问什么。"""
+    __tablename__ = 'ai_ask_record'
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    question_id = db.Column(db.Integer, db.ForeignKey('question.id', ondelete='SET NULL'))
+    question_content = db.Column(db.Text)          # 题面快照（题目被删后仍可读懂）
+    doubt = db.Column(db.Text)                     # 学生的疑问原文
+    student_answer = db.Column(db.Text)
+    analysis = db.Column(db.Text, nullable=False)
+    source = db.Column(db.String(10), nullable=False, default='ai')   # ai 真生成 / rule 降级
+    fingerprint = db.Column(db.String(40), nullable=False)            # 四元组 sha1，命中复用用
+    hit_count = db.Column(db.Integer, nullable=False, default=1)      # 被复用次数（含首次）
+    created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
+    last_hit_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
+
+    __table_args__ = (
+        db.CheckConstraint("source IN ('ai', 'rule')", name='_ai_ask_source_ck'),
+        db.Index('ix_ai_ask_user_fp', 'user_id', 'fingerprint'),
+        db.Index('ix_ai_ask_created', 'created_at'),
+    )
+
+    user = db.relationship('User', backref='ai_ask_records')
+    question = db.relationship('Question')
 
 
 # ──────────────────────────────────────────────────────────────

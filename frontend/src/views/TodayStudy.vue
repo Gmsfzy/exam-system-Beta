@@ -129,7 +129,7 @@
             <el-tag size="small" :type="taskTypeColor(t.task_type)" effect="plain">{{ taskTypeLabel(t.task_type) }}</el-tag>
             <div class="plan-task-main">
               <span class="task-title">{{ t.title }}</span>
-              <span class="task-sub">{{ t.plan_title }}{{ t.estimated_minutes ? ` · 约 ${t.estimated_minutes} 分钟` : '' }}</span>
+              <span class="task-sub"><span class="plan-link" title="直达这份计划" @click="goPlan(t)">{{ t.plan_title }}</span>{{ t.estimated_minutes ? ` · 约 ${t.estimated_minutes} 分钟` : '' }}</span>
               <el-progress v-if="t.task_type === 'practice' && t.question_count"
                            :percentage="Math.min(100, Math.round(t.progress_count / t.question_count * 100))"
                            :stroke-width="5" :show-text="false" style="margin-top: 4px" />
@@ -490,7 +490,13 @@ function taskTypeColor(t) {
 }
 function goTask(t) {
   if (t.task_type === 'practice') router.push('/learning/practice')
-  else router.push('/learning/plan')
+  // 带 plan 参数直达：回计划页不用在一堆卡片里自己找是哪一份
+  else router.push(t.plan_id ? `/learning/plan?plan=${t.plan_id}` : '/learning/plan')
+}
+
+// 计划标题也可点：单看一条任务不够、要看整盘进度时用
+function goPlan(t) {
+  if (t.plan_id) router.push(`/learning/plan?plan=${t.plan_id}`)
 }
 
 // ── 间隔复习卡片流 ───────────────────────────────────────────
@@ -659,6 +665,8 @@ async function quitReview() {
 .plan-item { align-items: flex-start; }
 .plan-task-main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 .task-sub { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+.plan-link { cursor: pointer; border-bottom: 1px dashed var(--border-color); }
+.plan-link:hover { color: var(--primary-color, #06b6d4); border-bottom-color: currentColor; }
 
 /* 继续学习 CTA */
 .next-node-cta { display: flex; align-items: center; gap: 14px; cursor: pointer; transition: border-color 0.2s; }

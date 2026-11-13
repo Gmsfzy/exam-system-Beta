@@ -130,6 +130,8 @@ BADGE_DEFS = {
     'study_streak_21':  {'name': '三周不辍', 'description': '连续打卡学习 21 天',       'icon': '⛓️'},
     'first_certificate': {'name': '学以致用', 'description': '获得首张学习路径结业证书', 'icon': '📜'},
     'first_path_complete': {'name': '首程抵达', 'description': '完整掌握首条学习路径',   'icon': '🏁'},
+    # 战队共同学习徽章（api.learning_engine.team_shared_checkin 触发）
+    'team_streak_7':    {'name': '同舟共济', 'description': '战队共同打卡满 7 天',       'icon': '🤝'},
 }
 
 
@@ -230,6 +232,19 @@ def _has_perfect_score(user_id):
                CompetitionParticipant.score == Competition.total_score,
            ).first())
     return row is not None
+
+
+def grant_team_streak_badges(team):
+    """战队共同打卡满 7 天：给全体队员发放「同舟共济」徽章（幂等，不 commit，由调用方提交）。
+    返回新发放的勋章 payload 列表。
+    """
+    granted = []
+    if (team.shared_streak_days or 0) < 7:
+        return granted
+    for m in team.members:
+        if _grant(m.user_id, 'team_streak_7', related_id=team.id):
+            granted.append(badge_payload('team_streak_7', related_id=team.id))
+    return granted
 
 
 # ═══════════════ 赛季与档案 ═══════════════

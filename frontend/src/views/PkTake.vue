@@ -193,13 +193,21 @@ const currentAnswerKey = computed(() => {
 // v4.6.1 枚举收敛：题型中文名单一来源 frontend/src/utils/enums.js
 import { typeLabel } from '../utils/enums'
 
-const getOptions = (optionsStr) => {
-  try {
-    const options = JSON.parse(optionsStr)
-    return Object.entries(options).map(([key, value]) => ({ key, value }))
-  } catch {
-    return []
+const getOptions = (options) => {
+  // v7.7 修复：后端 JSONType 列已自动反序列化为对象/数组，不再需要 JSON.parse
+  // 兼容三种格式：字符串（兜底）、对象 {A: "..."}、数组 ["..."]
+  if (options == null) return []
+  let parsed = options
+  if (typeof options === 'string') {
+    try { parsed = JSON.parse(options) } catch { return [] }
   }
+  if (Array.isArray(parsed)) {
+    return parsed.map((value, i) => ({ key: String.fromCharCode(65 + i), value }))
+  }
+  if (typeof parsed === 'object') {
+    return Object.entries(parsed).map(([key, value]) => ({ key, value }))
+  }
+  return []
 }
 
 const toggleMulti = (key) => {

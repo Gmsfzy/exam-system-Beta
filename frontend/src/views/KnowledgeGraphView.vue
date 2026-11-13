@@ -62,6 +62,9 @@
     </div>
 
     <!-- 图谱 -->
+    <el-alert v-if="!nodes.length && !graphLoading" class="kg-empty" type="info" :closable="false" show-icon
+              title="当前范围下还没有知识点"
+              description="换个专业/路径看看，或用上方「新建知识点」为一个章节沉淀第一个节点后再生成关系。" />
     <div class="graph-card">
       <KnowledgeGraph
         :nodes="nodes" :edges="edges" :layout="layoutName"
@@ -221,6 +224,7 @@ const paths = ref([])
 const nodes = ref([])
 const edges = ref([])
 const layoutName = ref('cose')
+const graphLoading = ref(false)
 
 // ── AI 助手上下文 ──
 const aiContext = computed(() => {
@@ -257,6 +261,7 @@ const loadPaths = async () => {
 const loadGraph = async () => {
   if (mode.value === 'major' && !majorId.value) return
   if (mode.value === 'path' && !pathId.value) return
+  graphLoading.value = true
   try {
     const params = mode.value === 'major' ? { major_id: majorId.value } : { path_id: pathId.value }
     const res = await request.get('/api/learning/knowledge-graph', { params })
@@ -266,6 +271,7 @@ const loadGraph = async () => {
     nodes.value = []
     edges.value = []
   }
+  graphLoading.value = false
 }
 
 const onModeChange = async () => {
@@ -440,6 +446,11 @@ const diffTagType = (d) => ({ easy: 'success', medium: 'warning', hard: 'danger'
 const statusLabel = (s) => ({ draft: '草稿', published: '已发布', archived: '已归档' }[s] || s)
 const relationLabel = (t) => ({ prerequisite: '前置依赖', related: '相关', derived: '衍生' }[t] || t)
 
+// 按节点数挑一份最能看出关系的路径（paths[0] 常是刚建的空路径）
+const bestPath = () => (paths.value || [])
+  .filter(p => (p.nodes_count || 0) > 0)
+  .sort((a, b) => (b.nodes_count || 0) - (a.nodes_count || 0))[0] || null
+
 onMounted(async () => {
   // 支持 ?path_id= 直达：自动切到“按路径”模式并加载该路径的知识图谱（自由主题闭环会导流到这里）
   const qpid = Number(route.query.path_id)
@@ -448,9 +459,19 @@ onMounted(async () => {
     await loadPaths()
     pathId.value = qpid
     loadGraph()
-  } else {
-    await loadMajors()
-    loadGraph()
+    return
+  }
+  // 默认维度不再写死「按专业」：专业树未必挂过知识点，图谱多由学习路径产生，
+  // 落错维度首屏就是一片空图，看着像功能坏了。先试专业，空了再取有节点的路径。
+  await Promise.all([loadMajors(), loadPaths()])
+  if (majorId.value) await loadGraph()
+  if (!nodes.value.length) {
+    const p = bestPath()
+    if (p) {
+      mode.value = 'path'
+      pathId.value = p.id
+      await loadGraph()
+    }
   }
 })
 </script>
@@ -553,6 +574,8 @@ onMounted(async () => {
   padding: 8px;
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.05);
 }
+
+.kg-empty { margin-bottom: 12px; }
 
 .detail-meta {
   display: flex;

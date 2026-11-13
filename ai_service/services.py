@@ -3,13 +3,27 @@ from database.models import (
     Question, Major, QuestionTypeEnum, DifficultyEnum,
     Chapter, KnowledgePoint, KnowledgeEdge,
     LearningPath, LearningPathNode,
+    INSIGHT_SECTION_LABELS,
 )
 from config import Config
 from utils.logger import logger
 import json
 import re
+import time
 
 ai_client = AIClient()
+
+
+def exam_timeout(count: int) -> int:
+    """出题读超时：基准按 5 道计，超出部分每道线性上浮。
+
+    真机实测（推理模型 endpoint）5 道编程题 74.2s，180s 基准宽裕；
+    接口上限 20 道时按同比例放到 ≈360s。前端 axios 用同一公式再加余量，
+    否则浏览器会先于后端掐断，用户只能看到一句没头没尾的「生成失败」。
+    """
+    base = int(getattr(Config, 'AI_EXAM_TIMEOUT', 180))
+    per = int(getattr(Config, 'AI_EXAM_EXTRA_PER_Q', 12))
+    return base + max(0, int(count) - 5) * per
 
 def clean_json_text(text: str) -> str:
     """清洗AI返回文本，提取纯JSON字符串"""
@@ -29,10 +43,13 @@ def ai_generate_questions(session, major_id: int, question_type: str, difficulty
         logger.error(f"Failed to generate questions: major {major_id} not found")
         raise ValueError("专业不存在")
 
-    logger.info(f"AI generating {count} questions for major {major.name} (type: {question_type}, difficulty: {difficulty})")
-    
+    logger.info(f"AI generating {count} questions for major {major.name} "
+                f"(type: {question_type}, difficulty: {difficulty}, 读超时 {exam_timeout(count)}s)")
+
+    started = time.time()
     try:
-        result = ai_client.generate_question(major.name, question_type, difficulty, count, description, source)
+        result = ai_client.generate_question(major.name, question_type, difficulty, count,
+                                             description, source, timeout=exam_timeout(count))
         clean_text = clean_json_text(result)
         questions = []
 
@@ -55,13 +72,13 @@ def ai_generate_questions(session, major_id: int, question_type: str, difficulty
                     session.add(question)
                     questions.append(question)
         session.commit()
-        logger.info(f"Successfully generated {len(questions)} questions")
+        logger.info(f"Successfully generated {len(questions)} questions（用时 {time.time() - started:.1f}s）")
         return questions
     except json.JSONDecodeError as e:
-        logger.error(f"AI returned invalid JSON: {str(e)}", exc_info=True)
+        logger.error(f"AI returned invalid JSON（{count} 道，用时 {time.time() - started:.1f}s）: {str(e)}", exc_info=True)
         raise Exception(f"AI返回内容不是有效JSON: {str(e)}")
     except Exception as e:
-        logger.error(f"Error generating questions: {str(e)}", exc_info=True)
+        logger.error(f"Error generating questions（{count} 道，已等待 {time.time() - started:.1f}s）: {str(e)}", exc_info=True)
         raise
 
 def ai_grade_exam(session, session_id: int):
@@ -175,18 +192,25 @@ def ai_grade_exam(session, session_id: int):
     session.commit()
     return earned_score, total_score
 
-def ai_generate_analysis(session, question_id: int, student_answer: str):
+def ai_generate_analysis(session, question_id: int, student_answer: str, doubt: str = None,
+                         question_content: str = None):
     """生成单题解析。
 
     session: SQLAlchemy Session（调用方传 db.session）。
+    doubt 从路由一路透传到 prompt（v7.20 修前它是被收下但不用的）；
+    无 question_id 时可只给 question_content（拍题提问），过去这种入参会得到空解析。
     """
-    question = session.get(Question, question_id)
-    if not question:
-        raise ValueError("题目不存在")
+    content, answer = question_content, ''
+    if question_id:
+        question = session.get(Question, question_id)
+        if not question:
+            raise ValueError("题目不存在")
+        content = question.content
+        answer = question.answer or ''
+    if not (content or '').strip():
+        raise ValueError("缺少题目内容，无法生成解析")
 
-    result = ai_client.generate_analysis(question.content, question.answer, student_answer)
-
-    return result
+    return ai_client.generate_analysis(content, answer, student_answer, doubt=doubt)
 
 
 # ── 三期：AI 生成路径骨架 / AI 学习助手对话 ──────────────────────────
@@ -330,6 +354,10 @@ def ai_generate_path_skeleton(session, major_id: int, title: str, chapter_ids: l
 
 def ai_chat_reply(session, messages: list, context: str = None):
     """AI 学习助手多轮对话（服务端无状态，历史由前端持有）。
+
+    本函数不读写库；会话留痕由路由补（v7.20 起流式与非流式回退两条路径都会把本轮
+    写进 ai_chat_conversation/ai_chat_message），所以「无状态」指的是不靠服务端历史
+    重放，而不是这一轮说完就丢。
 
     session: SQLAlchemy Session（调用方传 db.session，本函数不直接读写库）。
     messages: [{'role': 'user'|'assistant', 'content': str}]，服务端截取最近12条防超长。
@@ -580,6 +608,22 @@ MATERIAL_TEMPLATES = {
         "第二部分：一个 ```mermaid 代码块的 mindmap 思维导图，层级不少于 3 层。\n"
         "学科：{subject}；难度：{difficulty}。\n知识点：{prompt}"
     ),
+    'lesson_plan': (
+        "你是资深教师的教学设计助手。基于以下知识点撰写一份可直接拿去上课的完整教案，"
+        "按 1 课时（45 分钟）设计，用 markdown 输出，各节标题用二级标题：\n"
+        "一、教学基本信息（课题/学科/适用难度/课时/课型）；\n"
+        "二、学情分析（学生已有基础、可能存在的认知障碍）；\n"
+        "三、教学目标（知识、能力、素养三个维度，每条都要可观测可评价）；\n"
+        "四、教学重点与难点（各 1-3 条，并逐条给出突破策略）；\n"
+        "五、教学准备（教具、素材、环境）；\n"
+        "六、教学过程（markdown 表格，列：环节｜时间｜教师活动｜学生活动｜设计意图，"
+        "至少包含导入/新授/例题示范/课堂练习/小结/作业布置 6 个环节，各段时间合计 45 分钟，"
+        "教师活动要写到具体提问与原话示例，不能只写“讲解概念”这类空话）；\n"
+        "七、板书设计（用代码块给出结构化板书骨架）；\n"
+        "八、作业布置（分层：基础/提高/拓展，各 1-2 题）；\n"
+        "九、教学反思（预设 3 个课堂观察点与对应改进方向）。\n"
+        "学科：{subject}；难度：{difficulty}。\n知识点：{prompt}"
+    ),
     'lecture': (
         "你是学习讲义撰写专家。基于以下知识点撰写结构化学习讲义，包含：\n"
         "概念定义、原理剖析、案例讲解、易错点、小结、课后习题 5 道带答案。\n"
@@ -597,13 +641,38 @@ MATERIAL_TEMPLATES = {
 
 MATERIAL_KIND_NAMES = {
     'video_script': '视频脚本包', 'mindmap': '讲义+思维导图', 'lecture': '结构化讲义',
-    'summary': '高浓度摘要', 'quiz': '练习题集',
+    'summary': '高浓度摘要', 'quiz': '练习题集', 'lesson_plan': '教案（教学设计）',
 }
+
+# 教案的骨架与讲义不同：缺的是“怎么教”的环节设计，不是知识展开，故单独给降级大纲
+_DEGRADED_LESSON_PLAN = (
+    "【AI 服务暂不可用】以下为系统生成的教案框架，可稍后重新生成完整内容。\n\n"
+    "# {prompt} · 教案\n\n"
+    "## 教学基本信息\n（课题/{subject}/难度/1 课时 45 分钟/新授课）\n\n"
+    "## 学情分析\n（已有基础、可能的认知障碍）\n\n"
+    "## 教学目标\n（知识、能力、素养三维，每条可观测可评价）\n\n"
+    "## 教学重点与难点\n（各 1-3 条，并给出突破策略）\n\n"
+    "## 教学准备\n（教具、素材、环境）\n\n"
+    "## 教学过程\n\n"
+    "| 环节 | 时间 | 教师活动 | 学生活动 | 设计意图 |\n"
+    "| --- | --- | --- | --- | --- |\n"
+    "| 导入 | 5 分钟 |  |  |  |\n"
+    "| 新授 | 15 分钟 |  |  |  |\n"
+    "| 例题示范 | 8 分钟 |  |  |  |\n"
+    "| 课堂练习 | 10 分钟 |  |  |  |\n"
+    "| 小结 | 4 分钟 |  |  |  |\n"
+    "| 作业布置 | 3 分钟 |  |  |  |\n\n"
+    "## 板书设计\n```\n（此处写结构化板书骨架）\n```\n\n"
+    "## 作业布置\n（分层：基础/提高/拓展，各 1-2 题）\n\n"
+    "## 教学反思\n（预设 3 个课堂观察点与改进方向）\n"
+)
 
 
 def _degraded_material(kind, prompt, subject, difficulty):
     """AI 不可用时的降级框架大纲（对齐项目降级哲学，首行标注来源）"""
     name = MATERIAL_KIND_NAMES.get(kind, '学习资料')
+    if kind == 'lesson_plan':
+        return _DEGRADED_LESSON_PLAN.format(prompt=prompt, subject=subject or '本专业')
     return (
         "【AI 服务暂不可用】以下为系统生成的资料框架大纲，可稍后重新生成完整内容。\n\n"
         f"# {prompt} · {name}\n\n"
@@ -631,7 +700,10 @@ def ai_generate_material(session, prompt: str, kind: str = 'lecture',
         content = ai_client.chat(
             [{'role': 'system', 'content': '你是面向高校师生的自学习平台内容生成助手，用简体中文 markdown 输出，结构清晰。'},
              {'role': 'user', 'content': text}],
-            temp=0.6, max_tok=4000)
+            temp=0.6, max_tok=4000,
+            # 长文档专用超时：这类产出动辄几千字，沿用全局 60s 会每次超时→每次降级，
+            # 而降级在队列里算 done（不重跑），用户永远只能拿到框架大纲。
+            timeout=int(getattr(Config, 'AI_DOC_TIMEOUT', 180)))
         if content and content.strip():
             return content.strip(), False
     except Exception as e:
@@ -654,3 +726,77 @@ def ai_decide_material_kind(session, prompt: str) -> str:
     except Exception as e:
         logger.warning(f"ai_decide_material_kind fallback to mindmap: {e}")
         return 'mindmap'
+
+
+# ── v7.19 学习心得：按真实学习数据起三段初稿 ──────────────────────
+
+_INSIGHT_SYSTEM = (
+    "你是高校学习方法教练，负责把学生一段周期内的真实学习数据整理成复盘初稿。"
+    "只依据给出的数据说话，绝不编造没出现的数字、书名、分数或事件；数据单薄时就把"
+    "该段写成引导式提问（帮学生想起该写什么），而不是编内容充数。用简体中文，口语、"
+    "具体、可执行，不写「收获颇丰」「受益匪浅」这类空话。"
+)
+
+
+def _degraded_insight(facts: str) -> dict:
+    """AI 不可用时的初稿替身：把真实数据原样列在对应段下，留出待填写位。
+
+    键固定用英文字段名（gains/summary/reflection），与 study_insight 列名同构，
+    前端拿到降级体与拿到真初稿走同一段回填代码。"""
+    return {
+        'title': '这段时间的学习复盘',
+        'gains': (
+            '（先照下面的数据写事实，再写你自己的感受）\n\n本周期数据：\n' + facts +
+            '\n\n- 做对题最多的那一类，是因为哪一步做对了？\n- 哪一次学进去之后你是真的「懂了」？'),
+        'summary': (
+            '（用三五句话把这段周期概括成一句人话）\n\n- 我这段时间主要在啃：\n'
+            '- 真正掌握的是：\n- 还只是「看过」没「会用」的是：'),
+        'reflection': (
+            '（写一个下个周期可以真去做的小动作，而不是「再接再厉」）\n\n'
+            '- 哪个环节在拖我：\n- 下周期只改一件事，改哪件：\n- 改完拿什么判断生效了：'),
+    }
+
+
+def ai_generate_insight_draft(session, facts: str, focus: str = None):
+    """依据一段周期的学习数据生成心得初稿。返回 (draft_dict, degraded)。
+
+    facts: 调用方拼好的数据摘要（纯文本，已含题量/正确率/打卡/任务/薄弱知识点等）。
+    focus: 用户自填的关注点（可选，如「这周卡在矩阵那部分」）。
+
+    不写库：只出初稿供用户编辑后自己保存，AI 失败也不报错而给可填写的框架（同
+    ai_generate_material 的降级哲学）——心得的价值在用户自己写，AI 只负责开头。
+    """
+    facts = (facts or '').strip()[:2000]
+    if not facts:
+        raise ValueError("没有可用的学习数据，无需生成初稿")
+    prompt = (
+        "请根据下面的学习数据，写一份学习心得初稿，只输出一个 JSON，键固定为英文：\n"
+        + '\n'.join(f'  {k}  —— {v}' for k, v in INSIGHT_SECTION_LABELS.items())
+        + "\n外加 title（不超过 20 字的标题）。三段各 120–260 字，用 markdown（可用列表/加粗）。\n"
+        "要求：\n"
+        f"- {INSIGHT_SECTION_LABELS['gains']}：写具体收获，引用数据里的真实数字；\n"
+        f"- {INSIGHT_SECTION_LABELS['summary']}：把这段周期概括成可回看的结论，点出尚欠的部分；\n"
+        f"- {INSIGHT_SECTION_LABELS['reflection']}：只写下一步可执行的动作与创造（拆题、编口诀、"
+        "给同学讲、自己出题等），不写鼓励空话。\n"
+        + (f"\n学生自述的关注点：{focus.strip()[:200]}\n" if focus else '')
+        + "\n学习数据：\n" + facts + "\n\n只输出 JSON。"
+    )
+    try:
+        raw = ai_client.generate_json(_INSIGHT_SYSTEM, prompt, temp=0.6, max_tok=2000,
+                                      # 与长文档同档：2000 token 的三段产出沿用 60s 默认值会次次掐断
+                                      timeout=int(getattr(Config, 'AI_DOC_TIMEOUT', 180)))
+        obj = json.loads(clean_json_text(raw))
+        draft = {
+            'title': str(obj.get('title') or '').strip()[:60] or '这段时间的学习复盘',
+        }
+        # 模型常把中文段名当键返回（提示词里就是中文），故两种键都接，统一归到英文字段名
+        for key, label in INSIGHT_SECTION_LABELS.items():
+            text = str(obj.get(key) or obj.get(label) or '').strip()
+            if text:
+                draft[key] = text[:4000]
+        if any(k in draft for k in INSIGHT_SECTION_LABELS):
+            return draft, False
+        logger.warning('ai_generate_insight_draft 返回体里没有三段字段，降级为可填写框架')
+    except Exception as e:
+        logger.warning(f'ai_generate_insight_draft degraded: {e}')
+    return _degraded_insight(facts), True

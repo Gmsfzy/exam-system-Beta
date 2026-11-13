@@ -38,7 +38,11 @@ request.interceptors.response.use(
   response => response,
   error => {
     const status = error.response?.status
-    const msg = error.response?.data?.message || '请求失败'
+    // 浏览器侧超时（无 response）单独说：这类只会落到「请求失败」，用户不知道该稍后重试还是找运维。
+    // 长耗时接口（如 AI 出题）应在调用处按后端超时传更大的 per-request timeout，不依这里兼顾。
+    const timeoutLike = !error.response &&
+      (error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT' || /timeout/i.test(error.message || ''))
+    const msg = error.response?.data?.message || (timeoutLike ? '请求超时，服务处理较慢，请稍后重试' : '请求失败')
     
     if (status === 429) {
       ElMessage.error('请求过于频繁，请稍后重试')

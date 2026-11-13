@@ -1,9 +1,9 @@
-<template>
+ <template>
   <div class="my-knowledge">
     <div class="page-header">
       <div>
         <h1 class="page-title">我的知识库</h1>
-        <p class="page-subtitle">学过的一切知识点 · 掌握度 · 笔记 · 遗忘风险</p>
+        <p class="page-subtitle">你积累下来的知识点 · 总结笔记 · 熟悉程度 · 温习提醒 · 关联文档</p>
       </div>
       <div class="header-right">
         <el-tag v-if="total" type="info" effect="plain">共 {{ total }} 个知识点</el-tag>
@@ -14,8 +14,11 @@
       </div>
     </div>
 
-    <el-empty v-if="!loading && !total" description="还没有学习记录：去刷题或小测，掌握度会自动积累" :image-size="80">
-      <el-button type="primary" @click="$router.push('/learning/practice')">去刷题</el-button>
+    <!-- 本页是个人知识资产库，不充当练习入口：空态只说明“积累从哪来”，不往刷题引 -->
+    <el-empty v-if="!loading && !total"
+              description="还没有积累：在专业路径学过、写过总结的知识点会收录在这里" :image-size="80">
+      <el-button type="primary" @click="$router.push('/learning/paths')">去学习路径</el-button>
+      <el-button @click="$router.push('/learning/materials')">去资料库</el-button>
     </el-empty>
 
     <template v-else>
@@ -46,8 +49,7 @@
                     <el-tag size="small" :type="statusType(kp.level_status)" effect="plain">
                       {{ statusLabel(kp.level_status) }}
                     </el-tag>
-                    <el-tag v-if="kp.decay_risk" size="small" type="danger">⚠ 遗忘风险</el-tag>
-                    <el-tag v-if="kp.wrong_count" size="small" type="warning" effect="plain">错题 {{ kp.wrong_count }}</el-tag>
+                    <el-tag v-if="kp.decay_risk" size="small" type="danger">⚠ 需温习</el-tag>
                   </div>
                 </div>
               </div>
@@ -57,8 +59,26 @@
                 </template>
                 <template v-else>＋ 点击为此知识点写总结笔记</template>
               </div>
+              <!-- 知识库↔资料库：同一个知识点下沉的教案/讲义/总结就地可看，不必去资料库再找 -->
+              <div v-if="kp.material_count" class="kp-mats">
+                <span class="kp-mats-head" @click="toggleMats(kp)">
+                  <el-icon size="13"><Tickets /></el-icon>
+                  关联文档 {{ kp.material_count }} 份
+                  <span class="kp-mats-caret">{{ isExpanded(kp) ? '▲' : '▼' }}</span>
+                </span>
+                <ul v-if="isExpanded(kp)" class="kp-mats-list">
+                  <li v-for="m in kp.materials" :key="m.id" @click="openMaterial(m)">
+                    <em class="mat-kind">{{ KINDS[m.kind] || m.kind }}</em>
+                    <span class="mat-title" :title="m.title">{{ m.title }}</span>
+                  </li>
+                  <li v-if="kp.material_count > (kp.materials || []).length" class="kp-mats-more"
+                      @click="$router.push('/learning/materials')">
+                    共 {{ kp.material_count }} 份，到资料库看全部 →
+                  </li>
+                </ul>
+              </div>
               <div class="kp-foot">
-                <span class="kp-time">{{ kp.last_verified_at ? '上次验证 ' + kp.last_verified_at.slice(0, 10) : '未验证' }}</span>
+                <span class="kp-time">{{ kp.last_verified_at ? '上次学习 ' + kp.last_verified_at.slice(0, 10) : '尚未学习' }}</span>
                 <el-button size="small" text type="primary" @click="openNote(kp)">
                   {{ kp.has_note ? '编辑笔记' : '写笔记' }}
                 </el-button>
@@ -80,7 +100,7 @@
             <span class="legend-item"><i style="background:#f59e0b"></i>学习中</span>
             <span class="legend-item"><i style="background:#10b981"></i>已掌握</span>
             <span class="legend-item"><i style="background:#94a3b8"></i>未学习</span>
-            <span class="legend-item"><i class="ring"></i>⚠ 遗忘风险</span>
+            <span class="legend-item"><i class="ring"></i>⚠ 需温习</span>
           </div>
         </div>
         <div class="panel graph-panel" v-loading="graphLoading">
@@ -93,7 +113,7 @@
     <!-- 笔记编辑弹窗 -->
     <el-dialog v-model="noteVisible" :title="`笔记：${noteKp?.name || ''}`" width="620px" destroy-on-close>
       <el-input v-model="noteText" type="textarea" :rows="10" maxlength="5000" show-word-limit
-                placeholder="用自己的话总结这个知识点：核心概念、易错点、记忆方法…" />
+                placeholder="用自己的话总结这个知识点：核心概念、常见误区、记忆方法…（仅自己可见）" />
       <div class="note-toolbar">
         <el-button size="small" type="primary" plain :loading="polishing" @click="polishNote">
           <el-icon><MagicStick /></el-icon>&nbsp;AI 润色提炼
@@ -105,6 +125,18 @@
         <el-button type="primary" :loading="saving" @click="saveNote">保存</el-button>
       </template>
     </el-dialog>
+
+    <!-- 文档预览：就地读完整内容，与资料库同一个渲染器 -->
+    <el-dialog v-model="matVisible" :title="mat?.title" width="760px" top="6vh" destroy-on-close>
+      <div v-if="mat" class="mat-head">
+        <el-tag size="small" effect="plain">{{ KINDS[mat.kind] || mat.kind }}</el-tag>
+        <span class="mat-head-meta">{{ mat.updated_at ? '更新于 ' + mat.updated_at.slice(0, 10) : '' }}</span>
+        <el-button size="small" text type="primary" @click="matVisible = false">收起</el-button>
+      </div>
+      <el-scrollbar max-height="60vh">
+        <MdView :content="mat?.content || ''" />
+      </el-scrollbar>
+    </el-dialog>
   </div>
 </template>
 
@@ -113,6 +145,9 @@ import { ref, computed, onMounted, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import request from '../utils/request'
 import KnowledgeGraph from '../components/KnowledgeGraph.vue'
+import MdView from '../components/MdView.vue'
+
+const KINDS = { video_script: '视频脚本', mindmap: '思维导图', lesson_plan: '教案', lecture: '讲解稿', summary: '总结要点', quiz: '自测题组', manual: '手写' }
 
 const loading = ref(false)
 const mode = ref('list')
@@ -247,6 +282,30 @@ function onGraphTap(node) {
     openNote({ knowledge_point_id: node.id, name: node.name, has_note: node.has_note })
   }
 }
+
+// ── 关联文档（知识库↔资料库）───────────────────────────
+// 展开态用 Set 记 kp id（只存本地视图状态，不随后端数据走），默认全闭合不堆长列表
+const expanded = ref(new Set())
+const matVisible = ref(false)
+const mat = ref(null)
+
+function toggleMats(kp) {
+  const s = new Set(expanded.value)
+  if (s.has(kp.knowledge_point_id)) s.delete(kp.knowledge_point_id)
+  else s.add(kp.knowledge_point_id)
+  expanded.value = s
+}
+function isExpanded(kp) {
+  return expanded.value.has(kp.knowledge_point_id)
+}
+
+async function openMaterial(m) {
+  try {
+    const res = await request.get(`/api/learning/materials/${m.id}`)
+    mat.value = res.data.material
+    matVisible.value = true
+  } catch (e) { /* 拦截器已提示 */ }
+}
 </script>
 
 <style scoped>
@@ -278,8 +337,27 @@ function onGraphTap(node) {
 }
 .kp-note.empty { color: var(--text-muted); opacity: 0.8; }
 .kp-note:hover { outline: 1px solid var(--primary-color, #6366f1); }
+.kp-mats { font-size: 12px; }
+.kp-mats-head { display: flex; align-items: center; gap: 5px; color: var(--text-secondary, var(--text-muted)); cursor: pointer; }
+.kp-mats-head:hover { color: var(--primary-color, #6366f1); }
+.kp-mats-caret { margin-left: auto; font-size: 10px; opacity: 0.7; }
+.kp-mats-list { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.kp-mats-list li {
+  display: flex; align-items: center; gap: 6px; cursor: pointer;
+  background: var(--bg-tertiary); border-radius: 6px; padding: 4px 8px;
+}
+.kp-mats-list li:hover { outline: 1px solid var(--primary-color, #6366f1); }
+.mat-kind {
+  font-style: normal; font-size: 10px; flex: none; padding: 0 5px; border-radius: 4px;
+  background: var(--bg-card); border: 1px solid var(--border-color); color: var(--text-muted);
+}
+.mat-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-primary); }
+.kp-mats-more { color: var(--text-muted); font-size: 11px; justify-content: center; }
 .kp-foot { display: flex; justify-content: space-between; align-items: center; }
 .kp-time { font-size: 11px; color: var(--text-muted); }
+
+.mat-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.mat-head-meta { font-size: 12px; color: var(--text-muted); }
 
 .map-layout { display: flex; flex-direction: column; gap: 14px; }
 .map-toolbar { display: flex; align-items: center; gap: 12px; padding: 12px 16px; }

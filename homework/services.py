@@ -452,16 +452,21 @@ def award_homework_grade_bonus(hw, sub):
 
 
 def ai_suggest_grading(sub):
-    """AI 辅助批改建议（不落库）：对每个待人工作答调用 ai_client.grade_answer。
+    """AI 辅助批改建议：对每个待人工作答调用 ai_client.grade_answer，**并把建议落库**。
 
-    返回 {suggestions: [{answer_id, suggestion_id?, score, comment}], failed: n}；
-    score 已按题目满分换算（AI 原始返回 0-100 百分比，同考试 clamp 口径）。
+    返回 {suggestions: [{answer_id, question_id?, score, max_score, is_correct, comment,
+    suggested_at}], failed: n}；score 已按题目满分换算（AI 原始返回 0-100 百分比，同考试 clamp 口径）。
+
+    v7.20 起建议本身要留痕（`ai_suggested_*`）：教师采不采纳都得知道 AI 当时说了什么，
+    否则「AI 建议 8 分、教师给 5 分」这 3 分差在哪永远查不出来——这是判分公平性唯一能回溯的入口。
+    建议分与 `manual_score` 分列存放、互不覆盖：重批覆盖的是人工分，不是另写一套成绩。
     """
     from ai_service.services import ai_client
     hw = sub.homework
     hq_map = {hq.question_id: hq for hq in hw.hw_questions}
     suggestions = []
     failed = 0
+    now = utcnow()
     for a in sub.answers:
         if not a.needs_manual_grade or a.manual_score is not None:
             continue
@@ -473,15 +478,24 @@ def ai_suggest_grading(sub):
             result = ai_client.grade_answer(q.content, q.answer or '', a.answer or '')
             data = json.loads(result)
             ratio = max(0.0, min(float(data.get('score', 0) or 0), 100.0)) / 100.0
+            score = round(ratio * (hq.score or 0), 2)
+            comment = str(data.get('comment') or data.get('analysis') or '')[:500]
             suggestions.append({
                 'answer_id': a.id, 'question_id': a.question_id,
-                'score': round(ratio * (hq.score or 0), 2), 'max_score': hq.score,
+                'score': score, 'max_score': hq.score,
                 'is_correct': bool(data.get('is_correct', False)),
-                'comment': str(data.get('comment') or data.get('analysis') or '')[:500],
+                'comment': comment,
+                'suggested_at': iso_local(now),
             })
+            # 建议同步回写作答行：接口返回是一次性的，落库才能事后比对
+            a.ai_suggested_score = score
+            a.ai_suggested_comment = comment or None
+            a.ai_suggested_at = now
         except Exception:
             failed += 1
             logger.debug(f'[homework] AI 建议失败 answer={a.id}（非关键路径）', exc_info=True)
+    if suggestions:
+        db.session.commit()
     return {'suggestions': suggestions, 'failed': failed}
 
 

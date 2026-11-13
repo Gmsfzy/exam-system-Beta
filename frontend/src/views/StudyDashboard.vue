@@ -181,7 +181,8 @@
           <template v-else>已生成学习计划《{{ appliedTitle }}》，写入 {{ appliedCount }} 个任务。</template>
           <el-button v-if="appliedMode === 'free'" type="primary" size="small" text @click="go('/learning/paths/' + appliedPathId)">查看学习路径 →</el-button>
           <el-button v-if="appliedMode === 'free'" size="small" text @click="go('/learning/graph?path_id=' + appliedPathId)">查看知识图谱</el-button>
-          <el-button size="small" text @click="go('/learning/plan')">前往学习计划</el-button>
+          <!-- 刚生成的那份计划直接定位高亮，不把人丢回卡片海 -->
+          <el-button size="small" text @click="go(appliedPlanId ? '/learning/plan?plan=' + appliedPlanId : '/learning/plan')">前往学习计划</el-button>
           <el-button size="small" text @click="resetWorkbench">再规划一个</el-button>
         </div>
       </div>
@@ -398,14 +399,18 @@ const apply = async () => {
     let added = 0
     for (let i = 0; i < items.length; i += 10) {
       const chunk = items.slice(i, i + 10)
-      const r = await request.post(`/api/learning/plans/${planId}/tasks/batch`, { items: chunk })
+      // 只在最后一块让后端落站内通知（v7.18 需求 a）：每块都 notify 会刷出好几条一模一样的消息
+      const last = i + 10 >= items.length
+      const r = await request.post(`/api/learning/plans/${planId}/tasks/batch`,
+        { items: chunk, notify: last })
       added += r.data.added || 0
     }
     appliedMode.value = 'mounted'
     appliedTitle.value = form.title.trim()
     appliedCount.value = added
+    appliedPlanId.value = planId     // 深链定位刚生成的那份，不把人丢回卡片海
     applied.value = true
-    ElMessage.success(`已应用：计划创建成功，写入 ${added} 个任务`)
+    ElMessage.success(`已应用：计划创建成功，写入 ${added} 个任务（已发到消息中心）`)
   } catch (e) {
     ElMessage.error('应用失败，请检查网络或稍后重试')
   } finally {
@@ -439,7 +444,7 @@ const applyFree = async () => {
     appliedPlanId.value = d.plan_id || null
     appliedStats.value = { kp: (d.kp_created || 0) + (d.kp_existing || 0), edges: d.edges_created || 0, nodes: d.nodes_created || 0 }
     applied.value = true
-    ElMessage.success(d.message || '已生成完整自学闭环')
+    ElMessage.success((d.message || '已生成完整自学闭环') + '（已发到消息中心）')
   } catch (e) {
     ElMessage.error('AI 生成闭环失败或超时，请稍后重试')
   } finally {

@@ -7,13 +7,15 @@
       </div>
     </div>
 
-    <!-- 我的战队 -->
-    <div v-if="!isTeacher" class="section">
-      <h3 class="section-title">我的战队</h3>
-      <el-empty v-if="!myTeam" description="你还没有加入战队">
+    <!-- 我的战队 / 我创建的战队 -->
+    <div class="section">
+      <h3 class="section-title">{{ isTeacher ? '我创建的战队（教练身份）' : '我的战队' }}</h3>
+      <el-empty v-if="!myTeam" :description="isTeacher ? '还没创建战队，作为教练创建一个吧' : '你还没有加入战队'">
         <div class="empty-actions">
-          <el-button type="primary" @click="createVisible = true">创建战队</el-button>
-          <el-button @click="joinVisible = true">加入战队</el-button>
+          <el-button type="primary" @click="createVisible = true">
+            {{ isTeacher ? '作为教练创建战队' : '创建战队' }}
+          </el-button>
+          <el-button v-if="!isTeacher" @click="joinVisible = true">加入战队</el-button>
         </div>
       </el-empty>
       <div v-else class="my-team-card">
@@ -22,9 +24,15 @@
             <div class="team-name">{{ myTeam.name }}</div>
             <div class="team-desc">{{ myTeam.description || '暂无简介' }}</div>
           </div>
-          <div class="team-points">
-            <span class="tp-value">{{ myTeam.points }}</span>
-            <span class="tp-label">战队积分</span>
+          <div class="team-stats">
+            <div class="team-points">
+              <span class="tp-value">{{ myTeam.points }}</span>
+              <span class="tp-label">战队积分</span>
+            </div>
+            <div class="team-points">
+              <span class="tp-value streak-value">{{ myTeam.shared_streak_days || 0 }}</span>
+              <span class="tp-label">战队共同打卡 {{ myTeam.shared_streak_days || 0 }} 天</span>
+            </div>
           </div>
         </div>
         <el-table :data="myTeam.members" stripe size="default">
@@ -126,10 +134,9 @@ const tierColor = (t) => TIER_COLORS[t] || 'inherit'
 const load = async () => {
   const boardRes = await request.get('/api/teams')
   teams.value = boardRes.data
-  if (!isTeacher.value) {
-    const mine = await request.get('/api/teams/mine')
-    myTeam.value = mine.data
-  }
+  // v7.7 教师也加载自己创建的战队（后端 team_mine 已适配）
+  const mine = await request.get('/api/teams/mine')
+  myTeam.value = mine.data
 }
 
 const createTeam = async () => {
@@ -271,6 +278,16 @@ onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
 
 .team-points {
   text-align: center;
+}
+
+.team-stats {
+  display: flex;
+  gap: 24px;
+  align-items: center;
+}
+
+.streak-value {
+  color: #7db9f5;
 }
 
 .tp-value {

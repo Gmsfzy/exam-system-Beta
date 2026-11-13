@@ -16,7 +16,7 @@
         <div class="m-lbl">练习次数</div>
       </div>
       <div class="metric-card">
-        <div class="m-num">{{ (overview.score_ratio * 100).toFixed(1) }}%</div>
+        <div class="m-num">{{ ((overview.score_ratio ?? 0) * 100).toFixed(1) }}%</div>
         <div class="m-lbl">平均正确率</div>
       </div>
       <div class="metric-card">
@@ -96,8 +96,13 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
+import { useRoute } from 'vue-router'
 import request from '../utils/request'
 import AIChatDialog from '../components/AIChatDialog.vue'
+
+// 带 :uid 路由参数时查看该用户的公开学习报告，否则查看自己的
+const route = useRoute()
+const reportUid = route.params.uid ? String(route.params.uid) : null
 
 const overview = ref({
   period_days: 30, total_questions: 0, correct_count: 0, score_ratio: 0,
@@ -151,12 +156,22 @@ function formatTime(sec) {
 async function load() {
   loading.value = true
   try {
-    const [ov, logs] = await Promise.all([
-      request.get('/api/learning/report/overview?days=30'),
-      request.get('/api/learning/report/daily?days=30'),
+    // v7.7 修复：单独请求避免 Promise.all 一挂全挂（之前 daily 失败会导致 overview 也丢失）
+    const base = reportUid ? `/api/learning/report/${reportUid}` : '/api/learning/report'
+    const [ovRes, logsRes] = await Promise.allSettled([
+      request.get(`${base}/overview?days=30`),
+      request.get(`${base}/daily?days=30`),
     ])
-    overview.value = ov.data
-    dailyLogs.value = logs.data || []
+    if (ovRes.status === 'fulfilled') {
+      overview.value = ovRes.value.data || overview.value
+    } else {
+      console.warn('[学习报告] overview 加载失败', ovRes.reason)
+    }
+    if (logsRes.status === 'fulfilled') {
+      dailyLogs.value = logsRes.value.data || []
+    } else {
+      console.warn('[学习报告] daily 加载失败', logsRes.reason)
+    }
   } catch (e) {}
   loading.value = false
 }

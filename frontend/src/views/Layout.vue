@@ -307,6 +307,23 @@ const handleNotificationClick = async (notification) => {
   } else if (notification.related_type === 'certificate') {
     // v6.4 社会/第三方证书核验结果通知：直达证书中心该证书详情（related_id 即 UserCertificate.id）
     router.push(`/learning/certificates/social/${notification.related_id}`)
+  } else if (notification.related_type === 'question') {
+    // AI 出题完成通知：直达题库页（不针对单题，生成的是批量新题）
+    router.push('/questions')
+  } else if (notification.related_type === 'community_post') {
+    // v7.19 证书/心得分享到社区的回执：直达那篇帖（帖子详情公开可读，不需要再绕一层）
+    router.push(notification.related_id ? `/community/${notification.related_id}` : '/community')
+  } else if (notification.related_type === 'material') {
+    // v7.9 批量讲义完成通知：直达我的资料库（一批多份，不针对单份）；
+    // v7.18 单份生成完成的通知带 related_id，直接打开那一份
+    router.push(notification.related_id
+      ? `/learning/materials?material=${notification.related_id}`
+      : '/learning/materials')
+  } else if (notification.related_type === 'plan') {
+    // v7.18 需求 a：学习规划应用成功的通知直达该计划（深链定位高亮，不丢回卡片海）
+    router.push(notification.related_id
+      ? `/learning/plan?plan=${notification.related_id}`
+      : '/learning/plan')
   }
 }
 
@@ -497,40 +514,52 @@ const moduleMenus = {
       { path: '/bounties/mine', label: '我的悬赏', icon: iconMap.Tickets },
     ]
   },
+  // 自主学习按「入口 → 规划执行 → 知识 → 练习 → 记录 → 成果 → 管理」的学习闭环排，
+  // 新增页面请归到对应段落，别按开发顺序往尾部追加（学习计划曾长期沉底，找不到人）。
   learning: {
     teacher: [
-      { path: '/learning/dashboard', label: '学习规划', icon: iconMap.Compass },
+      // 入口：先看今天该干什么
       { path: '/learning', label: '学习首页', icon: iconMap.Reading },
       { path: '/learning/today', label: '今日学习', icon: iconMap.Calendar },
+      // 规划与执行：AI 生成计划 → 落地跟踪 → 体系化路径
+      { path: '/learning/dashboard', label: '学习规划', icon: iconMap.Compass },
+      { path: '/learning/plan', label: '学习计划', icon: iconMap.Star },
       { path: '/learning/paths', label: '专业路径', icon: iconMap.School },
+      // 知识资产
       { path: '/learning/graph', label: '知识图谱', icon: iconMap.Connection },
       { path: '/learning/my-knowledge', label: '我的知识库', icon: iconMap.Collection },
-      { path: '/learning/certificates', label: '我的证书', icon: iconMap.Medal },
-      { path: '/learning/wrong', label: '错题本', icon: iconMap.Document },
-      { path: '/learning/notes', label: '学习笔记', icon: iconMap.Notebook },
-      { path: '/learning/notebook', label: '代码笔记本', icon: iconMap.Memo },
       { path: '/learning/materials', label: '资料库', icon: iconMap.Tickets },
-      { path: '/learning/explore', label: '学习广场', icon: iconMap.Grid },
+      // 练与补
       { path: '/learning/practice', label: '自由刷题', icon: iconMap.EditPen },
-      { path: '/learning/plan', label: '学习计划', icon: iconMap.Star },
+      { path: '/learning/wrong', label: '错题本', icon: iconMap.Document },
+      // 记录
+      { path: '/learning/notes', label: '学习笔记', icon: iconMap.Notebook },
+      { path: '/learning/insights', label: '学习心得', icon: iconMap.ChatDotRound },
+      { path: '/learning/notebook', label: '代码笔记本', icon: iconMap.Memo },
+      // 成果与外部
+      { path: '/learning/certificates', label: '我的证书', icon: iconMap.Medal },
+      { path: '/learning/cert-square', label: '证书广场', icon: iconMap.Trophy },
+      { path: '/learning/explore', label: '学习广场', icon: iconMap.Grid },
       { path: '/learning/report', label: '学习报告', icon: iconMap.TrendCharts },
       { path: '/learning/ai-governance', label: 'AI 治理', icon: iconMap.Setting },
     ],
     student: [
-      { path: '/learning/dashboard', label: '学习规划', icon: iconMap.Compass },
       { path: '/learning', label: '学习首页', icon: iconMap.Reading },
       { path: '/learning/today', label: '今日学习', icon: iconMap.Calendar },
+      { path: '/learning/dashboard', label: '学习规划', icon: iconMap.Compass },
+      { path: '/learning/plan', label: '学习计划', icon: iconMap.Star },
       { path: '/learning/paths', label: '专业路径', icon: iconMap.School },
       { path: '/learning/graph', label: '知识图谱', icon: iconMap.Connection },
       { path: '/learning/my-knowledge', label: '我的知识库', icon: iconMap.Collection },
-      { path: '/learning/certificates', label: '我的证书', icon: iconMap.Medal },
+      { path: '/learning/materials', label: '资料库', icon: iconMap.Tickets },
+      { path: '/learning/practice', label: '自由刷题', icon: iconMap.EditPen },
       { path: '/learning/wrong', label: '错题本', icon: iconMap.Document },
       { path: '/learning/notes', label: '学习笔记', icon: iconMap.Notebook },
+      { path: '/learning/insights', label: '学习心得', icon: iconMap.ChatDotRound },
       { path: '/learning/notebook', label: '代码笔记本', icon: iconMap.Memo },
-      { path: '/learning/materials', label: '资料库', icon: iconMap.Tickets },
+      { path: '/learning/certificates', label: '我的证书', icon: iconMap.Medal },
+      { path: '/learning/cert-square', label: '证书广场', icon: iconMap.Trophy },
       { path: '/learning/explore', label: '学习广场', icon: iconMap.Grid },
-      { path: '/learning/practice', label: '自由刷题', icon: iconMap.EditPen },
-      { path: '/learning/plan', label: '学习计划', icon: iconMap.Star },
       { path: '/learning/report', label: '学习报告', icon: iconMap.TrendCharts },
     ]
   },

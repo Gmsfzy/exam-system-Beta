@@ -360,6 +360,14 @@ class Config:
     HOST = os.getenv('FLASK_HOST', '127.0.0.1')
     PORT = int(os.getenv('FLASK_PORT', '5000'))
 
+    # waitress 连接通道空闲超时（秒），仅生产模式生效：一个请求在这么多秒内
+    # 没有任何字节写出就直接被服务端掐断，客户端拿到的是连接中断而非 500。
+    # 它是「AI 出题」链路的最后一层天花板——出站 180–360s、前端 axios 同档都放宽了，
+    # 生产上仍会被这里的 120s 从中间掐断（开发模式走 Werkzeug，无此限制，本机测不出）。
+    # 默认保持 120 不动其它连接的回收节奏；跑 AI 出题的机器按部署指南设 600，
+    # 同时必须把 Nginx 的 proxy_read_timeout 一并放宽，否则掐断只是换了个位置。
+    WAITRESS_CHANNEL_TIMEOUT = int(os.getenv('WAITRESS_CHANNEL_TIMEOUT', '120'))
+
     # 跨域白名单（HTTP API 与 Socket.IO 共用）。
     # 生产部署通过环境变量 CORS_ORIGINS 配置前端地址，逗号分隔，例如：
     # CORS_ORIGINS=https://exam.example.com,https://www.example.com
@@ -464,6 +472,18 @@ class Config:
     DOUBAN_API_KEY = os.getenv('DOUBAN_API_KEY', '')
     DOUBAN_API_URL = os.getenv('DOUBAN_API_URL')
     DOUBAN_ENDPOINT_ID = os.getenv('DOUBAN_ENDPOINT_ID')
+    # AI 读超时（秒）。60s 只够短 JSON（批改/标签），出题与长文档都跑不完：
+    # 当前 endpoint 是推理模型，回复里带 reasoning_content，思考时间也计入生成。
+    # 2026-11-12 真机取证：教案两次 60s 读超时后整批静默降级成框架大纲；
+    # 2026-11-13 实测 5 道编程题耗时 74.2s，沿用 60s 必然每次掐断。
+    # 故按负载分档放宽，不再共用一个全局值。
+    AI_TIMEOUT = int(os.getenv('AI_TIMEOUT', '60'))
+    AI_DOC_TIMEOUT = int(os.getenv('AI_DOC_TIMEOUT', '180'))
+    # 出题读超时：基准按 5 道计，每多 1 道线性上浮（题目体量与耗时近似线性）。
+    # 接口上限 20 道时 ≈ 180 + 15*12 = 360s；前端 axios 需给同样公式再留余量，
+    # 否则后端还没答完，浏览器已先在第 30 秒掐断（就是之前那两条「生成失败」）。
+    AI_EXAM_TIMEOUT = int(os.getenv('AI_EXAM_TIMEOUT', '180'))
+    AI_EXAM_EXTRA_PER_Q = int(os.getenv('AI_EXAM_EXTRA_PER_Q', '12'))
 
     # Redis 缓存配置
     REDIS_HOST = os.getenv('REDIS_HOST', 'localhost')
@@ -562,3 +582,8 @@ class Config:
     OJ_ASYNC_GRADING = os.getenv('OJ_ASYNC_GRADING', 'false').lower() in ('1', 'true', 'yes', 'on')
     # 后台评测线程轮询间隔（秒）；被 wake 立即打断，仅兼做崩溃后 pending 重放兜底
     OJ_QUEUE_INTERVAL = float(os.getenv('OJ_QUEUE_INTERVAL', '5'))
+
+    # ── v7.9 批量讲义生成队列：学习计划每条任务一份文档，8 条同步做必超时，故投后台队列。
+    #    无开关（队列表空转时只一条带索引的 status 查询，成本可忽）；间隔仅兼做
+    #    崩溃后 pending 重放兜底，受理时靠 wake() 立即接手。
+    MATERIAL_QUEUE_INTERVAL = float(os.getenv('MATERIAL_QUEUE_INTERVAL', '10'))

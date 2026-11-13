@@ -74,7 +74,26 @@ def _finish_participant(comp, participant, now):
     participant.finished_at = now
     # v6.1 跨模块学习联动：把本次错题的知识点标记为薄弱，流入学习推荐
     _sync_competition_weak_mastery(participant)
+    # 竞赛错题自动收录进错题本（复用统一入本逻辑，含间隔复习卡）
+    _sync_competition_wrong_book(participant)
     return True
+
+
+def _sync_competition_wrong_book(participant):
+    """竞赛错题 → 错题本（source_type='competition'）。非关键路径，失败不影响结算。"""
+    try:
+        from api.learning_routes import sync_wrong_from_answers
+        wrong = [
+            (a.cq.question_id, a.answer, a.cq.answer)
+            for a in participant.answers
+            if not a.is_correct and a.cq and a.cq.question_id
+        ]
+        if wrong:
+            sync_wrong_from_answers(participant.user_id, 'competition',
+                                    participant.competition_id, wrong)
+    except Exception as e:
+        from utils.logger import logger
+        logger.warning('competition wrong-book sync failed: %s', e)
 
 
 def _sync_competition_weak_mastery(participant):

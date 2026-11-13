@@ -104,7 +104,7 @@
                        @click="analyzeWrong(rec)">
             {{ rec.ai_analysis ? '重新归因' : 'AI 归因' }}
           </el-button>
-          <el-button size="small" type="primary" @click="askAI(rec)">AI 答疑</el-button>
+          <el-button size="small" type="primary" @click="openAsk(rec)">AI 答疑</el-button>
           <el-button
             size="small"
             type="success"
@@ -137,16 +137,26 @@
         <div class="ai-q-text">{{ aiCurrent.correct_answer }}</div>
       </div>
 
+      <!-- v7.20：不再一打开就自动请求——先给人把疑问写清楚的机会，留空也照样能问。
+           以前是「弹窗一开就烧一次额度，而你想说的话没地方说」。 -->
+      <div class="ai-doubt">
+        <el-input v-model="userDoubt" type="textarea" :rows="2" maxlength="500" show-word-limit
+                  placeholder="卡在哪一步？写下来 AI 会针对这点回答（可留空）" />
+        <el-button size="small" type="primary" :loading="aiLoading" @click="askAI(false)">获取解析</el-button>
+      </div>
+
       <div v-if="aiLoading" class="ai-loading">
         <el-icon class="is-loading" :size="24"><Loading /></el-icon>
         <span>AI 正在分析...</span>
       </div>
       <div v-else class="ai-result">
+        <div v-if="aiCached" class="ai-cached">{{ aiCached }}</div>
         <div v-if="aiResult" class="ai-answer">{{ aiResult }}</div>
-        <div v-else class="ai-empty">暂无解析</div>
+        <div v-else class="ai-empty">还没有解析，写下你的疑问再点「获取解析」</div>
       </div>
 
       <template #footer>
+        <el-button v-if="aiResult" size="small" :loading="aiLoading" @click="askAI(true)">重新生成</el-button>
         <el-button @click="aiDialogVisible = false">关闭</el-button>
       </template>
     </el-dialog>
@@ -160,6 +170,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import request from '../utils/request'
+import { errTip } from '../utils/errs'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Loading, Search, MagicStick } from '@element-plus/icons-vue'
 import AIChatDialog from '../components/AIChatDialog.vue'
@@ -299,22 +310,38 @@ const aiLoading = ref(false)
 const aiResult = ref('')
 const aiCurrent = ref(null)
 const userDoubt = ref('')
+const aiCached = ref('')
 
-async function askAI(rec) {
+function openAsk(rec) {
   aiCurrent.value = rec
   aiResult.value = ''
+  aiCached.value = ''
   userDoubt.value = ''
   aiDialogVisible.value = true
+}
+
+async function askAI(refresh) {
+  const rec = aiCurrent.value
+  if (!rec || aiLoading.value) return
   aiLoading.value = true
+  aiResult.value = ''
+  aiCached.value = ''
   try {
     const res = await request.post('/api/learning/ask', {
       question_id: rec.question_id,
       student_answer: rec.wrong_answer || '',
-      doubt: rec.question_content,  // 让 AI 看完整题目
+      // v7.20：doubt 现在真的会进 prompt。此前后端收下这个字段就丢掉，而前端又把题面塞进
+      // doubt 想「让 AI 看到完整题目」——两头各白做一半，写不写疑问结果都一样。
+      doubt: userDoubt.value.trim(),
+      refresh: !!refresh,
     })
-    aiResult.value = res.data.analysis || res.data.question_content
+    // 不再拿 question_content 兜底：那正是旧版「没解析就把题面当解析显示」的源头，
+    // 看着像 AI 答了，其实一个字都没答
+    aiResult.value = res.data.analysis || 'AI 这次没给出可用解析，可点下方「重新生成」再试一次'
+    if (res.data.cached) aiCached.value = res.data.message || '已回用七天内同样的提问'
   } catch (e) {
-    aiResult.value = 'AI 服务暂不可用，请稍后重试'
+    // 不写死「AI 服务暂不可用」：额度用完是 429、后端没重启是 404，文案得对得上
+    aiResult.value = errTip(e)
   }
   aiLoading.value = false
 }
@@ -397,4 +424,10 @@ onMounted(load)
 .ai-loading { display: flex; gap: 10px; align-items: center; justify-content: center; padding: 30px; color: var(--text-muted); font-size: 13px; }
 .ai-result { font-size: 14px; line-height: 1.7; color: var(--text-primary); white-space: pre-wrap; }
 .ai-empty { color: var(--text-muted); text-align: center; padding: 20px; }
+.ai-doubt { display: flex; gap: 10px; align-items: flex-start; margin-bottom: 12px; }
+.ai-doubt :deep(.el-textarea) { flex: 1; }
+.ai-cached {
+  background: var(--bg-tertiary); border-radius: 8px; padding: 8px 12px;
+  margin-bottom: 10px; font-size: 12px; color: var(--text-muted);
+}
 </style>

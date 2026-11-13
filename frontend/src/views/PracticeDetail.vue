@@ -204,17 +204,16 @@ async function loadDetail() {
   try {
     const res = await request.get(`/api/learning/practice/${sessionId.value}`)
     session.value = res.data
-    // 如果后端返回的是历史数据（已完成），没有 questions 原始列表
+    // 后端 detail 接口同时返回 questions（完整带 options）和 answers（答题记录）
+    // v7.7 修复：优先使用后端返回的完整 questions，不再强制重建（之前只要 answers 存在就把 options 设为 []）
+    if (res.data.questions && res.data.questions.length) {
+      questions.value = res.data.questions
+    }
+    // 从 answers 恢复答题记录
     if (res.data.answers) {
-      // 从历史恢复 answers 字典
       res.data.answers.forEach((a, i) => {
         answers.value[i] = { student_answer: a.student_answer, is_correct: a.is_correct, detail: a }
       })
-      // 构造 questions 数组（只有 content/type）
-      questions.value = res.data.answers.map((a, i) => ({
-        id: i, content: a.question_content, type: res.data.answers[i]?.question_type || '',
-        options: [],
-      }))
     }
   } catch (e) {}
   loading.value = false

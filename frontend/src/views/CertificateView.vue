@@ -8,6 +8,9 @@
           <p class="page-subtitle">汇聚系统结业、跨模块与社会实践证书，一处纵览你的全部认证</p>
         </div>
         <div class="header-actions">
+          <el-button @click="$router.push('/learning/cert-square')">
+            <el-icon><Trophy /></el-icon>&nbsp;证书广场
+          </el-button>
           <el-button v-if="isTeacher" @click="openReview">
             <el-icon><Stamp /></el-icon>&nbsp;核验中心
             <span v-if="reviewPendingCount" class="pend-dot">{{ reviewPendingCount }}</span>
@@ -48,6 +51,12 @@
               <span class="cc-serial mono">{{ c.serial_no }}</span>
               <span class="cc-date">{{ (c.earned_at || '').slice(0, 10) }}</span>
             </div>
+            <!-- v7.19 展示态角标：公开了就标公开，顺手报浏览数，免得用户不知道自己的证书正在对外展示 -->
+            <div class="cc-share" :class="{ on: c.is_public }">
+              <span v-if="c.is_public">🔓 已公开 · 👁 {{ c.views }}</span>
+              <span v-else>🔒 仅自己可见</span>
+              <span v-if="c.share_post_id" class="shared-tag" title="已分享到社区">🔗</span>
+            </div>
           </div>
         </div>
         <el-empty v-else-if="!loading" :image-size="90" :description="emptyText">
@@ -71,6 +80,19 @@
             <el-icon><Printer /></el-icon>&nbsp;打印 / 导出 PDF
           </el-button>
         </div>
+      </div>
+
+      <!-- v7.19 展示态与分享：仅本人可见（教师看他人证书时不给开关，公开与否由本人决定）。
+           放在 cert-stage 外面：那个容器是 flex 居中，挤进去会和文凭卡片横向排成两列 -->
+      <div v-if="detail && detail.is_mine" class="display-bar no-print">
+        <span class="db-label">公开到证书广场</span>
+        <el-switch v-model="display.is_public" :loading="displaySaving"
+                   active-text="公开" inactive-text="私有" @change="togglePublic" />
+        <span class="db-views">👁 浏览 {{ display.views }} 次</span>
+        <el-button size="small" :loading="displaySaving" @click="shareCert">{{ display.share_post_id ? '重新分享' : '分享到社区' }}</el-button>
+        <el-link v-if="display.share_post_id" type="primary" :underline="false"
+                 @click="$router.push(`/community/${display.share_post_id}`)">查看社区帖</el-link>
+        <span class="db-hint">只展示荣誉信息，证书编号、核验意见与佐证附件不会外发</span>
       </div>
 
       <div v-loading="loading" class="cert-stage">
@@ -321,8 +343,54 @@ async function loadDetail() {
   try {
     const res = await request.get(`/api/learning/certificates/${route.params.kind}/${route.params.id}`)
     detail.value = res.data
+    // 展示态从详情回来（本人视图已带 is_public/views/share_post_id），开关才不会弹回默认值
+    display.is_public = !!res.data.is_public
+    display.views = res.data.views || 0
+    display.share_post_id = res.data.share_post_id || null
   } catch (e) { /* ignore */ }
   loading.value = false
+}
+
+// ── v7.19 公开开关与分享到社区 ──
+const display = reactive({ is_public: false, views: 0, share_post_id: null })
+const displaySaving = ref(false)
+
+async function togglePublic(v) {
+  displaySaving.value = true
+  try {
+    const res = await request.put(
+      `/api/learning/certificates/${detail.value.kind}/${detail.value.id}/display`,
+      { is_public: !!v })
+    display.is_public = !!res.data.is_public
+    display.views = res.data.views ?? display.views
+    display.share_post_id = res.data.share_post_id || null
+    ElMessage.success(res.data.message)
+  } catch (e) {
+    display.is_public = !v        // 失败回弹：开关不能显示成已经生效的样子
+  }
+  displaySaving.value = false
+}
+
+async function shareCert() {
+  let note = ''
+  try {
+    const r = await ElMessageBox.prompt('附一句话给同学看（可留空）', '分享到社区中心', {
+      confirmButtonText: '发布', cancelButtonText: '取消', inputType: 'textarea',
+      inputValidator: v => (v || '').length <= 500 || '不要超过 500 字',
+    })
+    note = r.value || ''
+  } catch (e) { return }
+  displaySaving.value = true
+  try {
+    const res = await request.post(
+      `/api/learning/certificates/${detail.value.kind}/${detail.value.id}/share`,
+      { note })
+    display.share_post_id = res.data.post_id
+    display.is_public = true      // 分享即公开
+    ElMessage.success(res.data.message)
+    router.push(`/community/${res.data.post_id}`)
+  } catch (e) { /* 拦截器已提示 */ }
+  displaySaving.value = false
 }
 
 async function downloadFile(c) {
@@ -455,6 +523,18 @@ watch(isDetail, loadAll)
 .cc-foot { display: flex; justify-content: space-between; align-items: center;
   border-top: 1px dashed var(--border-color); padding-top: 10px; font-size: 11.5px; color: var(--text-muted); }
 .cc-serial { letter-spacing: .5px; }
+
+/* v7.19 展示态角标与公开开关 */
+.cc-share { display: flex; align-items: center; gap: 8px; margin-top: 6px;
+  font-size: 11.5px; color: var(--text-muted); }
+.cc-share.on { color: #059669; }
+.cc-share .shared-tag { margin-left: auto; }
+.display-bar { display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 12px;
+  padding: 12px 16px; margin-bottom: 14px; font-size: 13px; }
+.db-label { font-weight: 600; color: var(--text-primary); }
+.db-views { font-size: 12px; color: var(--text-muted); }
+.db-hint { font-size: 12px; color: var(--text-muted); margin-left: auto; }
 .cc-ribbon { position: absolute; top: 12px; right: -30px; transform: rotate(35deg);
   font-size: 11px; padding: 2px 34px; color: #fff; }
 .cc-ribbon.vs-pending { background: #f59e0b; }

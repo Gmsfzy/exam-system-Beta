@@ -65,7 +65,8 @@
 
     <!-- ══ 卡片视图 ══ -->
     <div v-else class="plan-grid">
-      <div v-for="p in plans" :key="p.id" class="plan-card" :class="'st-' + p.status">
+      <div v-for="p in plans" :key="p.id" :id="`plan-card-${p.id}`" class="plan-card"
+           :class="['st-' + p.status, { 'is-focus': focusId === p.id }]">
         <div class="plan-header">
           <div class="ph-left">
             <span class="plan-ico">{{ statusIcon(p.status) }}</span>
@@ -171,6 +172,19 @@
           <el-button size="small" type="warning" plain :loading="aiLoadingId === p.id" @click="aiForPlan(p)">
             ✨ AI 拆任务
           </el-button>
+          <el-dropdown trigger="click" :disabled="docLoadingId === p.id"
+                       @command="(k) => genDocs(p, k)">
+            <el-button size="small" type="success" plain :loading="docLoadingId === p.id">
+              📄 生成学习文档<el-icon class="el-icon--right"><arrow-down /></el-icon>
+            </el-button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item v-for="(label, k) in DOC_KINDS" :key="k" :command="k">
+                  {{ label }}
+                </el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
           <el-button size="small" v-if="p.status !== 'completed'" @click="toggleStatus(p)">
             {{ p.status === 'paused' ? '恢复' : '暂停' }}
           </el-button>
@@ -297,17 +311,48 @@
         </el-button>
       </template>
     </el-dialog>
+
+    <!-- v7.9 批量学习文档：一条任务一份讲义，后台队列逐份生成，此处只轮询进度 -->
+    <el-dialog v-model="docDlg" :title="`学习文档生成进度：${docPlan?.title || ''}`" width="640px" @closed="stopDocPoll">
+      <el-progress :percentage="docPercent" :stroke-width="10" :status="docProgressStatus" />
+      <div class="doc-batch-nums">
+        <span>共 {{ docTotal }} 份</span>
+        <span>已完成 {{ docDoneCount }}</span>
+        <span v-if="docInfo.running">生成中 {{ docInfo.running }}</span>
+        <span v-if="docInfo.pending">排队中 {{ docInfo.pending }}</span>
+        <span v-if="docInfo.failed" class="doc-fail">失败 {{ docInfo.failed }}</span>
+      </div>
+      <div v-if="docNote" class="form-hint">{{ docNote }}</div>
+      <el-table :data="docInfo.items" size="small" max-height="300">
+        <el-table-column prop="title" label="任务" show-overflow-tooltip />
+        <el-table-column label="状态" width="100">
+          <template #default="{ row }">
+            <el-tag size="small" :type="docTagType(row.status)">{{ docStatusText(row.status) }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="说明" width="180" show-overflow-tooltip>
+          <template #default="{ row }">{{ row.error || (row.status === 'done' ? '已存入资料库' : '') }}</template>
+        </el-table-column>
+      </el-table>
+      <div class="form-hint">本次形态：{{ docKindName || DOC_KINDS[docKind] || docKind }}；生成后自动存入我的资料库，关闭本窗口不影响后台生成。</div>
+      <template #footer>
+        <el-button v-if="docInfo.failed" @click="retryFailedDocs">重试失败项</el-button>
+        <el-button @click="docDlg = false">后台继续</el-button>
+        <el-button v-if="docDoneCount" type="primary" @click="goMaterials">前往资料库</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
+import { ref, computed, onMounted, onUnmounted, nextTick, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Download } from '@element-plus/icons-vue'
 import request from '../utils/request'
 
 const router = useRouter()
+const route = useRoute()
 
 const plans = ref([])
 const loading = ref(false)
@@ -355,6 +400,31 @@ const importing = ref(false)
 
 // 去练习
 const practicingTaskId = ref(null)
+
+// v7.9 批量学习文档（一条任务一份，后台队列逐份生成）；v7.14 加教案形态
+const DOC_KINDS = {
+  mindmap: '📘 讲义 + 思维导图',
+  lesson_plan: '📔 教案（教学设计）',
+  lecture: '📗 结构化讲义',
+  summary: '📙 高浓度摘要',
+  quiz: '📕 练习题集',
+  video_script: '📺 视频脚本包',
+}
+const docKind = ref('mindmap')
+const docDlg = ref(false)
+const docPlan = ref(null)
+const docBatchId = ref('')
+const docNote = ref('')
+const docLoadingId = ref(null)
+const docInfo = ref({ total: 0, pending: 0, running: 0, done: 0, failed: 0, items: [] })
+let docTimer = null
+
+// v7.18 需求 b/c：文案必须按形态说。上表带 emoji 装饰不适合直接入句，
+// 故优先取后端的 kind_name（与 MATERIAL_KIND_NAMES 同源），前端表只做兜底。
+const docKindName = ref('')
+function kindNameOf(d, kind) {
+  return (d && d.kind_name) || (DOC_KINDS[kind] || '').replace(/^\S+\s/, '') || kind || '学习文档'
+}
 
 function statusLabel(s) { return { active: '进行中', paused: '已暂停', completed: '已完成' }[s] || s }
 function statusTagType(s) { return { active: 'success', paused: 'info', completed: '' }[s] || '' }
@@ -702,7 +772,158 @@ async function doImport() {
   importing.value = false
 }
 
-onMounted(load)
+// ── v7.9 批量生成学习文档：受理 → 轮询进度 →（必要时）重投失败项 ──
+const docTotal = computed(() => docInfo.value.total || 0)
+const docDoneCount = computed(() => docInfo.value.done || 0)
+const docPercent = computed(() => {
+  const t = docTotal.value
+  return t ? Math.min(100, Math.round(((docInfo.value.done || 0) + (docInfo.value.failed || 0)) / t * 100)) : 0
+})
+const docProgressStatus = computed(() => {
+  if (docInfo.value.failed) return 'warning'
+  return docTotal.value && docPercent.value === 100 ? 'success' : ''
+})
+function docStatusText(s) {
+  return { pending: '排队中', running: '生成中', done: '已完成', failed: '失败' }[s] || s
+}
+function docTagType(s) {
+  return { pending: 'info', running: 'warning', done: 'success', failed: 'danger' }[s] || ''
+}
+
+function startDocPoll() {
+  stopDocPoll()
+  docTimer = setInterval(pollDocBatch, 2500)   // 一份文档约 20-40s，2.5s 轮询足够跟手
+  pollDocBatch()
+}
+function stopDocPoll() {
+  if (docTimer) { clearInterval(docTimer); docTimer = null }
+}
+
+async function pollDocBatch() {
+  if (!docBatchId.value) return
+  try {
+    const res = await request.get(`/api/learning/material-jobs/${docBatchId.value}`)
+    docInfo.value = res.data || docInfo.value
+    if (docInfo.value.finished) {
+      stopDocPoll()
+      announceDocFinish()   // v7.18 需求 b：跑完当场也要看得到，不能只靠站内通知
+    }
+  } catch (e) { stopDocPoll() }
+}
+
+function announceDocFinish() {
+  const name = docKindName.value || '学习文档'
+  const done = docInfo.value.done || 0
+  const failed = docInfo.value.failed || 0
+  if (!done && !failed) return ElMessage.info(`本批「${name}」没有需要生成的任务`)
+  ElMessage({
+    type: failed ? 'warning' : 'success',
+    duration: 6000, showClose: true,
+    message: `${name}已生成 ${done} 份，已存入资料库`
+      + (failed ? `；${failed} 份失败可点「重试失败项」` : ''),
+  })
+}
+
+async function genDocs(p, kind) {
+  if (!p.tasks || !p.tasks.length) { ElMessage.warning('该计划还没有任务条目'); return }
+  const useKind = kind || docKind.value || 'mindmap'
+  docKind.value = useKind
+  docLoadingId.value = p.id
+  try {
+    const res = await request.post(`/api/learning/plans/${p.id}/materials/batch`, { kind: useKind })
+    const d = res.data || {}
+    docKindName.value = kindNameOf(d, useKind)
+    if (!d.queued) {
+      // 没投出去只有两种原因：上一批还在后台排队，或每条任务都已有同形态成品
+      if (d.waiting) {
+        // 排队中不该弹「强制重做」：成品还没落库，用户会以为没生成成功而白白重跑一遍
+        ElMessage.info(`本批「${docKindName.value}」还有 ${d.waiting} 份在后台生成，稍等片刻即可在资料库看到`)
+      } else if (d.skipped) {
+        // 每条任务都已有同形态成品：问一句要不要强制重做，而不是默默什么都不发生
+        const name = docKindName.value
+        try {
+          await ElMessageBox.confirm(
+            `这 ${d.skipped} 条任务已有「${name}」。强制重做会原地替换同形态旧文档（收藏与浏览量保留）；`
+            + `若是想要另一种形态（讲义 / 教案 / 摘要 / 练习题集等），换个形态就会另起一份，不动已有文档。`
+            + `确定要把这批「${name}」重做一遍吗？`,
+            `重新生成${name}`, { confirmButtonText: '强制重做', cancelButtonText: '算了' }
+          )
+        } catch (e) { docLoadingId.value = null; return }   // 按「算了」得把按钮转圈停下
+        const r2 = await request.post(`/api/learning/plans/${p.id}/materials/batch`,
+          { kind: useKind, force: true })
+        startDocBatch(p, r2.data || {})
+      } else {
+        ElMessage.warning(d.message || '本批无需生成')
+      }
+      return
+    }
+    startDocBatch(p, d)
+  } catch (e) {}
+  docLoadingId.value = null
+}
+
+function startDocBatch(p, d) {
+  docPlan.value = p
+  docBatchId.value = d.batch_id || ''
+  docNote.value = d.note || ''
+  docKindName.value = kindNameOf(d, docKind.value)
+  docInfo.value = { total: d.queued || 0, pending: d.queued || 0, running: 0,
+                    done: 0, failed: 0, items: [] }
+  docDlg.value = true
+  docLoadingId.value = null
+  ElMessage.success(d.message || `已受理 ${d.queued || 0} 份「${docKindName.value}」生成，后台逐份进行中`)
+  startDocPoll()
+}
+
+async function retryFailedDocs() {
+  if (!docBatchId.value) return
+  try {
+    const res = await request.post(`/api/learning/material-jobs/${docBatchId.value}/retry`)
+    ElMessage.success(res.data?.message || '已重投失败作业')
+    startDocPoll()
+  } catch (e) {}
+}
+
+function goMaterials() {
+  docDlg.value = false
+  router.push('/learning/materials')
+}
+
+onUnmounted(stopDocPoll)
+
+// ── 深链直达：/learning/plan?plan=<id> 定位并高亮那一份计划 ──
+// 今日学习、学习规划台、通知都能带这个参数过来，不必让人在卡片海里自己找。
+// 用 query 而不用 /plan/:id 子路由：侧边栏面包屑是按 path 全等反查页名的，带参路由会退化成「首页」。
+const focusId = ref(null)
+
+async function focusFromQuery() {
+  const pid = Number(route.query.plan)
+  if (!pid) return
+  viewMode.value = 'card'   // 甘特视图只有横条、没任务清单，深链一律回卡片视图
+  if (!plans.value.some(p => p.id === pid)) {
+    // 列表里没这份：问一次详情接口，区分“不存在/不是你的”与拉列表时的时间差
+    try {
+      await request.get(`/api/learning/plans/${pid}`)
+      await load()
+    } catch (e) {
+      ElMessage.warning('没找到这份学习计划，可能已被删除或不属于你')
+      return
+    }
+  }
+  focusId.value = pid
+  await nextTick()
+  const el = document.getElementById(`plan-card-${pid}`)
+  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  setTimeout(() => { if (focusId.value === pid) focusId.value = null }, 5000)
+}
+
+onMounted(async () => {
+  await load()
+  focusFromQuery()
+})
+
+// 已在本页时再点别的深链（如今日学习跳过来）也要重新定位
+watch(() => route.query.plan, () => focusFromQuery())
 </script>
 
 <style scoped>
@@ -728,6 +949,11 @@ onMounted(load)
 .plan-card {
   background: var(--bg-card); border: 1px solid var(--border-color);
   border-radius: 12px; padding: 18px 20px; position: relative; overflow: hidden;
+}
+/* 深链直达时的临时描边，5s 后自动收回 */
+.plan-card.is-focus {
+  border-color: #06b6d4;
+  box-shadow: 0 0 0 3px rgba(6, 182, 212, 0.18), 0 6px 22px rgba(6, 182, 212, 0.16);
 }
 /* 左侧状态色条 */
 .plan-card::before {
@@ -759,6 +985,10 @@ onMounted(load)
 .plan-meta { display: flex; gap: 14px; align-items: center; margin-bottom: 12px; }
 .plan-dates { font-size: 12px; color: var(--text-muted); }
 .plan-meta span { font-size: 12px; color: var(--text-muted); }
+
+/* 批量文档进度弹窗 */
+.doc-batch-nums { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12px; color: var(--text-muted); margin: 10px 0; }
+.doc-batch-nums .doc-fail { color: #ef4444; }
 
 .progress-wrap { margin-bottom: 12px; display: flex; align-items: center; gap: 12px; }
 .progress-wrap .el-progress { flex: 1; }

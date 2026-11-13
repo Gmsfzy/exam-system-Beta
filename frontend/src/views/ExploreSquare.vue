@@ -32,6 +32,27 @@
       </div>
     </div>
 
+    <!-- v7.19 广场入口：证书广场与学习心得都是独立页，放在这里方便从「逛」的路径上顺路进入。
+         不做额外请求拉计数，纯导航卡，避免广场首屏多两个可能失败的接口。 -->
+    <div class="entry-row">
+      <div class="entry-card ec-cert" @click="$router.push('/learning/cert-square')">
+        <div class="ec-icon">🏆</div>
+        <div class="ec-text">
+          <div class="ec-title">证书广场</div>
+          <div class="ec-desc">看看大家晒出的结业、赛季与社会证书；自己的证书在「我的证书」里点开即可公开</div>
+        </div>
+        <div class="ec-go">去看看 →</div>
+      </div>
+      <div class="entry-card ec-insight" @click="$router.push('/learning/insights')">
+        <div class="ec-icon">💡</div>
+        <div class="ec-text">
+          <div class="ec-title">学习心得</div>
+          <div class="ec-desc">按日/周/月归档的三段复盘：感悟与收获、心得与总结、反思创造，可让 AI 先起个稿</div>
+        </div>
+        <div class="ec-go">写一篇 →</div>
+      </div>
+    </div>
+
     <el-empty v-if="!loading && !items.length" description="还没有人公开资料，去资料库点亮第一篇吧" />
     <div class="exp-grid">
       <div v-for="m in items" :key="m.id" class="exp-card">
@@ -112,8 +133,8 @@ const auth = useAuthStore()
 const router = useRouter()
 const isTeacher = computed(() => auth.user?.role === 'teacher')
 const myId = auth.user?.id
-const KINDS = { video_script: '视频脚本', mindmap: '思维导图', lecture: '讲解稿', summary: '总结要点', quiz: '自测题组', manual: '手写' }
-const KIND_TAG = { video_script: 'warning', mindmap: 'success', lecture: '', summary: 'info', quiz: 'danger', manual: 'info' }
+const KINDS = { video_script: '视频脚本', mindmap: '思维导图', lesson_plan: '教案', lecture: '讲解稿', summary: '总结要点', quiz: '自测题组', manual: '手写' }
+const KIND_TAG = { video_script: 'warning', mindmap: 'success', lesson_plan: 'primary', lecture: '', summary: 'info', quiz: 'danger', manual: 'info' }
 
 const loading = ref(false)
 const items = ref([])
@@ -244,6 +265,17 @@ onMounted(() => {
 .page-head { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 14px; }
 .page-head h2 { margin: 0; }
 .head-right { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.entry-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; margin-bottom: 14px; }
+.entry-card { display: flex; align-items: center; gap: 12px; border-radius: 12px; padding: 14px 16px; cursor: pointer;
+  border: 1px solid var(--el-border-color-lighter, #ebeef5); background: var(--el-bg-color, #fff); }
+.entry-card:hover { transform: translateY(-1px); box-shadow: 0 6px 18px rgba(0, 0, 0, .08); }
+.ec-cert { background: linear-gradient(135deg, #fffbeb, #fef3c7); border-color: #fcd34d; }
+.ec-insight { background: linear-gradient(135deg, #eff6ff, #e0e7ff); border-color: #a5b4fc; }
+.ec-icon { font-size: 28px; }
+.ec-text { flex: 1; }
+.ec-title { font-size: 15px; font-weight: 700; }
+.ec-desc { color: #606266; font-size: 12px; margin-top: 3px; line-height: 1.5; }
+.ec-go { color: var(--el-color-primary, #409eff); font-size: 13px; white-space: nowrap; }
 .exp-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
 .exp-card { background: var(--el-bg-color, #fff); border: 1px solid var(--el-border-color-lighter, #ebeef5); border-radius: 10px; padding: 14px; display: flex; flex-direction: column; gap: 6px; }
 .exp-title { font-weight: 600; cursor: pointer; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }

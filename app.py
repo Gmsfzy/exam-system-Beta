@@ -702,6 +702,9 @@ def bootstrap_app():
         # v7.0 阶段 3：OJ 异步评测后台线程（幂等；开关 OJ_ASYNC_GRADING 关闭时空转不处理）
         from oj.queue import start_queue
         start_queue(app, interval=getattr(Config, 'OJ_QUEUE_INTERVAL', 5.0))
+        # v7.9：批量讲义生成后台线程（学习计划一次 8 份文档同步做必超时，同构 DB 队列）
+        from ai_service.material_queue import start_queue as start_material_queue
+        start_material_queue(app, interval=getattr(Config, 'MATERIAL_QUEUE_INTERVAL', 10.0))
         # 首次启动把 PG 存量数据整库铺进 SQLite 镜像（已齐备则不动，不反复重刷）
         with app.app_context():
             sqlite_mirror.ensure_bootstrap()
@@ -749,6 +752,19 @@ if __name__ == '__main__':
             from waitress import serve
         except ImportError:
             raise RuntimeError('生产模式需要 waitress，请先执行: pip install waitress')
+        # 空闲超时配置化（v7.16）：它比 AI 出题的出站超时更容易被忽略——
+        # 后端在算、前端在等，waitress 却在第 120 秒把整条连接掐掉，
+        # 用户拿到的是「网络错误」而不是可读的超时文案。
+        chan_timeout = int(app.config.get('WAITRESS_CHANNEL_TIMEOUT',
+                                         getattr(Config, 'WAITRESS_CHANNEL_TIMEOUT', 120)))
         print(f'[生产] waitress WSGI 服务器启动: http://{host}:{port}'
-              f'（Socket.IO 长轮询模式；调试器已关闭）')
-        serve(app, host=host, port=port, threads=16, channel_timeout=120)
+              f'（Socket.IO 长轮询模式；调试器已关闭；channel_timeout={chan_timeout}s）')
+        # 与出题读超时同屏比对，防两层天花板被分开调到自相矛盾
+        # （开发模式走 Werkzeug 不会命中这里，只能靠这条日志在部署时提醒）。
+        exam_ceiling = (int(getattr(Config, 'AI_EXAM_TIMEOUT', 180))
+                        + 15 * int(getattr(Config, 'AI_EXAM_EXTRA_PER_Q', 12)))
+        if chan_timeout < exam_ceiling:
+            print(f'[生产][警告] channel_timeout={chan_timeout}s < AI 出题 20 道的出站超时 {exam_ceiling}s，'
+                  f'大批量出题会被 waitress 掐断；请设 WAITRESS_CHANNEL_TIMEOUT={exam_ceiling + 240} '
+                  f'并同步放宽 Nginx proxy_read_timeout')
+        serve(app, host=host, port=port, threads=16, channel_timeout=chan_timeout)

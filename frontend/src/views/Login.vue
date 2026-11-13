@@ -142,9 +142,17 @@ const handleLogin = async () => {
     const redirect = route.query.redirect
     if (typeof redirect === 'string' && redirect.startsWith('/') && !redirect.startsWith('//')) {
       router.push(redirect)
-    } else {
-      router.push('/')
+      return
     }
+    // v7.8 无 redirect 时回上次访问的模块（sessionStorage 关浏览器自动清空 → 下次开浏览器回 Portal 门户）
+    try {
+      const last = sessionStorage.getItem('lastModule')
+      if (last && last.startsWith('/') && !last.startsWith('//') && last !== '/') {
+        router.push(last)
+        return
+      }
+    } catch (e) { /* noop */ }
+    router.push('/')
   } catch (e) {
     console.error(e)
   } finally {

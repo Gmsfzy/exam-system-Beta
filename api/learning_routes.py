@@ -5,6 +5,7 @@
      专业学习路径 + 知识图谱（知识点/边/路径/选课/进度/资源）
 """
 import json
+import hashlib
 import math
 import os
 import re
@@ -29,9 +30,11 @@ from database.models import (
     KnowledgeMastery, UserKpNote, QuizAttempt, QuizAttemptAnswer,
     ReviewItem, StudyCheckin, PathCertificate, DailyTask,
     UserCertificate, CERT_CATEGORY_LABELS, CERT_VERIFY_LABELS,
+    CertificateDisplay, StudyInsight, CERT_KIND_LABELS,
+    INSIGHT_SECTION_LABELS, INSIGHT_PERIOD_LABELS,
     AiChatConversation, AiChatMessage, FocusSession, StudyNote, ExplainCard,
     StudyFolder, StudyMaterial, MaterialFavorite, MaterialReport, UserFollow,
-    AiUsageLog, AiQuota,
+    AiUsageLog, AiQuota, Notebook, AiAskRecord,
     question_knowledge_point,
 )
 from utils.security import limiter, RateLimitConfig, verify_token
@@ -544,6 +547,22 @@ def api_plan_list():
     return jsonify(out)
 
 
+@api_learning_bp.route('/learning/plans/<int:plan_id>', methods=['GET'])
+def api_plan_detail(plan_id):
+    """单份计划详情（供 /learning/plan?plan=id 深链直达，字段与列表项一致）"""
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    plan = db.session.get(StudyPlan, plan_id)
+    # 计划是私人账本，别人的 id 与不存在同返回，不泄漏标题
+    if not plan or plan.user_id != user.id:
+        return jsonify({'message': '学习计划不存在'}), 404
+    d = _plan_to_dict(plan)
+    if plan in db.session.dirty:
+        db.session.commit()   # 同上：任务全完时这里会落库状态流转
+    return jsonify(d)
+
+
 @api_learning_bp.route('/learning/plans', methods=['POST'])
 @limiter.limit(RateLimitConfig.DATA_WRITE)
 def api_plan_create():
@@ -644,6 +663,10 @@ def api_plan_delete(plan_id):
     if not plan or plan.user_id != user.id:
         return jsonify({'message': '学习计划不存在'}), 404
 
+    # v7.9 之后 study_material/material_gen_job 反向指着计划与任务，不清会让 PG 直接
+    # 拒绝删除（文档本身保留，只摘反链）
+    from ai_service.material_queue import purge_refs
+    purge_refs(plan_id, [t.id for t in (plan.tasks or [])])
     db.session.delete(plan)
     db.session.commit()
     return jsonify({'message': '已删除'})
@@ -780,6 +803,8 @@ def api_plan_task_delete(plan_id, task_id):
     if not task or task.plan_id != plan_id:
         return jsonify({'message': '任务不存在'}), 404
 
+    from ai_service.material_queue import purge_refs
+    purge_refs(task_ids=[task_id])           # 同上：该任务的作业行与成品反链
     db.session.delete(task)
     db.session.commit()
     return jsonify({'message': '任务已删除'})
@@ -893,7 +918,11 @@ def _clean_task_item(raw):
 @api_learning_bp.route('/learning/plans/<int:plan_id>/tasks/batch', methods=['POST'])
 @limiter.limit(RateLimitConfig.DATA_WRITE)
 def api_plan_task_batch(plan_id):
-    """批量添加任务（AI 拆解建议采纳）：单次上限 10 条，按标题去重"""
+    """批量添加任务（AI 拆解建议采纳）：单次上限 10 条，按标题去重
+
+    notify=True（v7.18）：学习规划台「确认应用」最后一块提交时带上，应用成功后落
+    一条站内通知。放在这里而不是建计划接口：此时任务已全部落库，通知里的条数是真的；
+    手动新建计划不传该标志，不产噪音。"""
     user = verify_token()
     if not user:
         return jsonify({'message': '未登录'}), 401
@@ -920,7 +949,25 @@ def api_plan_task_batch(plan_id):
     if plan.status == 'completed' and added:
         plan.status = 'active'  # 加了新任务，计划重新激活
     db.session.commit()
+    if data.get('notify') and added:
+        _notify_plan_applied(user, plan)
     return jsonify({'added': len(added), 'tasks': [_task_to_dict(t) for t in added]})
+
+
+def _notify_plan_applied(user, plan):
+    """学习规划应用成功的站内通知（v7.18 需求 a）。
+
+    非关键路径单独裹异常：通知写挂不能把已落库的计划报成「应用失败」（同 AI 出题那次教训）。
+    related_type='plan' + related_id 让铃铛点下去直达那一份计划（深链 /learning/plan?plan=id）。"""
+    try:
+        create_notification(
+            user.id, '学习规划已应用',
+            f'《{plan.title}》已写入你的学习计划，共 {len(plan.tasks or [])} 个任务'
+            f'（{plan.start_date} 起），可在「学习计划」页逐项开始。',
+            type='success', related_type='plan', related_id=plan.id)
+    except Exception:
+        db.session.rollback()
+        logger.exception('[learning] 学习规划应用通知创建失败 plan_id=%s', plan.id)
 
 
 def _match_plan_kps(keyword_text, limit=15):
@@ -1014,28 +1061,22 @@ def api_plan_ai_suggest_tasks():
 
 # ── 学习报告（聚合查询 StudyLog + Result + Competition） ──────────
 
-@api_learning_bp.route('/learning/report/overview', methods=['GET'])
-def api_report_overview():
-    """学习概览：最近 30 天聚合 + 统计指标"""
-    user = verify_token()
-    if not user:
-        return jsonify({'message': '未登录'}), 401
-
-    days = int(request.args.get('days', 30))
+def _report_overview_payload(user_id, days):
+    """学习概览聚合（按 user_id 参数化，供本人/公开报告两种入口复用）"""
     cutoff = utcnow() - __import__('datetime').timedelta(days=days)
 
     # 练习/考试/竞赛聚合
-    logs = StudyLog.query.filter_by(user_id=user.id).filter(StudyLog.studied_at >= cutoff).all()
+    logs = StudyLog.query.filter_by(user_id=user_id).filter(StudyLog.studied_at >= cutoff).all()
     log_total = sum(l.total_questions for l in logs)
     log_correct = sum(l.correct_count for l in logs)
 
     # 错题统计
-    wrong_total = WrongAnswerRecord.query.filter_by(user_id=user.id).count()
-    wrong_unmastered = WrongAnswerRecord.query.filter_by(user_id=user.id, is_mastered=False).count()
+    wrong_total = WrongAnswerRecord.query.filter_by(user_id=user_id).count()
+    wrong_unmastered = WrongAnswerRecord.query.filter_by(user_id=user_id, is_mastered=False).count()
     wrong_mastered = wrong_total - wrong_unmastered
 
     # 活跃学习计划
-    active_plans = StudyPlan.query.filter_by(user_id=user.id, status='active').count()
+    active_plans = StudyPlan.query.filter_by(user_id=user_id, status='active').count()
 
     # 最近 7 天每日学习时长聚合（从 StudyLog 逐日求和）
     daily = db.session.query(
@@ -1044,7 +1085,7 @@ def api_report_overview():
         func.sum(StudyLog.total_questions).label('total'),
         func.sum(StudyLog.correct_count).label('correct'),
     ).filter(
-        StudyLog.user_id == user.id,
+        StudyLog.user_id == user_id,
         StudyLog.studied_at >= utcnow() - __import__('datetime').timedelta(days=7),
     ).group_by(func.date(StudyLog.studied_at)).all()
 
@@ -1052,7 +1093,7 @@ def api_report_overview():
                                'total': int(r.total or 0),
                                'correct': int(r.correct or 0)} for r in daily}
 
-    return jsonify({
+    return {
         'period_days': days,
         'total_questions': log_total,
         'correct_count': log_correct,
@@ -1064,7 +1105,59 @@ def api_report_overview():
         'wrong_mastered': wrong_mastered,
         'active_plans': active_plans,
         'daily': daily_map,
-    })
+    }
+
+
+def _report_daily_payload(user_id, days):
+    """每日学习记录明细（按 user_id 参数化）"""
+    cutoff = utcnow() - __import__('datetime').timedelta(days=days)
+
+    logs = StudyLog.query.filter_by(user_id=user_id) \
+        .filter(StudyLog.studied_at >= cutoff) \
+        .order_by(StudyLog.studied_at.desc()).all()
+
+    return [{
+        'id': l.id, 'log_type': l.log_type, 'reference_id': l.reference_id,
+        'total_questions': l.total_questions, 'correct_count': l.correct_count,
+        'score_ratio': l.score_ratio, 'time_spent_sec': l.time_spent_sec,
+        'studied_at': iso_local(l.studied_at),
+    } for l in logs]
+
+
+def _resolve_report_target(uid):
+    """公开报告访问控制：本人直返；他人需 user.is_study_report_public=True。
+    返回 (target_user, error_response)；error_response 非 None 时直接返回它。"""
+    user = verify_token()
+    if not user:
+        return None, (jsonify({'message': '未登录'}), 401)
+    if uid == user.id:
+        return user, None
+    target = db.session.get(User, uid)
+    if not target:
+        return None, (jsonify({'message': '用户不存在'}), 404)
+    if not target.is_study_report_public:
+        return None, (jsonify({'message': '该用户未公开学习报告'}), 403)
+    return target, None
+
+
+@api_learning_bp.route('/learning/report/overview', methods=['GET'])
+def api_report_overview():
+    """学习概览：最近 30 天聚合 + 统计指标"""
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    days = int(request.args.get('days', 30))
+    return jsonify(_report_overview_payload(user.id, days))
+
+
+@api_learning_bp.route('/learning/report/<int:uid>/overview', methods=['GET'])
+def api_report_overview_public(uid):
+    """查看指定用户的学习概览：本人或对方开启"学习报告公开"时可用"""
+    target, err = _resolve_report_target(uid)
+    if err:
+        return err
+    days = int(request.args.get('days', 30))
+    return jsonify(_report_overview_payload(target.id, days))
 
 
 @api_learning_bp.route('/learning/report/daily', methods=['GET'])
@@ -1073,68 +1166,129 @@ def api_report_daily():
     user = verify_token()
     if not user:
         return jsonify({'message': '未登录'}), 401
-
     days = int(request.args.get('days', 30))
-    cutoff = utcnow() - __import__('datetime').timedelta(days=days)
+    return jsonify(_report_daily_payload(user.id, days))
 
-    logs = StudyLog.query.filter_by(user_id=user.id) \
-        .filter(StudyLog.studied_at >= cutoff) \
-        .order_by(StudyLog.studied_at.desc()).all()
 
-    return jsonify([{
-        'id': l.id, 'log_type': l.log_type, 'reference_id': l.reference_id,
-        'total_questions': l.total_questions, 'correct_count': l.correct_count,
-        'score_ratio': l.score_ratio, 'time_spent_sec': l.time_spent_sec,
-        'studied_at': iso_local(l.studied_at),
-    } for l in logs])
+@api_learning_bp.route('/learning/report/<int:uid>/daily', methods=['GET'])
+def api_report_daily_public(uid):
+    """查看指定用户的每日学习明细：本人或对方开启"学习报告公开"时可用"""
+    target, err = _resolve_report_target(uid)
+    if err:
+        return err
+    days = int(request.args.get('days', 30))
+    return jsonify(_report_daily_payload(target.id, days))
 
 
 # ── AI 答疑 ────────────────────────────────────────────────────────
 
+# 答疑留痕复用窗口：窗口内同指纹直接回上次的解析，不再打 AI
+ASK_REUSE_DAYS = 7
+
+
+def _ask_fingerprint(uid, question_id, doubt, student_answer):
+    """四元组指纹：换题/换问法/改作答都会 miss，不会把旧解析硬套到新问题上。"""
+    raw = '|'.join(str(v or '') for v in (uid, question_id, doubt, student_answer))
+    return hashlib.sha1(raw.encode('utf-8')).hexdigest()
+
+
 @api_learning_bp.route('/learning/ask', methods=['POST'])
 @limiter.limit(RateLimitConfig.AI_GENERATE)
 def api_learning_ask():
-    """AI 答疑：传入题目 id（或题目内容）+ 用户疑问，返回解析"""
+    """AI 答疑：题目 id（或题面）+ 学生疑问 → 解析，并留痕供短期内同问复用。
+
+    v7.20 两处收口：① doubt 真正进 prompt（以前收下就丢，学生写不写疑问结果一样）；
+    ② 解析落 `ai_ask_record`，同指纹 ASK_REUSE_DAYS 天内命中就回旧解——不扣额度也不重烧外呼。
+    没 question_id 的「拍题提问」也不再回空字符串（旧代码那句 `if question_id else ''`）。
+    `refresh=true` 跳过复用重生成：想换个思路再问一次的人，不该被自己的历史回答挡着。
+
+    顺带不再下发 `question_answer`：错题本场景要看标准答案该走错题自己的字段，而这个端点没有
+    错题归因那套 `_source_still_reanswerable` 答案门控，源仍可重答时它等于直接把答案送出去。
+    """
     user = verify_token()
     if not user:
         return jsonify({'message': '未登录'}), 401
 
     data = request.get_json(silent=True) or {}
     question_id = data.get('question_id')
-    question_content = data.get('question_content', '').strip()
-    student_answer = (data.get('student_answer') or '').strip()
-    doubt = data.get('doubt', '').strip()
+    question_content = str(data.get('question_content') or '').strip()[:4000]
+    student_answer = str(data.get('student_answer') or '').strip()[:4000]
+    doubt = str(data.get('doubt') or '').strip()[:2000]
+    refresh = bool(data.get('refresh'))
 
     question = None
     if question_id:
         question = db.session.get(Question, question_id)
         if question:
             question_content = question.content
-            if not student_answer and question.answer:
-                student_answer = question.answer
 
     if not question_content and not doubt:
         return jsonify({'message': '请提供题目内容或您的疑问'}), 400
 
+    fp = _ask_fingerprint(user.id, question_id if question else None, doubt, student_answer)
+    since = utcnow() - timedelta(days=ASK_REUSE_DAYS)
+    hit = None if refresh else AiAskRecord.query.filter(
+        AiAskRecord.user_id == user.id,
+        AiAskRecord.fingerprint == fp,
+        AiAskRecord.created_at >= since).order_by(AiAskRecord.id.desc()).first()
+    if hit:
+        # 命中不计一次 AI 调用，因此也不写 ai_usage_log：那张表是成本表，
+        # 把复用记进去会把「治理页看到的调用数」虚抬成从未发生的外呼。
+        hit.hit_count = (hit.hit_count or 1) + 1
+        hit.last_hit_at = utcnow()
+        db.session.commit()
+        return jsonify({
+            'analysis': hit.analysis,
+            'question_content': hit.question_content or question_content,
+            'source': 'cache', 'cached': True, 'ask_id': hit.id,
+            'cached_at': iso_local(hit.created_at),
+            'message': '七天内问过同样的问题，已回用上次的解析（未消耗今日额度）',
+        })
+
+    allowed, _quota = check_ai_quota(user)
+    if not allowed:
+        return jsonify({'message': '今日 AI 额度已用完，请明天再来或咨询教师调整配额'}), 429
+
+    t0 = time.perf_counter()
+    from ai_service.services import ai_generate_analysis
     try:
-        from ai_service.services import ai_generate_analysis
-        analysis = ai_generate_analysis(db.session, question_id, student_answer) if question_id else ''
+        analysis = ai_generate_analysis(
+            db.session, question.id if question else None, student_answer,
+            doubt=doubt, question_content=question_content)
+    except ValueError as err:
+        return jsonify({'message': str(err)}), 400
     except Exception:
         logger.exception('AI 答疑失败')
+        log_ai_usage(user.id, 'ask', 'fail', (time.perf_counter() - t0) * 1000)
+        db.session.commit()
         return jsonify({'message': 'AI 服务暂不可用，请稍后重试'}), 500
 
-    # 额外用 doubt 字段扩展解析（若有独立客户端能处理更好）
+    charge_ai_quota(user)
+    log_ai_usage(user.id, 'ask', 'success', (time.perf_counter() - t0) * 1000)
+    rec = AiAskRecord(user_id=user.id, question_id=question.id if question else None,
+                      question_content=question_content or None, doubt=doubt or None,
+                      student_answer=student_answer or None, analysis=(analysis or '').strip()[:8000],
+                      source='ai', fingerprint=fp)
+    db.session.add(rec)
+    db.session.commit()
     return jsonify({
-        'analysis': analysis,
+        'analysis': rec.analysis,
         'question_content': question_content,
-        'question_answer': question.answer if question else None,
+        'source': 'ai', 'cached': False, 'ask_id': rec.id,
     })
 
 
 @api_learning_bp.route('/learning/ai-chat', methods=['POST'])
 @limiter.limit(RateLimitConfig.AI_GENERATE)
 def api_learning_ai_chat():
-    """AI 学习助手多轮对话：历史由前端持有，服务端无状态；context 注入页面背景"""
+    """AI 学习助手多轮对话（非流式）：前端只在流式失败时打到这里，v7.20 起这一轮也落库。
+
+    为什么不再保持「无状态」：同一个聊天框里「正常那几轮能回看、兜底那一轮刷新就没」
+    比整体无状态更难向用户解释；会话表既然已经有，补平这一条路径比加一层语义便宜。
+
+    历史仍由前端持有（入参不变），服务端只补写**本轮**的用户句与助手句：不能把整段
+    messages 重灌，否则一次回退就把已入库的旧消息重复存一遍。
+    """
     user = verify_token()
     if not user:
         return jsonify({'message': '未登录'}), 401
@@ -1160,6 +1314,17 @@ def api_learning_ai_chat():
     if not allowed:
         return jsonify({'message': '今日 AI 额度已用完，请明天再来或咨询教师调整配额'}), 429
 
+    # 会话归属：沿用前端带来的 conversation_id，没有则本轮首句建会话（与流式端点同一套语义）
+    cid = data.get('conversation_id')
+    conv = db.session.get(AiChatConversation, cid) if cid else None
+    if conv and conv.user_id != user.id:
+        return jsonify({'message': '会话不存在'}), 404
+    if not conv:
+        conv = AiChatConversation(user_id=user.id, title=cleaned[-1]['content'][:30],
+                                  context=context[:60] or None)
+        db.session.add(conv)
+        db.session.flush()
+
     t0 = time.perf_counter()
     try:
         from ai_service.services import ai_chat_reply
@@ -1169,10 +1334,21 @@ def api_learning_ai_chat():
         log_ai_usage(user.id, 'chat', 'fail', (time.perf_counter() - t0) * 1000)
         db.session.commit()
         return jsonify({'message': 'AI 服务暂不可用，请稍后重试'}), 500
+
+    # 流式端点是「先把 user 句落库、再开始流」的，中途挂掉回到这里时本轮用户句已经在库里了，
+    # 所以先看尾条：角色与内容都对得上就不重复补一条。不靠时间窗，靠内容，免得到点错位。
+    last = sorted(conv.messages, key=lambda m: m.id)[-1] if conv.messages else None
+    if not (last and last.role == 'user' and last.content == cleaned[-1]['content']):
+        db.session.add(AiChatMessage(conversation_id=conv.id, role='user',
+                                     content=cleaned[-1]['content']))
     charge_ai_quota(user)
     log_ai_usage(user.id, 'chat', 'success', (time.perf_counter() - t0) * 1000)
+    db.session.add(AiChatMessage(conversation_id=conv.id, role='assistant',
+                                 content=(reply or '')[:8000],
+                                 degraded=str(reply or '').startswith('【AI 服务暂不可用')))
+    conv.updated_at = utcnow()
     db.session.commit()
-    return jsonify({'reply': reply})
+    return jsonify({'reply': reply, 'conversation_id': conv.id})
 
 
 # ── 内部同步：考试结束后收录错题 ────────────────────────────────────
@@ -1365,6 +1541,8 @@ def _node_to_dict(n, progress=None):
         'difficulty': kp.difficulty if kp else None,
         'order_num': n.order_num, 'role': n.role,
         'estimated_minutes': n.estimated_minutes,
+        'notebook_id': n.notebook_id,
+        'notebook_title': n.notebook.title if n.notebook else None,
         'progress_status': progress.status if progress else None,
     }
     return d
@@ -1836,6 +2014,19 @@ def api_topic_plan_full():
     path_id, plan_id, tasks_total = path.id, plan.id, order
     db.session.commit()
 
+    # v7.18 需求 a：这类一键闭环要等 AI 30–60 秒，用户很可能已切页/刷新，
+    # 仅靠当场 ElMessage 根本看不到；异常单独裹，不让通知写挂把已成功的生成报成失败
+    try:
+        create_notification(
+            user.id, '学习规划已应用',
+            f'主题《{topic}》已形成为你的学习计划：{tasks_total} 个任务，'
+            f'同时生成学习路径与知识图谱（{stats["kp_created"] + stats["kp_existing"]} 个知识点'
+            f'/{stats["edges_created"]} 条关联）。',
+            type='success', related_type='plan', related_id=plan_id)
+    except Exception:
+        db.session.rollback()
+        logger.exception('[learning] 自由主题闭环应用通知创建失败 plan_id=%s', plan_id)
+
     return jsonify({
         'path_id': path_id, 'plan_id': plan_id, 'course_id': course.id,
         'kp_created': stats['kp_created'], 'kp_existing': stats['kp_existing'],
@@ -1845,6 +2036,117 @@ def api_topic_plan_full():
         'message': (f'已闭环生成：学习路径 + 知识图谱（{stats["kp_created"] + stats["kp_existing"]} 个知识点'
                     f'/{stats["edges_created"]} 条关联）+ 学习计划（{tasks_total} 个任务）'),
     })
+
+
+# ── v7.9 批量讲义：一条计划任务一份详细文档（后台队列，不同步等 AI）──
+
+def _get_own_plan(user, plan_id):
+    plan = db.session.get(StudyPlan, plan_id)
+    if not plan or plan.user_id != user.id:
+        return None, (jsonify({'message': '学习计划不存在'}), 404)
+    return plan, None
+
+
+@api_learning_bp.route('/learning/plans/<int:plan_id>/materials/batch', methods=['POST'])
+@limiter.limit(RateLimitConfig.DATA_WRITE)
+def api_material_batch(plan_id):
+    """为计划的每条任务投一份文档生成作业，立即返回 batch_id 由前端轮询进度。
+
+    不在请求里做 AI 调用：8 条任务×单次 4000 token 输出，同步必然超过前端/网关超时。
+    额度只做「今日完全用尽」拦截，不够跑完整批时照收——未跑的作业留在 pending，
+    次日额度惰性重置后自动续跑，比拒绝受理对用户更有利。"""
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    plan, err = _get_own_plan(user, plan_id)
+    if err:
+        return err
+    if not (plan.tasks or []):
+        return jsonify({'message': '该计划还没有任务条目，无需生成文档'}), 400
+
+    allowed, _quota = check_ai_quota(user)
+    if not allowed:
+        return jsonify({'message': '今日 AI 额度已用完，请明天再来或咨询教师调整配额'}), 429
+
+    data = request.get_json(silent=True) or {}
+    force = bool(data.get('force'))
+
+    from ai_service import material_queue as mq
+    from ai_service.services import MATERIAL_TEMPLATES
+    kind = str(data.get('kind') or mq.DEFAULT_KIND)
+    if kind not in MATERIAL_TEMPLATES:
+        # 形态传错属于调用方 bug，静默换成别的形态会让用户拿到不看的东西
+        return jsonify({'message': '未知文档形态：' + kind,
+                        'kinds': sorted(MATERIAL_TEMPLATES)}), 400
+    batch_id, queued, skipped = mq.enqueue(user, plan, kind=kind, force=force)
+    name = mq.kind_name(kind)
+    if not queued:
+        # 上一批还在后台跑时（pending/running），告诉前端「正在生成」而不是「已生成」，
+        # 否则用户以为文档丢了、还会误点「强制重做」白花额度
+        from database.models import MaterialGenJob
+        waiting = db.session.query(MaterialGenJob.id).filter(
+            MaterialGenJob.plan_id == plan.id, MaterialGenJob.kind == kind,
+            MaterialGenJob.status.in_([mq.PENDING, mq.RUNNING])).count()
+        # 只挡同形态：已有讲义不该拦住生成教案（v7.18 需求 c），文案得把「哪一形态」说清；
+        # 全部在排队时（后台还没跑完）也不能说「已生成」，否则用户以为文档丢了
+        return jsonify({'message': f'每条任务的「{name}」都已生成或正在后台生成，无需重复提交；'
+                                   f'如需重新请确认强制重做，换其他形态会另起一份、不动已有文档',
+                        'batch_id': batch_id, 'queued': 0, 'skipped': skipped,
+                        'waiting': waiting, 'kind': kind, 'kind_name': name}), 200
+    mq.wake()
+    quota = get_quota_info(user)
+    need, remain = queued, quota.get('remaining')
+    note = (None if remain is None or remain >= need
+            else f'今日剩余 AI 额度 {remain} 次，不足 {need} 份，未跑完的部分将在次日自动续跑')
+    return jsonify({'batch_id': batch_id, 'queued': queued, 'skipped': skipped,
+                    'total_tasks': len(plan.tasks), 'kind': kind, 'kind_name': name,
+                    'quota_remaining': remain, 'note': note,
+                    'message': f'已受理 {queued} 份「{name}」生成，后台逐份进行中'}), 202
+
+
+@api_learning_bp.route('/learning/material-jobs/<string:batch_id>', methods=['GET'])
+def api_material_batch_progress(batch_id):
+    """批次进度轮询：{total, pending, running, done, failed, items}。"""
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    from ai_service.material_queue import batch_info
+    info = batch_info(batch_id, user.id)
+    info['finished'] = (info['total'] == 0
+                        or (info['pending'] == 0 and info['running'] == 0))
+    return jsonify(info)
+
+
+@api_learning_bp.route('/learning/material-jobs/<string:batch_id>/retry', methods=['POST'])
+@limiter.limit(RateLimitConfig.DATA_WRITE)
+def api_material_batch_retry(batch_id):
+    """重试批内失败项（超限终态不自动复活，靠这里人工重放）。"""
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    from ai_service.material_queue import retry_failed
+    n = retry_failed(batch_id, user.id)
+    return jsonify({'retried': n, 'message': f'已重投 {n} 份失败作业' if n else '没有失败项'})
+
+
+@api_learning_bp.route('/learning/plans/<int:plan_id>/materials', methods=['GET'])
+def api_plan_materials(plan_id):
+    """本计划已产出的文档清单（计划页就地列出，不必去资料库翻）。"""
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    plan, err = _get_own_plan(user, plan_id)
+    if err:
+        return err
+    from ai_service.material_queue import plan_documents
+    mats = plan_documents(plan.id, user.id)
+    task_titles = {t.id: t.title for t in (plan.tasks or [])}
+    items = []
+    for m in mats:
+        d = _material_to_dict(m, current_user_id=user.id)
+        d['task_title'] = task_titles.get(m.task_id)
+        items.append(d)
+    return jsonify({'items': items, 'total': len(items)})
 
 
 @api_learning_bp.route('/learning/paths/<int:path_id>', methods=['GET'])
@@ -1975,6 +2277,10 @@ def api_node_create(path_id):
     else:
         return jsonify({'message': '无效的节点类型'}), 400
 
+    notebook_id = data.get('notebook_id')
+    if notebook_id and not db.session.get(Notebook, notebook_id):
+        return jsonify({'message': '笔记本不存在'}), 404
+
     max_order = db.session.query(func.max(LearningPathNode.order_num)) \
         .filter_by(path_id=path_id).scalar() or 0
     node = LearningPathNode(
@@ -1983,6 +2289,7 @@ def api_node_create(path_id):
         order_num=max_order + 1,
         role=data.get('role', 'core'),
         estimated_minutes=int(data.get('estimated_minutes', 30) or 30),
+        notebook_id=notebook_id,
     )
     db.session.add(node)
     db.session.flush()
@@ -2018,6 +2325,10 @@ def api_node_update(path_id, node_id):
         if data['chapter_id'] and not db.session.get(Chapter, data['chapter_id']):
             return jsonify({'message': '章节不存在'}), 404
         node.chapter_id = data['chapter_id']
+    if 'notebook_id' in data:
+        if data['notebook_id'] and not db.session.get(Notebook, data['notebook_id']):
+            return jsonify({'message': '笔记本不存在'}), 404
+        node.notebook_id = data['notebook_id']
     if not node.knowledge_point_id and not node.chapter_id:
         return jsonify({'message': '节点必须挂知识点或章节'}), 400
 
@@ -3007,9 +3318,12 @@ def _issue_certificate(user, path_id, final_score):
 
 # ── 知识库：我的知识点 / 笔记 / 证书 / 图谱着色 ──────────────
 
+# 单个知识点卡片携带的资料条数上限：总数由 material_count 给出，列表只截最近几条
+_KNOWLEDGE_MATERIAL_LIMIT = 8
+
 @api_learning_bp.route('/learning/my-knowledge', methods=['GET'])
 def api_my_knowledge():
-    """我学过的一切知识点（掌握度/笔记/错题数），按 专业→课程→章节 层级"""
+    """我沉淀过的一切知识点（掌握度/笔记/关联资料/错题数），按 专业→课程→章节 层级"""
     user = verify_token()
     if not user:
         return jsonify({'message': '未登录'}), 401
@@ -3019,11 +3333,28 @@ def api_my_knowledge():
     notes = UserKpNote.query.filter_by(user_id=user.id).all()
     nmap = {n.knowledge_point_id: n for n in notes}
 
-    # 预加载涉及的知识点及其章节/课程/专业链
-    kp_ids = list(mmap.keys())
+    # 预加载涉及的知识点及其章节/课程/专业链。
+    # 入口不只掌握度：写过笔记、沉淀过资料的知识点同样是“我的知识资产”——
+    # 只用 AI 生成过教案、还没刷过题的账号，以前整页是空的，资料在库里却看不见。
+    own_kp_rows = db.session.query(StudyMaterial.knowledge_point_id).filter(
+        StudyMaterial.user_id == user.id,
+        StudyMaterial.status == 'active',
+        StudyMaterial.knowledge_point_id.isnot(None)).distinct().all()
+    kp_ids = sorted(set(mmap) | set(nmap) | {r[0] for r in own_kp_rows})
     if not kp_ids:
         return jsonify({'majors': [], 'total': 0})
     kps = KnowledgePoint.query.filter(KnowledgePoint.id.in_(kp_ids)).all()
+
+    # 资料库反向索引：我的 active 资料按知识点归组（v7.14 打通知识库↔资料库）。
+    # 只取本人资料，他人公开资料不混进「我的」；单 KP 截断避免树里塞长篇目录。
+    mat_map = defaultdict(list)
+    mats = StudyMaterial.query.filter(
+        StudyMaterial.user_id == user.id,
+        StudyMaterial.status == 'active',
+        StudyMaterial.knowledge_point_id.in_(kp_ids)
+    ).order_by(StudyMaterial.updated_at.desc()).all()
+    for mt in mats:
+        mat_map[mt.knowledge_point_id].append({'id': mt.id, 'kind': mt.kind, 'title': mt.title})
 
     now = utcnow()
     # 未掌握错题总数（按题目→KP 映射累加，仅作风险参考）
@@ -3065,6 +3396,8 @@ def api_my_knowledge():
             'decay_risk': risk,
             'has_note': kp.id in nmap,
             'note_excerpt': (nmap[kp.id].content[:80] if kp.id in nmap else None),
+            'materials': mat_map.get(kp.id, [])[:_KNOWLEDGE_MATERIAL_LIMIT],
+            'material_count': len(mat_map.get(kp.id, [])),
             'wrong_count': wrong_kp_count.get(kp.id, 0),
             'last_verified_at': iso_local(m.last_verified_at) if m else None,
         })
@@ -3280,28 +3613,54 @@ def api_certificates_wall():
         .order_by(UserCertificate.created_at.desc()).all()
     items += [_wall_item_social(c) for c in soc_certs]
 
+    # v7.19 展示态：公开开关/浏览数/已分享的社区帖都在旁表里，一次取回按 (kind, id) 并进
+    # 各行（逐行查会打成 N+1）；没有展示行的证书就是私有，缺省口径不写库也能正确展示
+    displays = _display_map(user.id)
+    for it in items:
+        _apply_display(it, displays.get((it['kind'], it['id'])))
+
     items.sort(key=lambda x: x.get('earned_at') or '', reverse=True)
     pending = sum(1 for c in soc_certs if c.verify_status == 'pending')
     tabs = {'all': len(items), 'system': len(sys_certs),
             'module': len(mod_certs), 'social': len(soc_certs)}
     return jsonify({'items': items, 'tabs': tabs, 'pending_mine': pending,
                     'is_teacher': user.role == 'teacher',
-                    'category_labels': CERT_CATEGORY_LABELS})
+                    'category_labels': CERT_CATEGORY_LABELS,
+                    'kind_labels': CERT_KIND_LABELS})
 
 
 @api_learning_bp.route('/learning/certificates/<kind>/<int:cid>', methods=['GET'])
 def api_certificate_unified(kind, cid):
-    """统一证书详情：按 kind 分发（system/module/social）。"""
+    """统一证书详情：按 kind 分发（system/module/social）。
+
+    v7.19 加了对外可见的一层：本人开了「公开」的证书，他人也能读，但走脱敏视图且
+    计一次浏览；本人/教师仍看原来的完整视图（证书编号、核验意见、佐证附件都在）。
+    """
     user = verify_token()
     if not user:
         return jsonify({'message': '未登录'}), 401
+    if kind in CERT_KIND_LABELS:
+        cert = _cert_obj(kind, cid)
+        if cert is None:
+            return jsonify({'message': '证书不存在'}), 404
+        if cert.user_id != user.id and user.role != 'teacher':
+            d = CertificateDisplay.query.filter_by(cert_kind=kind, cert_id=cid).first()
+            if d is None or not d.is_public:
+                # 未公开的证书对外与「不存在」同口径：不透露它存在过，免得公开开关变成探测点
+                return jsonify({'message': '证书不存在'}), 404
+            d.views = (d.views or 0) + 1
+            db.session.commit()
+            return jsonify(_certificate_public(kind, cert, d))
+        # 本人/教师看完整视图：展示态也得跟着回来，否则前端的公开开关一刷新就弹回关
+        mine = _display_map(cert.user_id).get((kind, cid))
     if kind == 'system':
         cert = db.session.get(PathCertificate, cid)
         if not cert or cert.user_id != user.id:
             return jsonify({'message': '证书不存在'}), 404
         data = _certificate_to_dict(cert, brief=False)
         data['kind'] = 'system'
-        return jsonify(data)
+        data['is_mine'] = cert.user_id == user.id
+        return jsonify(_apply_display(data, mine))
     if kind == 'module':
         CC = _get_competition_cert_model()
         if CC is None:
@@ -3311,18 +3670,22 @@ def api_certificate_unified(kind, cid):
             return jsonify({'message': '证书不存在'}), 404
         s = cert.summary or {}
         grade_label = s.get('grade_label') or _SEASON_GRADE_LABELS.get(cert.grade, cert.grade)
-        return jsonify({
+        data = {
             'kind': 'module', 'id': cert.id, 'serial_no': cert.serial_no,
             'season': cert.season, 'grade': cert.grade, 'grade_label': grade_label,
             'tier': cert.tier, 'rank': cert.rank, 'points': cert.points,
             'total_players': cert.total_players, 'earned_at': iso_local(cert.earned_at),
             'username': cert.author.username if cert.author else None, 'summary': s,
-        })
+            'is_mine': cert.user_id == user.id,
+        }
+        return jsonify(_apply_display(data, mine))
     if kind == 'social':
         cert = db.session.get(UserCertificate, cid)
         if not cert or (cert.user_id != user.id and user.role != 'teacher'):
             return jsonify({'message': '证书不存在'}), 404
-        return jsonify(_social_detail(cert))
+        data = _social_detail(cert)
+        data['is_mine'] = cert.user_id == user.id
+        return jsonify(_apply_display(data, mine))
     return jsonify({'message': '未知证书类型'}), 400
 
 
@@ -3379,6 +3742,10 @@ def api_certificate_social_delete(cid):
             os.remove(os.path.join(_UPLOAD_DIR, cert.file_name))
         except OSError:
             pass
+    # 展示态旁表跟着清：不留「证书没了、广场里还挂着一行公开记录」的孤儿
+    # 逐行 db.session.delete 而非 query.delete()：bulk 写不进 PG→SQLite 实时镜像（v7.5 实锤坑）
+    for d in CertificateDisplay.query.filter_by(cert_kind='social', cert_id=cid).all():
+        db.session.delete(d)
     db.session.delete(cert)
     db.session.commit()
     return jsonify({'message': '已删除'})
@@ -3436,6 +3803,714 @@ def api_certificate_social_file(cid):
         return jsonify({'message': '无权下载该附件'}), 403
     return send_from_directory(_UPLOAD_DIR, cert.file_name,
                                as_attachment=True, download_name=cert.file_orig)
+
+
+# ══ v7.19 证书公开与分享：展示态旁表 / 证书广场 / 一键发到社区中心 ══
+
+def _cert_model_of(kind):
+    """kind -> 证书模型；赛季证书走防御性导入，拿不到就是 None（该 kind 整体降级）。"""
+    if kind == 'system':
+        return PathCertificate
+    if kind == 'module':
+        return _get_competition_cert_model()
+    if kind == 'social':
+        return UserCertificate
+    return None
+
+
+def _cert_obj(kind, cid):
+    """三源证书统一取实体，取不到返回 None（调用方一律当「不存在」处理）。"""
+    model = _cert_model_of(kind)
+    return db.session.get(model, cid) if model is not None else None
+
+
+def _display_map(user_id):
+    """一次取回本人全部展示态，按 (cert_kind, cert_id) 建索引供证书墙并入。"""
+    return {(d.cert_kind, d.cert_id): d for d in
+            db.session.query(CertificateDisplay).filter_by(user_id=user_id).all()}
+
+
+def _ensure_display(user_id, kind, cid):
+    """get-or-create 展示态行（只 flush 不 commit，由调用方统一提交）。
+
+    并发双插靠 (cert_kind, cert_id) 唯一约束兜住：撞了就取已存在的那行，不把
+    「同时点了两次公开」变成 500。"""
+    d = CertificateDisplay.query.filter_by(cert_kind=kind, cert_id=cid).first()
+    if d is None:
+        d = CertificateDisplay(user_id=user_id, cert_kind=kind, cert_id=cid,
+                               is_public=False, views=0)
+        db.session.add(d)
+        try:
+            db.session.flush()
+        except IntegrityError:
+            db.session.rollback()
+            d = CertificateDisplay.query.filter_by(cert_kind=kind, cert_id=cid).first()
+    return d
+
+
+def _apply_display(item, d):
+    """把展示态并进展示字典；d 为 None（从没设置过）时按私有零浏览零分享。"""
+    item['is_public'] = bool(d.is_public) if d is not None else False
+    item['views'] = int(d.views or 0) if d is not None else 0
+    item['share_post_id'] = d.share_post_id if d is not None else None
+    return item
+
+
+def _public_cert_item(kind, cert):
+    """对外视图：复用各自序列化后剪掉个人材料。
+
+    证书编号（现实证件号）、教师核验意见、佐证附件都属于证书本体之外的东西，
+    公开一张证书不等于公开这些；系统编号留着，那正是站内可核验的意义。"""
+    if kind == 'system':
+        item = _wall_item_system(cert)
+    elif kind == 'module':
+        item = _wall_item_module(cert)
+    elif kind == 'social':
+        item = _wall_item_social(cert)
+        item['extra'] = {}
+        item.pop('has_file', None)
+    else:
+        return None
+    item['cert_kind_label'] = CERT_KIND_LABELS.get(kind, kind)
+    return item
+
+
+def _certificate_public(kind, cert, display):
+    """他人读公开证书的完整响应：脱敏正文 + 属主名字 + 展示态。"""
+    data = _public_cert_item(kind, cert)
+    if kind == 'social':
+        data['issuer'] = cert.issuer
+        data['grade'] = cert.grade
+        data['earned_date'] = iso_local(cert.earned_date) if cert.earned_date else None
+    owner = db.session.get(User, cert.user_id)
+    data['owner'] = {'id': cert.user_id, 'username': owner.username if owner else None}
+    return _apply_display(data, display)
+
+
+@api_learning_bp.route('/learning/certificates/<kind>/<int:cid>/display', methods=['PUT'])
+@limiter.limit(RateLimitConfig.DATA_WRITE)
+def api_certificate_display(kind, cid):
+    """公开 / 取消公开一份证书（仅本人）。
+
+    登记即可公开：教师核验状态只作为角标跟着展示，不当公开门禁——现实里大量证书
+    （校内奖/公司证/旧证）根本不会来走这套核验，卡住只会把功能堵死。"""
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    if kind not in CERT_KIND_LABELS:
+        return jsonify({'message': '未知证书类型：' + kind, 'kinds': sorted(CERT_KIND_LABELS)}), 400
+    cert = _cert_obj(kind, cid)
+    if not cert or cert.user_id != user.id:
+        return jsonify({'message': '证书不存在'}), 404
+    data = request.get_json(silent=True) or {}
+    if 'is_public' not in data:
+        return jsonify({'message': '请提供 is_public'}), 400
+    on = bool(data.get('is_public'))
+    d = _ensure_display(user.id, kind, cid)
+    d.is_public = on
+    db.session.commit()
+    return jsonify({'message': '已公开到证书广场' if on else '已从证书广场撤下',
+                    'is_public': on, 'views': int(d.views or 0),
+                    'share_post_id': d.share_post_id})
+
+
+@api_learning_bp.route('/learning/certificates/square', methods=['GET'])
+@limiter.limit('60/minute')
+def api_certificate_square():
+    """证书广场：全站公开证书的卡片墙，可按类型/类别/关键词筛，按最新/最热排。
+
+    展示态与证书本体分家后，这里必须自己拼「取公开行 -> 回源取证书 -> 脱敏」这一段；
+    候选集每类上限 500 份（荣誉类内容量级远小于此），换来的是三类证书共用一套
+    公开/浏览/分享语义，且系统颁发的证书行始终不被写。
+
+    owner=<uid> 用于他人主页拉「他公开的证书」：仍只给脱敏视图，不因为走了主页就多出什么。"""
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    kind = (request.args.get('kind') or '').strip()
+    category = (request.args.get('category') or '').strip()
+    q = (request.args.get('q') or '').strip()
+    sort = request.args.get('sort') or 'latest'
+    try:
+        owner = int(request.args.get('owner') or 0) or None
+    except (TypeError, ValueError):
+        owner = None
+    try:
+        page = max(1, int(request.args.get('page', 1)))
+        size = min(60, max(1, int(request.args.get('size', 24))))
+    except (TypeError, ValueError):
+        page, size = 1, 24
+
+    kinds = [kind] if kind in CERT_KIND_LABELS else list(CERT_KIND_LABELS)
+    items = []
+    for k in kinds:
+        model = _cert_model_of(k)
+        if model is None:
+            continue
+        displays = (db.session.query(CertificateDisplay)
+                    .filter(CertificateDisplay.cert_kind == k,
+                            CertificateDisplay.is_public.is_(True))
+                    .limit(500).all())
+        if not displays:
+            continue
+        shown = {d.cert_id: d for d in displays}
+        certs = model.query.filter(model.id.in_(list(shown))).all()
+        for c in certs:
+            d = shown.get(c.id)
+            # 展示行记的属主与证书对不上就是脏数据（证书被删后重建撞了 id 之类），不参与公开
+            if d is None or d.user_id != c.user_id:
+                continue
+            item = _public_cert_item(k, c)
+            if item is None:
+                continue
+            if category and item.get('category') != category:
+                continue
+            if q and q.lower() not in ((item.get('title') or '') + (item.get('subtitle') or '')).lower():
+                continue
+            _apply_display(item, d)
+            item['owner'] = {'id': d.user_id, 'username': d.user.username if d.user else None}
+            if owner and item['owner']['id'] != owner:
+                continue
+            items.append(item)
+
+    if sort == 'hot':
+        items.sort(key=lambda x: (-x['views'], x.get('earned_at') or ''))
+    else:
+        items.sort(key=lambda x: x.get('earned_at') or '', reverse=True)
+    total = len(items)
+    start = (page - 1) * size
+    return jsonify({'items': items[start:start + size], 'total': total, 'page': page,
+                    'size': size, 'kind_labels': CERT_KIND_LABELS,
+                    'category_labels': CERT_CATEGORY_LABELS})
+
+
+@api_learning_bp.route('/learning/certificates/<kind>/<int:cid>/share', methods=['POST'])
+@limiter.limit(RateLimitConfig.DATA_WRITE)
+def api_certificate_share(kind, cid):
+    """把一份证书发成社区经验帖，并顺带公开到证书广场。
+
+    分享即公开：帖子里已经写着证书名称与获证时间，本体还留在私有就是「帖能看、
+    证不能看」的割裂。已分享过且原帖还在时直接回原帖 id，避免连点两次在社区里
+    刷出两串一模一样的荣誉帖。"""
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    if kind not in CERT_KIND_LABELS:
+        return jsonify({'message': '未知证书类型：' + kind}), 400
+    cert = _cert_obj(kind, cid)
+    if not cert or cert.user_id != user.id:
+        return jsonify({'message': '证书不存在'}), 404
+
+    display = _ensure_display(user.id, kind, cid)
+    if display.share_post_id:
+        from database.models import CommunityPost
+        alive = db.session.get(CommunityPost, display.share_post_id)
+        if alive is not None and not alive.deleted:
+            db.session.commit()
+            return jsonify({'message': '这份证书已经分享过了', 'post_id': alive.id,
+                            'existed': True, 'is_public': bool(display.is_public)}), 200
+        display.share_post_id = None
+
+    item = _public_cert_item(kind, cert)
+    data = request.get_json(silent=True) or {}
+    lines = [f'> 来自为学空间·我的证书（{CERT_KIND_LABELS.get(kind, kind)}）', '',
+             f'**{item["title"]}**', '']
+    for label, value in (('详情', item.get('subtitle')),
+                         ('获证时间', (item.get('earned_at') or '')[:10]),
+                         ('系统编号', f'{item["serial_no"]}（站内可核验）'),
+                         ('核验状态', item.get('verify_label'))):
+        if value:
+            lines.append(f'- {label}：{value}')
+    note = str(data.get('note') or '').strip()[:500]
+    if note:
+        lines += ['', f'**我想说的话**：{note}']
+    lines += ['', '（证书本体与佐证材料不随帖外发，可在「我的证书」里查看）']
+
+    from utils.community_bridge import sync_to_community
+    post = sync_to_community(
+        actor_id=user.id,
+        category='experience',
+        title=f'[荣誉证书] {item["title"]}',
+        content='\n'.join(lines),
+        tags=CERT_KIND_LABELS.get(kind, kind),
+        anonymous=bool(data.get('anonymous')),
+    )
+    display.is_public = True
+    display.share_post_id = post.id
+    db.session.commit()
+
+    # 通知是旁路：帖已发成、库已落，写挂不能反过来把分享报成失败（同 v7.12 AI 出题那次教训）
+    try:
+        create_notification(user.id, '证书已分享到社区',
+                            f'「{item["title"]}」已发布为社区经验帖，同时公开在证书广场。',
+                            type='success', related_type='community_post', related_id=post.id)
+    except Exception:
+        db.session.rollback()
+        logger.exception('[learning] 证书分享通知创建失败 post_id=%s', post.id)
+    return jsonify({'message': '已分享到社区中心', 'post_id': post.id, 'is_public': True}), 201
+
+
+# ══ v7.19 学习心得：固定三段（感悟与收获 / 心得与总结 / 反思创造）+ 周期归档 ══
+
+_INSIGHT_SECTION_MAX = 4000      # 单段字数上限，与 ai_generate_insight_draft 的截断同档
+_INSIGHT_TAG_MAX = 8
+
+
+def _insight_range(period_type, start=None, end=None, note=None):
+    """周期起止 -> (aware UTC 起点, aware UTC 终点, 阶段说明)
+
+    day/week/month 不给起止就按本地日历倒推一个整周期：日界必须走本地，按 UTC 日切会在
+    本地 00:00-07:59 少算一天（v5.35 打卡那次的坑）。终点取末日 23:59:59.999999，这样
+    iso_local 截前 10 位显示的就是末日而不是次日，前端不必再减一天。
+    """
+    if period_type not in INSIGHT_PERIOD_LABELS:
+        raise ValueError(f'未知周期类型：{period_type}，可选 {sorted(INSIGHT_PERIOD_LABELS)}')
+    span = {'day': 1, 'week': 7, 'month': 30}.get(period_type)
+    note = (note or '').strip()[:80] or None
+    if span:
+        today = local_today()
+        s = parse_dt(start) if start else local_day_start(today - timedelta(days=span - 1))
+        e = parse_dt(end) if end else (local_day_start(today) + timedelta(days=1)
+                                       - timedelta(microseconds=1))
+        if e < s:
+            raise ValueError('周期终点不能早于起点')
+        return s, e, note
+    s = parse_dt(start) if start else None
+    e = parse_dt(end) if end else None
+    # 阶段/自定义是「本人自己划的一段」，服务端猜不出来：至少要说清起止或这段叫什么
+    if not note and not (s and e):
+        raise ValueError('阶段/自定义周期请填写起止日期，或写明阶段名称')
+    if s and e and e < s:
+        raise ValueError('周期终点不能早于起点')
+    return s, e, note
+
+
+def _insight_period_text(i):
+    """周期的中文描述：起止日期或阶段名。卡片与分享正文都取它，免得各处各拼一套。"""
+    text = ''
+    if i.period_start and i.period_end:
+        s, e = fmt_local(i.period_start, '%Y-%m-%d'), fmt_local(i.period_end, '%Y-%m-%d')
+        text = s if s == e else f'{s} ~ {e}'
+    elif i.period_start:
+        text = f'{fmt_local(i.period_start, "%Y-%m-%d")} 起'
+    if i.period_note:
+        text = f'{i.period_note}（{text}）' if text else i.period_note
+    return text or INSIGHT_PERIOD_LABELS.get(i.period_type, i.period_type)
+
+
+def _insight_to_dict(i, with_content=True):
+    """心得序列化：列表只给三段前 60 字预览 + 字数，详情给全文与关联的计划/知识点。"""
+    d = {
+        'id': i.id, 'title': i.title,
+        'period_type': i.period_type,
+        'period_label': INSIGHT_PERIOD_LABELS.get(i.period_type, i.period_type),
+        'period_start': iso_local(i.period_start), 'period_end': iso_local(i.period_end),
+        'period_note': i.period_note, 'period_text': _insight_period_text(i),
+        'tags': list(i.tags or []), 'source': i.source,
+        'plan_id': i.plan_id, 'knowledge_point_id': i.knowledge_point_id,
+        'is_public': bool(i.is_public), 'views': int(i.views or 0),
+        'share_post_id': i.share_post_id,
+        'created_at': iso_local(i.created_at), 'updated_at': iso_local(i.updated_at),
+        'word_count': sum(len(getattr(i, k) or '') for k in INSIGHT_SECTION_LABELS),
+    }
+    for key in INSIGHT_SECTION_LABELS:
+        text = getattr(i, key) or ''
+        if with_content:
+            d[key] = text
+        else:
+            d.setdefault('previews', {})[key] = text[:60]
+    if with_content:
+        d['section_labels'] = INSIGHT_SECTION_LABELS
+        d['plan_title'] = i.plan.title if i.plan else None
+        d['kp_name'] = i.knowledge_point.name if i.knowledge_point else None
+    return d
+
+
+def _clean_insight_sections(data):
+    """三段清洗：逐段限长，三段全空直接拒——一条心得至少得说出点东西来。
+
+    「至少两段」这种要求会把人挡在门口：现实里很多人只写反思那一栏，那也是一条心得。
+    """
+    sections = {}
+    for key in INSIGHT_SECTION_LABELS:
+        text = str(data.get(key) or '').strip()
+        if len(text) > _INSIGHT_SECTION_MAX:
+            raise ValueError(f'{INSIGHT_SECTION_LABELS[key]} 过长（单段上限 {len(text)} 字，'
+                             f'限 {_INSIGHT_SECTION_MAX} 字）')
+        sections[key] = text
+    if not any(sections.values()):
+        raise ValueError('三段里至少要填写一段')
+    return sections
+
+
+def _clean_insight_tags(value):
+    """标签口径同笔记与社区：单项 ≤20 字、总数 ≤8、去重、拒含斜杠的（斜杠是路由分隔符）。"""
+    if not value:
+        return []
+    if isinstance(value, str):
+        value = value.replace('，', ',').replace('、', ',').split(',')
+    if not isinstance(value, (list, tuple)):
+        return []
+    tags = []
+    for item in value:
+        t = str(item or '').strip().lstrip('#')[:20]
+        if not t or '/' in t or t in tags:
+            continue
+        tags.append(t)
+        if len(tags) >= _INSIGHT_TAG_MAX:
+            break
+    return tags
+
+
+def _insight_facts(user_id, days=7):
+    """把一段周期的学习数据压成给 AI 的事实清单（纯文本，供 ai_generate_insight_draft）
+
+    只给聚合数字与知识点名字：题目正文、笔记与资料原文一概不外传——AI 需要知道的是
+    「做了什么、做到什么程度」，怎么看待这些必须由用户自己写。数据薄也照常出清单，
+    服务端把 0 也写进去，模型那边就会转成引导式提问而不是编一段假的努力出来。
+    """
+    try:
+        days = int(days)
+    except (TypeError, ValueError):
+        days = 7
+    days = max(1, min(days, 120))     # 不能写 days or 7：0 会被悄悄换成 7
+    ov = _report_overview_payload(user_id, days)
+    cutoff = utcnow() - timedelta(days=days)
+    lines = [f'统计区间：最近 {days} 天（截至 {fmt_local(utcnow(), "%Y-%m-%d")}）']
+    if ov['total_questions']:
+        lines.append(f"- 练习题量 {ov['total_questions']} 道，答对 {ov['correct_count']} 道，"
+                     f"正确率 {ov['score_ratio'] * 100:.0f}%")
+    else:
+        lines.append('- 区间内没有练习题量')
+    lines.append(f"- 有效学习时长 {ov['total_time_sec'] // 60} 分钟，学习会话 {ov['sessions_count']} 次")
+    lines.append(f"- 错题本累计 {ov['wrong_total']} 条，已攻克 {ov['wrong_mastered']} 条，"
+                 f"未攻克 {ov['wrong_unmastered']} 条")
+    lines.append(f"- 进行中的学习计划 {ov['active_plans']} 个")
+
+    checkins = StudyCheckin.query.filter_by(user_id=user_id).filter(
+        StudyCheckin.day >= local_today() - timedelta(days=days - 1)).all()
+    lines.append(f'- 打卡 {len(checkins)} 天，累计 {sum(c.minutes or 0 for c in checkins)} 分钟，'
+                 f'完成任务 {sum(c.tasks_done or 0 for c in checkins)} 项')
+    moods = [c.mood for c in checkins if c.mood]
+    if moods:
+        top = max(set(moods), key=moods.count)
+        lines.append(f'- 打卡心情出现最多的是 {top}（{moods.count(top)}/{len(moods)} 次）')
+
+    tasks = (db.session.query(StudyPlanTask)
+             .join(StudyPlan, StudyPlanTask.plan_id == StudyPlan.id)
+             .filter(StudyPlan.user_id == user_id).all())
+    done_cnt = sum(1 for t in tasks
+                   if t.status == 'done' and t.done_at and t.done_at >= cutoff)
+    open_cnt = sum(1 for t in tasks if t.status != 'done')
+    lines.append(f'- 计划任务：区间内完成 {done_cnt} 项，仍待办 {open_cnt} 项')
+
+    mat_q = StudyMaterial.query.filter(StudyMaterial.user_id == user_id,
+                                       StudyMaterial.updated_at >= cutoff,
+                                       StudyMaterial.status == 'active')
+    lines.append(f'- 区间内新增或更新学习资料 {mat_q.count()} 份，'
+                 f'学习笔记 {StudyNote.query.filter(StudyNote.user_id == user_id, StudyNote.updated_at >= cutoff).count()} 篇')
+    from ai_service.services import MATERIAL_KIND_NAMES
+    kind_rows = (db.session.query(StudyMaterial.kind, func.count(StudyMaterial.id))
+                 .filter(StudyMaterial.user_id == user_id,
+                         StudyMaterial.updated_at >= cutoff,
+                         StudyMaterial.status == 'active')
+                 .group_by(StudyMaterial.kind).all())
+    if kind_rows:
+        lines.append('- 资料构成：' + '、'.join(
+            f'{MATERIAL_KIND_NAMES.get(k, k)} {n} 份' for k, n in kind_rows))
+
+    masteries = (KnowledgeMastery.query.filter_by(user_id=user_id)
+                 .order_by(KnowledgeMastery.level.asc()).limit(5).all())
+    weak = [f'{m.knowledge_point.name}（原始掌握度 {m.level:.0f}）'
+            for m in masteries if m.knowledge_point]
+    if weak:
+        lines.append('- 掌握度最低的知识点：' + '、'.join(weak))
+    return '\n'.join(lines)
+
+
+@api_learning_bp.route('/learning/insights', methods=['GET'])
+def api_insight_list():
+    """我的心得列表：按周期/标签/关键词筛选，返回三段预览与各周期计数（不随筛选变）。"""
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    period = (request.args.get('period') or '').strip()
+    tag = (request.args.get('tag') or '').strip()
+    q = (request.args.get('q') or '').strip()
+    try:
+        page = max(1, int(request.args.get('page', 1)))
+        size = min(50, max(1, int(request.args.get('size', 10))))
+    except (TypeError, ValueError):
+        page, size = 1, 10
+
+    rows = StudyInsight.query.filter_by(user_id=user.id).order_by(
+        StudyInsight.updated_at.desc()).all()
+    tabs = {k: 0 for k in INSIGHT_PERIOD_LABELS}
+    for r in rows:
+        tabs[r.period_type] = tabs.get(r.period_type, 0) + 1
+    tabs['all'] = len(rows)
+
+    items = []
+    for r in rows:
+        if period and period != 'all' and r.period_type != period:
+            continue
+        if tag and tag not in (r.tags or []):
+            continue
+        if q:
+            hay = ' '.join([r.title, _insight_period_text(r), ' '.join(r.tags or [])]
+                           + [getattr(r, k) or '' for k in INSIGHT_SECTION_LABELS])
+            if q.lower() not in hay.lower():
+                continue
+        items.append(_insight_to_dict(r, with_content=False))
+    total = len(items)
+    start = (page - 1) * size
+    return jsonify({'items': items[start:start + size], 'total': total, 'page': page,
+                    'size': size, 'tabs': tabs,
+                    'period_labels': INSIGHT_PERIOD_LABELS,
+                    'section_labels': INSIGHT_SECTION_LABELS})
+
+
+@api_learning_bp.route('/learning/insights', methods=['POST'])
+@limiter.limit(RateLimitConfig.DATA_WRITE)
+def api_insight_create():
+    """新建心得：标题留空时按周期自动起名（先让人写下来，标题不是门槛）。"""
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    data = request.get_json(silent=True) or {}
+    period_type = (data.get('period_type') or 'week').strip()
+    try:
+        sections = _clean_insight_sections(data)
+        s, e, note = _insight_range(period_type, data.get('period_start'),
+                                    data.get('period_end'), data.get('period_note'))
+    except ValueError as err:
+        return jsonify({'message': str(err)}), 400
+    i = StudyInsight(
+        user_id=user.id,
+        title=str(data.get('title') or '').strip()[:200] or f'{INSIGHT_PERIOD_LABELS[period_type]}学习心得',
+        period_type=period_type, period_start=s, period_end=e, period_note=note,
+        tags=_clean_insight_tags(data.get('tags')),
+        plan_id=data.get('plan_id') or None,
+        knowledge_point_id=data.get('knowledge_point_id') or None,
+        source='ai_draft' if data.get('source') == 'ai_draft' else 'manual',
+        is_public=False, views=0, **sections,
+    )
+    db.session.add(i)
+    db.session.commit()
+    return jsonify({'message': '心得已保存', 'insight': _insight_to_dict(i)}), 201
+
+
+@api_learning_bp.route('/learning/insights/ai-draft', methods=['POST'])
+@limiter.limit(RateLimitConfig.AI_GENERATE)
+def api_insight_ai_draft():
+    """AI 心得初稿：按最近 N 天学习数据生成三段草稿，不落库，回前端编辑后再保存。
+
+    额度三步走与讲解卡同构；AI 挂掉时 services 内部降级成「把真实数据列出来 + 留待填写」
+    的框架而不是报错——初稿本来就是给人改的，给不出漂亮话也不能把入口堵死。
+    """
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    data = request.get_json(silent=True) or {}
+    try:
+        days = max(1, min(int(data.get('days') or 7), 120))
+    except (TypeError, ValueError):
+        days = 7
+    focus = str(data.get('focus') or '').strip()[:200] or None
+
+    allowed, _quota = check_ai_quota(user)
+    if not allowed:
+        return jsonify({'message': '今日 AI 额度已用完，请明天再来或咨询教师调整配额'}), 429
+    t0 = time.perf_counter()
+    try:
+        facts = _insight_facts(user.id, days)
+    except Exception:
+        logger.exception('[learning] 心得数据摘要拼装失败')
+        return jsonify({'message': '学习数据读取失败，请稍后重试'}), 500
+    from ai_service.services import ai_generate_insight_draft
+    try:
+        draft, degraded = ai_generate_insight_draft(db.session, facts, focus)
+    except ValueError as err:
+        return jsonify({'message': str(err)}), 400
+    charge_ai_quota(user)
+    log_ai_usage(user.id, 'insight', 'degraded' if degraded else 'success',
+                 (time.perf_counter() - t0) * 1000)
+    db.session.commit()
+    return jsonify({'draft': draft, 'degraded': degraded, 'facts': facts, 'days': days,
+                    'section_labels': INSIGHT_SECTION_LABELS,
+                    'message': '已生成初稿，请修改后再保存' if not degraded
+                               else 'AI 暂不可用，已按你的学习数据列出待填写框架'})
+
+
+@api_learning_bp.route('/learning/insights/user/<int:uid>', methods=['GET'])
+def api_insight_user_public(uid):
+    """他人主页：某人公开的心得列表（只给预览，正文仍走详情接口）。"""
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    rows = (StudyInsight.query.filter_by(user_id=uid, is_public=True)
+            .order_by(StudyInsight.updated_at.desc()).limit(50).all())
+    owner = db.session.get(User, uid)
+    return jsonify({'items': [_insight_to_dict(r, with_content=False) for r in rows],
+                    'username': owner.username if owner else None,
+                    'section_labels': INSIGHT_SECTION_LABELS})
+
+
+@api_learning_bp.route('/learning/insights/<int:iid>', methods=['GET'])
+def api_insight_detail(iid):
+    """心得详情：本人全量；他人只能读已公开的，并计一次浏览。
+
+    未公开对外与「不存在」同口径，不回「无权限」——否则公开开关就成了探测别人
+    写过哪些心得的探针。教师也没有默认读权：心得是私人复盘，不是作业。
+    """
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    i = db.session.get(StudyInsight, iid)
+    if not i:
+        return jsonify({'message': '心得不存在'}), 404
+    if i.user_id != user.id:
+        if not i.is_public:
+            return jsonify({'message': '心得不存在'}), 404
+        i.views = int(i.views or 0) + 1
+        db.session.commit()
+        owner = db.session.get(User, i.user_id)
+        data = _insight_to_dict(i)
+        # 公开心得不外显关联的计划标题以外的私人线索：知识点与预览都是本人写的内容，保留
+        data['owner'] = {'id': i.user_id, 'username': owner.username if owner else None}
+        return jsonify(data)
+    return jsonify(_insight_to_dict(i))
+
+
+@api_learning_bp.route('/learning/insights/<int:iid>', methods=['PUT'])
+@limiter.limit(RateLimitConfig.DATA_WRITE)
+def api_insight_update(iid):
+    """修改心得（仅本人）：三段、周期、标签、关联项都可改，公开状态另走 public 接口。"""
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    i = db.session.get(StudyInsight, iid)
+    if not i or i.user_id != user.id:
+        return jsonify({'message': '心得不存在'}), 404
+    data = request.get_json(silent=True) or {}
+    period_type = (data.get('period_type') or i.period_type).strip()
+    try:
+        sections = _clean_insight_sections(data) if any(
+            k in data for k in INSIGHT_SECTION_LABELS) else None
+        s, e, note = _insight_range(period_type, data.get('period_start') or (i.period_start and iso_local(i.period_start)),
+                                    data.get('period_end') or (i.period_end and iso_local(i.period_end)),
+                                    data.get('period_note', i.period_note))
+    except ValueError as err:
+        return jsonify({'message': str(err)}), 400
+    if 'title' in data:
+        t = str(data.get('title') or '').strip()[:200]
+        if not t:
+            return jsonify({'message': '标题不能为空'}), 400
+        i.title = t
+    i.period_type, i.period_start, i.period_end, i.period_note = period_type, s, e, note
+    if 'tags' in data:
+        i.tags = _clean_insight_tags(data.get('tags'))
+    if 'plan_id' in data:
+        i.plan_id = data.get('plan_id') or None
+    if 'knowledge_point_id' in data:
+        i.knowledge_point_id = data.get('knowledge_point_id') or None
+    if sections:
+        for key, text in sections.items():
+            setattr(i, key, text)
+    db.session.commit()
+    return jsonify({'message': '已保存', 'insight': _insight_to_dict(i)})
+
+
+@api_learning_bp.route('/learning/insights/<int:iid>', methods=['DELETE'])
+def api_insight_delete(iid):
+    """删除心得（仅本人）。已分享出去的社区帖不跟着删：帖子在社区有独立的删除流程。"""
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    i = db.session.get(StudyInsight, iid)
+    if not i or i.user_id != user.id:
+        return jsonify({'message': '心得不存在'}), 404
+    db.session.delete(i)
+    db.session.commit()
+    return jsonify({'message': '已删除'})
+
+
+@api_learning_bp.route('/learning/insights/<int:iid>/public', methods=['PUT'])
+@limiter.limit(RateLimitConfig.DATA_WRITE)
+def api_insight_public(iid):
+    """公开 / 撤下心得（仅本人）：公开后他人可在其主页与详情读到全文。"""
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    i = db.session.get(StudyInsight, iid)
+    if not i or i.user_id != user.id:
+        return jsonify({'message': '心得不存在'}), 404
+    data = request.get_json(silent=True) or {}
+    if 'is_public' not in data:
+        return jsonify({'message': '请提供 is_public'}), 400
+    i.is_public = bool(data.get('is_public'))
+    db.session.commit()
+    return jsonify({'message': '已公开' if i.is_public else '已设为私有',
+                    'is_public': i.is_public, 'views': int(i.views or 0)})
+
+
+@api_learning_bp.route('/learning/insights/<int:iid>/share', methods=['POST'])
+@limiter.limit(RateLimitConfig.DATA_WRITE)
+def api_insight_share(iid):
+    """把心得发成社区经验帖，并顺带公开。
+
+    分享即公开：正文都整篇贴到社区里了，本体还标私有就是「帖能看、心得不能看」的割裂，
+    浏览数也无处累计。原帖还在时直接回原帖 id，连点两次不会刷出两串一样的经验帖。
+    """
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    i = db.session.get(StudyInsight, iid)
+    if not i or i.user_id != user.id:
+        return jsonify({'message': '心得不存在'}), 404
+    if i.share_post_id:
+        from database.models import CommunityPost
+        alive = db.session.get(CommunityPost, i.share_post_id)
+        if alive is not None and not alive.deleted:
+            return jsonify({'message': '这篇心得已经分享过了', 'post_id': alive.id,
+                            'existed': True, 'is_public': bool(i.is_public)}), 200
+        i.share_post_id = None
+
+    text = _insight_to_dict(i)
+    body = [f'> 来自为学空间·学习心得（{text["period_text"]}）', '']
+    for key, label in INSIGHT_SECTION_LABELS.items():
+        seg = (text.get(key) or '').strip()
+        if seg:
+            body += [f'## {label}', '', seg, '']
+    if not any((text.get(k) or '').strip() for k in INSIGHT_SECTION_LABELS):
+        return jsonify({'message': '心得还是空的，先写点内容再分享'}), 400
+    data = request.get_json(silent=True) or {}
+    note = str(data.get('note') or '').strip()[:300]
+    if note:
+        body += ['---', '', note]
+
+    from utils.community_bridge import sync_to_community
+    post = sync_to_community(
+        actor_id=user.id,
+        category='experience',
+        title=f'[学习心得] {i.title}',
+        content='\n'.join(body),
+        tags=list(i.tags or []) + [text['period_label']],
+        anonymous=bool(data.get('anonymous')),
+    )
+    i.is_public = True
+    i.share_post_id = post.id
+    db.session.commit()
+
+    # 通知是旁路：帖已发成、库已落，写挂不能反过来把分享报成失败
+    try:
+        create_notification(user.id, '心得已分享到社区',
+                            f'「{i.title}」已发布为社区经验帖。',
+                            type='success', related_type='community_post', related_id=post.id)
+    except Exception:
+        db.session.rollback()
+        logger.exception('[learning] 心得分享通知创建失败 post_id=%s', post.id)
+    return jsonify({'message': '已分享到社区中心', 'post_id': post.id, 'is_public': True}), 201
 
 
 # ══ v4.4 学习体验升级：AI 会话持久化/流式 · 错题归因 · 专注计时 · 打卡心情 · 自由笔记 · 讲解卡 · 图片上传 ══
@@ -4094,6 +5169,7 @@ def api_learning_attachment():
         return jsonify({'message': '附件已上传', 'attachments': len(atts),
                         'url': f'/learning/attachments/{note.id}/0/download'}), 201
     return jsonify({'message': '已上传', 'url': f'/uploads/{stored}',
+                    'stored_name': stored, 'ext': os.path.splitext(file.filename)[1].lower(),
                     'name': file.filename, 'size': size}), 201
 
 
@@ -4134,7 +5210,106 @@ def api_learning_attachment_delete(nid, idx):
 
 # ═══════════ v4.5 学习社区：个人资料库 / 广场 / 社交 / AI 治理 ═══════════
 
-_MATERIAL_KINDS = ('video_script', 'mindmap', 'lecture', 'summary', 'quiz', 'manual')
+# 资料形态全集：AI 可生成的形态（见 services.MATERIAL_TEMPLATES）+ 手写。新增 AI
+# 形态需同时改模板、models 的 _material_kind_ck 与一条改 CHECK 的迁移（有护栏用例）。
+_MATERIAL_KINDS = ('video_script', 'mindmap', 'lecture', 'summary', 'quiz',
+                   'lesson_plan', 'manual')
+
+# ── v7.18 资料附件：用户自行添加文档/链接/视频/图片/思维导图 ──
+# 一条资料最多 20 个附件（笔记那边是 9，资料常是「一节课全套素材」故放宽）
+_MATERIAL_ATT_MAX = 20
+# 后缀 → 展示类型（前端据此选渲染器：图/视频/PDF 内联， Office 文档只给下载）
+_ATT_TYPE_BY_EXT = {
+    '.doc': 'doc', '.docx': 'doc', '.txt': 'text', '.md': 'text', '.markdown': 'text',
+    '.pdf': 'pdf',
+    '.xls': 'sheet', '.xlsx': 'sheet', '.csv': 'sheet',
+    '.ppt': 'slide', '.pptx': 'slide',
+    '.png': 'image', '.jpg': 'image', '.jpeg': 'image', '.gif': 'image', '.webp': 'image',
+    '.mp4': 'video', '.webm': 'video',
+    '.zip': 'archive', '.rar': 'archive', '.7z': 'archive',
+    '.py': 'code', '.java': 'code', '.c': 'code', '.cpp': 'code',
+    '.js': 'code', '.ts': 'code', '.css': 'code', '.sql': 'code', '.html': 'code',
+}
+# 链接类附件允许声明的展示形态（外链不下载，按类型内嵌/新开窗口）
+_ATT_LINK_TYPES = ('link', 'video', 'image', 'mindmap')
+# 内联可读的纯文本类后缀（思维导图的 mermaid/markdown 源文件走这一路）
+_ATT_TEXT_EXTS = ('.txt', '.md', '.markdown')
+
+
+def _att_type(ext, declared=None):
+    """附件展示类型：优先用户指定（link/mindmap 等无后缀形态），否则按后缀查表。"""
+    if declared in ('link', 'mindmap'):
+        return declared
+    return _ATT_TYPE_BY_EXT.get((ext or '').lower(), 'doc')
+
+
+def _normalize_attachments(raw):
+    """校验并规范化附件列表（写库前唯一入口，不接受裸传结构直接落库）。
+
+    两类条目：
+    - 文件类：{stored_name|filename,size,ext} —— stored_name 必须是单个路径段（挡目录穿越），
+      后缀必须在上传白名单内（与 utils/uploads.py 同一口径，防绕过前端直传）；
+    - 链接类：{url} —— 只收 http(s)，javascript:/data: 一律拒。
+    非法条目直接丢弃（不整批报错）：用户粘了一堆链接不该因为其中一条格式不对就全存不下。
+    """
+    if not isinstance(raw, list):
+        return []
+    out = []
+    for it in raw[:_MATERIAL_ATT_MAX]:
+        if not isinstance(it, dict):
+            continue
+        url = str(it.get('url') or '').strip()[:1000]
+        stored = os.path.basename(str(it.get('stored_name') or '').strip())
+        name = str(it.get('name') or it.get('filename') or '').strip()[:200]
+        if url and not stored:
+            if not url.lower().startswith(('http://', 'https://')):
+                continue
+            declared = str(it.get('type') or 'link')
+            if declared not in _ATT_LINK_TYPES:
+                declared = 'link'
+            out.append({'name': name or url[:80], 'type': declared, 'ext': '',
+                        'url': url, 'size': 0,
+                        'uploaded_at': str(it.get('uploaded_at') or '')[:32] or utcnow().isoformat()})
+            continue
+        if not stored:
+            continue
+        ext = os.path.splitext(stored)[1].lower()
+        if ext not in _UPLOAD_EXTS:
+            continue                      # 白名单外后缀：不落库，免得留下一条点不开的附件
+        try:
+            size = int(it.get('size') or 0)
+        except (TypeError, ValueError):
+            size = 0
+        out.append({'name': name or stored, 'type': _att_type(ext, str(it.get('type') or '')),
+                    'ext': ext, 'stored_name': stored, 'size': size,
+                    'uploaded_at': str(it.get('uploaded_at') or '')[:32] or utcnow().isoformat()})
+    return out
+
+
+def _attachments_out(m):
+    """附件输出：补上前端直接可用的 url 与受控下载/预览地址。
+
+    图片/视频/PDF 走 /uploads/（UUID 名不可枚举，与笔记插图、题面图同一口径）；
+    Office 文档与压缩包只给 API 下载地址（浏览器开不了 docx，内联只会是个碎图）。
+    .html 附件不给内联预览：上传白名单里 html 属「代码」类，同源内联别人写的 html
+    等于把存储型 XSS 请进来，故只下载（思维导图请用 mermaid/markdown 源文件或图片）。"""
+    out = []
+    for i, a in enumerate(m.attachment_json or []):
+        if not isinstance(a, dict):
+            continue
+        d = dict(a)
+        stored = d.get('stored_name')
+        if stored:
+            d['url'] = f'/uploads/{stored}'
+            d['download_url'] = f'/api/learning/materials/{m.id}/attachments/{i}/download'
+            d['inline_url'] = (f'/api/learning/materials/{m.id}/attachments/{i}/download?inline=1'
+                               if d.get('type') in ('image', 'video', 'pdf', 'text') else None)
+        else:
+            d['url'] = d.get('url') or ''
+            d['download_url'] = d['url']
+            d['inline_url'] = d['url'] if d.get('type') in ('image', 'video') else None
+        out.append(d)
+    return out
 
 
 def _material_to_dict(m, with_content=False, current_user_id=None):
@@ -4142,8 +5317,10 @@ def _material_to_dict(m, with_content=False, current_user_id=None):
          'difficulty': m.difficulty, 'folder_id': m.folder_id, 'source': m.source,
          'is_public': bool(m.is_public), 'views': m.views,
          'status': m.status, 'knowledge_point_id': m.knowledge_point_id,
+         'plan_id': m.plan_id, 'task_id': m.task_id,
          'author': m.user.username if m.user else None, 'owner_id': m.user_id,
          'fav_count': len(m.favorites),
+         'attachments': _attachments_out(m),
          'excerpt': _md_excerpt(m.content, 80),
          'created_at': iso_local(m.created_at), 'updated_at': iso_local(m.updated_at)}
     if current_user_id is not None:
@@ -4203,6 +5380,18 @@ def api_material_generate():
                  'degraded' if degraded else 'success',
                  (time.perf_counter() - t0) * 1000)
     db.session.commit()
+    # v7.18 需求 b：单份生成也要进消息提示。用户点「开始生成」后动辄十几秒，
+    # 中途切页/刷新就错过当场 toast；降级（AI 不可用）不发通知，否则是在误报成功
+    if not degraded:
+        try:
+            from ai_service.services import MATERIAL_KIND_NAMES
+            create_notification(
+                user.id, f'{MATERIAL_KIND_NAMES.get(kind, "学习资料")}已生成',
+                f'「{m.title}」已存入资料库，可在线阅读或继续公开到学习广场。',
+                type='success', related_type='material', related_id=m.id)
+        except Exception:
+            db.session.rollback()
+            logger.exception('[learning] 资料生成通知创建失败 material_id=%s', m.id)
     return jsonify({'material': _material_to_dict(m, with_content=True),
                     'kind': kind, 'decided_by': decided_by,
                     'source': 'rule' if degraded else 'ai'})
@@ -4236,7 +5425,35 @@ def api_material_list():
             query = query.filter(StudyMaterial.folder_id == folder_id)
         mats = query.order_by(StudyMaterial.updated_at.desc()).limit(200).all()
     return jsonify({'items': [_material_to_dict(m, current_user_id=user.id) for m in mats],
-                    'total': len(mats)})
+                    'total': len(mats), 'kind_groups': _kind_groups(user)})
+
+
+# 归档顺序与「生成学习文档」下拉一致（v7.18 需求 i）：教案一栏、练习题集一栏……
+# 名字一律取自 ai_service.services.MATERIAL_KIND_NAMES，不在前端再抄一份，
+# 免得改了模板显示名后两边对不上（用户看到的分栏和下拉说的不是一回事）。
+_KIND_ORDER = ('mindmap', 'lesson_plan', 'lecture', 'summary', 'quiz', 'video_script', 'manual')
+
+
+def _kind_groups(user):
+    """按形态分组计数：[{kind, name, count}]，含 0 的档也返回。
+
+    统计口径是「本人全部有效资料」，不随搜索词/文件夹/收藏变化：左侧分栏是导航
+    骨架，数字乱跳会让人怀疑自己点错了。库里出现表外形态（历史数据或新增形态
+    未入顺序表）也要尾随露出来，不能静默吞掉（资产驱动收录的同一条教训）。
+    """
+    from ai_service.services import MATERIAL_KIND_NAMES
+    rows = (db.session.query(StudyMaterial.kind, func.count(StudyMaterial.id))
+            .filter(StudyMaterial.user_id == user.id,
+                    StudyMaterial.status == 'active')
+            .group_by(StudyMaterial.kind).all())
+    counts = dict(rows)
+    names = dict(MATERIAL_KIND_NAMES)
+    names['manual'] = '手写资料'
+    out = [{'kind': k, 'name': names.get(k, k), 'count': counts.get(k, 0)}
+           for k in _KIND_ORDER]
+    out += [{'kind': k, 'name': names.get(k, k), 'count': c}
+            for k, c in counts.items() if k not in _KIND_ORDER]
+    return out
 
 
 @api_learning_bp.route('/learning/materials', methods=['POST'])
@@ -4260,6 +5477,7 @@ def api_material_create():
                       title=title[:200], content=str(data.get('content') or '')[:30000],
                       subject=str(data.get('subject') or '').strip()[:50] or None,
                       difficulty=str(data.get('difficulty') or '').strip()[:20] or None,
+                      attachment_json=_normalize_attachments(data.get('attachments')) or None,
                       source='manual')
     db.session.add(m)
     db.session.commit()
@@ -4283,6 +5501,35 @@ def api_material_detail(mid):
         db.session.commit()
     return jsonify({'material': _material_to_dict(m, with_content=True,
                                                   current_user_id=user.id)})
+
+
+@api_learning_bp.route('/learning/materials/<int:mid>/attachments/<int:idx>/download',
+                       methods=['GET'])
+def api_material_attachment_download(mid, idx):
+    """资料附件下载/预览（v7.18）：本人永久可用；公开资料任何登录用户可用。
+
+    inline=1 时不给 Content-Disposition: attachment，让浏览器就地开 PDF/图片/视频/
+    纯文本（mermaid 导图源文件）；Office 文档不带 inline 语义，统一走下载。
+    不直接返 /uploads/ 路径是为了能卡权限：私有资料的附件不该被知道 UUID 的人拿走。"""
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    m = db.session.get(StudyMaterial, mid)
+    if not m or m.status != 'active':
+        return jsonify({'message': '资料不存在'}), 404
+    if m.user_id != user.id and not (m.is_public or user.is_teacher()):
+        return jsonify({'message': '无权访问该附件'}), 403
+    atts = m.attachment_json or []
+    if idx < 0 or idx >= len(atts):
+        return jsonify({'message': '附件不存在'}), 404
+    att = atts[idx] if isinstance(atts[idx], dict) else {}
+    stored = os.path.basename(str(att.get('stored_name') or ''))
+    if not stored:
+        # 链接类附件没有本体文件：前端应直接开 url，走到这里当作参数错误
+        return jsonify({'message': '该附件是链接，请直接打开网址'}), 400
+    inline = request.args.get('inline') == '1'
+    return send_from_directory(_UPLOAD_DIR, stored, as_attachment=not inline,
+                               download_name=att.get('name') or stored)
 
 
 @api_learning_bp.route('/learning/materials/<int:mid>', methods=['PUT'])
@@ -4315,6 +5562,9 @@ def api_material_update(mid):
         m.difficulty = str(data.get('difficulty') or '').strip()[:20] or None
     if 'is_public' in data:
         m.is_public = bool(data.get('is_public'))
+    if 'attachments' in data:
+        # 整列重写而非追加：附件增删都走这里，避免两套口径（前端传全量列表）
+        m.attachment_json = _normalize_attachments(data.get('attachments')) or None
     db.session.commit()
     return jsonify({'message': '已保存', 'material': _material_to_dict(m)})
 
@@ -4322,7 +5572,7 @@ def api_material_update(mid):
 @api_learning_bp.route('/learning/materials/<int:mid>', methods=['DELETE'])
 @limiter.limit(RateLimitConfig.DATA_WRITE)
 def api_material_delete(mid):
-    """删资料：收藏与举报记录一并清理（无级联，手动删）"""
+    """删资料：收藏、举报与生成作业的反向引用一并清理（无级联，手动删）"""
     user = verify_token()
     if not user:
         return jsonify({'message': '未登录'}), 401
@@ -4331,6 +5581,13 @@ def api_material_delete(mid):
         return err
     MaterialFavorite.query.filter_by(material_id=m.id).delete(synchronize_session=False)
     MaterialReport.query.filter_by(material_id=m.id).delete(synchronize_session=False)
+    # v7.9 批量队列的 material_gen_job.material_id 反向指着本行：不清空则 PG 直接
+    # ForeignKeyViolation（删一份批量生成的教案就 500）。SQLite 不强制外键，测试门里
+    # 一直看不见——与隐患 #23 同形状。这里逐条改 ORM 对象而非 Query.update()，
+    # 因为 bulk 写进不了实时镜像（#24），会让拷走的 SQLite 里留下一批指向空号的作业行。
+    from database.models import MaterialGenJob
+    for job in MaterialGenJob.query.filter_by(material_id=m.id).all():
+        job.material_id = None
     db.session.delete(m)
     db.session.commit()
     return jsonify({'message': '已删除'})
@@ -4635,6 +5892,32 @@ def api_user_public_profile(uid):
             .order_by(StudyMaterial.updated_at.desc()).limit(50).all()
     data['materials'] = [_material_to_dict(m, current_user_id=user.id) for m in mats]
     return jsonify(data)
+
+
+@api_learning_bp.route('/learning/users/<int:uid>/follows', methods=['GET'])
+def api_user_follows(uid):
+    """v7.7 关注/粉丝列表：type=following|fans|mutual；限本人查看，他人只能看公开资料"""
+    viewer = verify_token()
+    if not viewer:
+        return jsonify({'message': '未登录'}), 401
+    if viewer.id != uid:
+        return jsonify({'message': '仅可查看自己的关注关系'}), 403
+    ftype = request.args.get('type', 'following')
+    if ftype == 'fans':
+        # 粉丝列表：谁关注了我
+        ids = [r.follower_id for r in UserFollow.query.filter_by(followee_id=uid).all()]
+    elif ftype == 'mutual':
+        # 互相关注：我关注的人里同时也关注了我的
+        my_follows = {r.followee_id for r in UserFollow.query.filter_by(follower_id=uid).all()}
+        ids = [r.followee_id for r in UserFollow.query.filter_by(follower_id=uid).all()
+               if r.followee_id in my_follows]
+    else:
+        # 我关注的人（默认）
+        ids = [r.followee_id for r in UserFollow.query.filter_by(follower_id=uid).all()]
+    users = db.session.query(User).filter(User.id.in_(ids)).all() if ids else []
+    return jsonify({'items': [
+        {'id': u.id, 'username': u.username, 'role': u.role} for u in users
+    ]})
 
 
 # ── AI 额度与治理（教师） ──────────────────────

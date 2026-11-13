@@ -1,10 +1,13 @@
 from flask import Blueprint, request, jsonify
-from database.models import User, Major, Course, QuestionTypeEnum, DifficultyEnum
+from database.models import User, Major, Course, QuestionTypeEnum, DifficultyEnum, NotificationTypeEnum
 from database import db
+from ai_service.client import AITimeoutError, AINetworkError
 from ai_service.services import ai_generate_questions
+from utils.notify import create_notification
 from utils.security import limiter, RateLimitConfig, verify_token
 from utils.logger import logger
 from utils.permissions import require_teacher
+import time
 
 api_ai_bp = Blueprint('api_ai', __name__)
 
@@ -50,12 +53,47 @@ def api_ai_generate():
             db.session.refresh(course)
             logger.info("AI 出题自动创建课程: %s", course_name)
 
+    started = time.time()
     try:
         questions = ai_generate_questions(db.session, major.id, question_type, difficulty, count, description, course.id if course else None, source)
+        cost = time.time() - started
+        logger.info("AI 出题成功 major=%s type=%s count=%d 用时=%.1fs",
+                    major_name, question_type, len(questions), cost)
+        # 生成成功后给操作教师发站内通知：commit 后由 notify_socket ORM 事件自动实时
+        # 推送 new_notification，铃铛角标与弹框即时更新；related_type='question' 前端
+        # 点击直达题库页。AI 调用耗时较长，教师切走页面也能回来看到结果。
+        # 通知属非关键路径：单独兜异常，不让它把「题已入库」误报成「生成失败」。
+        try:
+            course_label = course.name if course else major.name
+            create_notification(
+                user.id,
+                f'AI 出题完成：{len(questions)} 道',
+                f'「{course_label}」的 {QuestionTypeEnum.label(question_type)}·'
+                f'{DifficultyEnum.label(difficulty)} 共 {len(questions)} 道题目已生成，可前往题库查看。',
+                type=NotificationTypeEnum.SUCCESS,
+                related_type='question',
+            )
+        except Exception:
+            logger.exception("AI 出题成功但完成通知落库失败 major=%s", major_name)
+            db.session.rollback()
         return jsonify({'message': f'成功生成{len(questions)}道题目', 'count': len(questions)})
+    except AITimeoutError as e:
+        # 超时与配置错误分开报：超时是“AI 还没写完”，该减道数或稍后重试；
+        # 让用户去翻 AI 服务配置只会白排查一轮密钥。
+        cost = time.time() - started
+        logger.error("AI 出题超时 major=%s type=%s count=%d 读超时=%ss 实际等待=%.1fs: %s",
+                     major_name, question_type, count, e.seconds, cost, e)
+        return jsonify({'message': f'AI 响应超时（已等待 {int(cost)}s），可减少题目数量或稍后重试'}), 500
+    except AINetworkError as e:
+        cost = time.time() - started
+        logger.exception("AI 出题网络/密钥异常 major=%s type=%s count=%d 用时=%.1fs",
+                         major_name, question_type, count, cost)
+        return jsonify({'message': 'AI 服务连接异常（网络或密钥），请检查 AI 服务配置'}), 500
     except Exception:
-        logger.exception("AI 生成题目失败 major=%s type=%s", major_name, question_type)
-        return jsonify({'message': 'AI 生成失败，请稍后重试或检查 AI 服务配置'}), 500
+        cost = time.time() - started
+        logger.exception("AI 生成题目失败 major=%s type=%s count=%d 用时=%.1fs",
+                         major_name, question_type, count, cost)
+        return jsonify({'message': 'AI 生成失败，请稍后重试'}), 500
 
 @api_ai_bp.route('/question-types', methods=['GET'])
 def api_question_types():
