@@ -26,22 +26,96 @@
           <div v-if="isCollapsed" class="menu-tooltip">切换模块</div>
         </div>
         <div v-if="!isCollapsed" class="module-divider"></div>
-        <div
-          v-for="item in menuItems"
-          :key="item.path"
-          class="menu-item"
-          :class="{ active: $route.path === item.path }"
-          @click="$router.push(item.path)"
-        >
-          <div class="menu-icon">
-            <el-icon :size="20">
-              <component :is="item.icon" />
-            </el-icon>
+        <!-- 普通项（无子菜单）：行为与改造前一致 -->
+        <template v-for="item in menuItems" :key="item.key || item.path">
+          <div
+            v-if="!item.children"
+            class="menu-item"
+            :class="{ active: isChildActive(item.path) }"
+            @click="$router.push(item.path)"
+          >
+            <div class="menu-icon">
+              <el-icon :size="20">
+                <component :is="item.icon" />
+              </el-icon>
+            </div>
+            <span v-if="!isCollapsed" class="menu-text">{{ item.label }}</span>
+            <div v-if="!isCollapsed && item.badge" class="menu-badge">{{ item.badge }}</div>
+            <div v-if="isCollapsed" class="menu-tooltip">{{ item.label }}</div>
           </div>
-          <span v-if="!isCollapsed" class="menu-text">{{ item.label }}</span>
-          <div v-if="!isCollapsed && item.badge" class="menu-badge">{{ item.badge }}</div>
-          <div v-if="isCollapsed" class="menu-tooltip">{{ item.label }}</div>
-        </div>
+
+          <!-- 分组项：展开态手风琴，收起态 hover 浮层 -->
+          <div v-else class="menu-group">
+            <!-- 收起态：只剩图标，子项放进浮层，避免被 sidebar-menu 的 overflow 裁掉 -->
+            <el-popover
+              v-if="isCollapsed"
+              placement="right-start"
+              :width="176"
+              trigger="hover"
+              :show-arrow="false"
+              :offset="16"
+              popper-class="sidebar-flyout"
+            >
+              <template #reference>
+                <div
+                  class="menu-item menu-parent"
+                  :class="{ active: isGroupActive(item) }"
+                  @click="onParentClick(item)"
+                >
+                  <div class="menu-icon">
+                    <el-icon :size="20">
+                      <component :is="item.icon" />
+                    </el-icon>
+                  </div>
+                </div>
+              </template>
+              <div class="flyout-list">
+                <div class="flyout-title">{{ item.label }}</div>
+                <div
+                  v-for="child in item.children"
+                  :key="child.path"
+                  class="flyout-item"
+                  :class="{ active: isChildActive(child.path) }"
+                  @click="$router.push(child.path)"
+                >
+                  {{ child.label }}
+                </div>
+              </div>
+            </el-popover>
+
+            <!-- 展开态：父项 + 箭头，点击箭头只做展开/收起 -->
+            <div
+              v-else
+              class="menu-item menu-parent"
+              :class="{ active: isGroupActive(item), expanded: expandedGroup === item.key }"
+              @click="onParentClick(item)"
+            >
+              <div class="menu-icon">
+                <el-icon :size="20">
+                  <component :is="item.icon" />
+                </el-icon>
+              </div>
+              <span class="menu-text">{{ item.label }}</span>
+              <div v-if="item.badge" class="menu-badge">{{ item.badge }}</div>
+              <el-icon class="menu-arrow" :size="13">
+                <ArrowDown />
+              </el-icon>
+            </div>
+
+            <div v-if="!isCollapsed" class="submenu" :class="{ open: expandedGroup === item.key }">
+              <div
+                v-for="child in item.children"
+                :key="child.path"
+                class="submenu-item"
+                :class="{ active: isChildActive(child.path) }"
+                @click.stop="$router.push(child.path)"
+              >
+                <span class="submenu-text">{{ child.label }}</span>
+                <span v-if="child.badge" class="menu-badge">{{ child.badge }}</span>
+              </div>
+            </div>
+          </div>
+        </template>
       </div>
 
       <div class="sidebar-footer">
@@ -150,7 +224,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
 import { useThemeStore } from '../stores/theme'
@@ -181,6 +255,13 @@ const checkMobile = () => {
 onMounted(() => {
   checkMobile()
   window.addEventListener('resize', checkMobile)
+  // 当前路由不属于任何分组时（如 /learning/explore），恢复上次展开的分组
+  if (!expandedGroup.value) {
+    try {
+      const saved = localStorage.getItem(EXPAND_STORAGE_KEY)
+      if (saved) expandedGroup.value = saved
+    } catch (e) { /* 隐私模式下忽略 */ }
+  }
 })
 
 onUnmounted(() => {
@@ -361,7 +442,8 @@ const RECONCILE_ONLINE_MS = 300000
 const RECONCILE_OFFLINE_MS = 30000
 let reconcileTs = 0
 const pollTick = () => {
-  if (!auth.user || document.hidden) return
+  // token 缺失说明会话已结束（他处登出/改密会吊销全部 token），不再发无凭证请求
+  if (!auth.user || !auth.token || document.hidden) return
   let connected = false
   try { connected = getSocket().connected } catch (e) { /* socket 不可用则纯对账模式 */ }
   const now = Date.now()
@@ -466,6 +548,68 @@ const iconMap = {
   Money, EditPen, Tickets, Reading, Connection, Notebook, Memo, Warning, ChatDotRound, Compass
 }
 
+// 自主学习侧边栏：原本 18 个页面平铺太长，压缩为 6 个分组 + 2 个独立入口。
+// 分组在展开态以手风琴呈现（同时只开一组），父项点击只负责展开/收起，跳转一律由子项触发；
+// 侧边栏收起时用浮层列出子项。
+// 新增页面请归到对应分组的 children，不要再平铺回顶层。
+const learningGroups = [
+  {
+    key: 'overview', label: '学习总览', icon: iconMap.Reading,
+    children: [
+      { path: '/learning/today', label: '今日学习' },
+      { path: '/learning', label: '学习首页' },
+      { path: '/learning/report', label: '学习报告' },
+    ]
+  },
+  {
+    key: 'plan', label: '学习规划', icon: iconMap.Compass,
+    children: [
+      { path: '/learning/paths', label: '专业路径' },
+      { path: '/learning/dashboard', label: '学习规划' },
+      { path: '/learning/plan', label: '学习计划' },
+    ]
+  },
+  {
+    key: 'knowledge', label: '知识库', icon: iconMap.Collection,
+    children: [
+      { path: '/learning/graph', label: '知识图谱' },
+      { path: '/learning/my-knowledge', label: '我的知识点' },
+      { path: '/learning/materials', label: '资料库' },
+    ]
+  },
+  {
+    key: 'practice', label: '练习', icon: iconMap.EditPen,
+    children: [
+      { path: '/learning/practice', label: '自由刷题' },
+      { path: '/learning/wrong', label: '错题本' },
+    ]
+  },
+  {
+    key: 'notes', label: '我的笔记', icon: iconMap.Notebook,
+    children: [
+      { path: '/learning/notes', label: '学习笔记' },
+      { path: '/learning/insights', label: '学习心得' },
+      { path: '/learning/notebook', label: '代码笔记本' },
+    ]
+  },
+  {
+    key: 'certs', label: '证书', icon: iconMap.Medal,
+    children: [
+      { path: '/learning/certificates', label: '我的证书' },
+      { path: '/learning/cert-square', label: '证书广场' },
+    ]
+  },
+  { path: '/learning/explore', label: '学习广场', icon: iconMap.Grid },
+]
+
+const learningMenus = {
+  teacher: [
+    ...learningGroups,
+    { path: '/learning/ai-governance', label: 'AI 治理', icon: iconMap.Setting },
+  ],
+  student: [...learningGroups]
+}
+
 // 按模块分组的菜单：与路由 meta.module 对应，新增模块只需在此加分组
 const moduleMenus = {
   exam: {
@@ -514,55 +658,8 @@ const moduleMenus = {
       { path: '/bounties/mine', label: '我的悬赏', icon: iconMap.Tickets },
     ]
   },
-  // 自主学习按「入口 → 规划执行 → 知识 → 练习 → 记录 → 成果 → 管理」的学习闭环排，
-  // 新增页面请归到对应段落，别按开发顺序往尾部追加（学习计划曾长期沉底，找不到人）。
-  learning: {
-    teacher: [
-      // 入口：先看今天该干什么
-      { path: '/learning', label: '学习首页', icon: iconMap.Reading },
-      { path: '/learning/today', label: '今日学习', icon: iconMap.Calendar },
-      // 规划与执行：AI 生成计划 → 落地跟踪 → 体系化路径
-      { path: '/learning/dashboard', label: '学习规划', icon: iconMap.Compass },
-      { path: '/learning/plan', label: '学习计划', icon: iconMap.Star },
-      { path: '/learning/paths', label: '专业路径', icon: iconMap.School },
-      // 知识资产
-      { path: '/learning/graph', label: '知识图谱', icon: iconMap.Connection },
-      { path: '/learning/my-knowledge', label: '我的知识库', icon: iconMap.Collection },
-      { path: '/learning/materials', label: '资料库', icon: iconMap.Tickets },
-      // 练与补
-      { path: '/learning/practice', label: '自由刷题', icon: iconMap.EditPen },
-      { path: '/learning/wrong', label: '错题本', icon: iconMap.Document },
-      // 记录
-      { path: '/learning/notes', label: '学习笔记', icon: iconMap.Notebook },
-      { path: '/learning/insights', label: '学习心得', icon: iconMap.ChatDotRound },
-      { path: '/learning/notebook', label: '代码笔记本', icon: iconMap.Memo },
-      // 成果与外部
-      { path: '/learning/certificates', label: '我的证书', icon: iconMap.Medal },
-      { path: '/learning/cert-square', label: '证书广场', icon: iconMap.Trophy },
-      { path: '/learning/explore', label: '学习广场', icon: iconMap.Grid },
-      { path: '/learning/report', label: '学习报告', icon: iconMap.TrendCharts },
-      { path: '/learning/ai-governance', label: 'AI 治理', icon: iconMap.Setting },
-    ],
-    student: [
-      { path: '/learning', label: '学习首页', icon: iconMap.Reading },
-      { path: '/learning/today', label: '今日学习', icon: iconMap.Calendar },
-      { path: '/learning/dashboard', label: '学习规划', icon: iconMap.Compass },
-      { path: '/learning/plan', label: '学习计划', icon: iconMap.Star },
-      { path: '/learning/paths', label: '专业路径', icon: iconMap.School },
-      { path: '/learning/graph', label: '知识图谱', icon: iconMap.Connection },
-      { path: '/learning/my-knowledge', label: '我的知识库', icon: iconMap.Collection },
-      { path: '/learning/materials', label: '资料库', icon: iconMap.Tickets },
-      { path: '/learning/practice', label: '自由刷题', icon: iconMap.EditPen },
-      { path: '/learning/wrong', label: '错题本', icon: iconMap.Document },
-      { path: '/learning/notes', label: '学习笔记', icon: iconMap.Notebook },
-      { path: '/learning/insights', label: '学习心得', icon: iconMap.ChatDotRound },
-      { path: '/learning/notebook', label: '代码笔记本', icon: iconMap.Memo },
-      { path: '/learning/certificates', label: '我的证书', icon: iconMap.Medal },
-      { path: '/learning/cert-square', label: '证书广场', icon: iconMap.Trophy },
-      { path: '/learning/explore', label: '学习广场', icon: iconMap.Grid },
-      { path: '/learning/report', label: '学习报告', icon: iconMap.TrendCharts },
-    ]
-  },
+  // 自主学习见上方 learningMenus（6 分组 + 2 独立入口）
+  learning: learningMenus,
   homework: {
     teacher: [
       { path: '/homeworks/manage', label: '作业管理', icon: iconMap.Notebook },
@@ -617,9 +714,63 @@ const menuItems = computed(() => {
 const currentPageName = computed(() => {
   const items = menuItems.value
   if (!Array.isArray(items)) return '首页'
-  const item = items.find(i => i.path === route.path)
-  return item?.label || '首页'
+  const p = activePath.value
+  if (!p) return '首页'
+  for (const item of items) {
+    if (item.path === p) return item.label
+    const child = (item.children || []).find(c => c.path === p)
+    if (child) return child.label
+  }
+  return '首页'
 })
+
+// 当前高亮路径：在全部菜单路径中取「最长匹配」。
+// 不能直接用 route.path === item.path，否则 /learning/report/5 这类详情页匹配不上，
+// 且 /learning 会吞掉 /learning/today 等所有子页面。
+const activePath = computed(() => {
+  const paths = []
+  menuItems.value.forEach(item => {
+    if (item.path) paths.push(item.path)
+    ;(item.children || []).forEach(c => paths.push(c.path))
+  })
+  const hit = paths
+    .filter(p => route.path === p || route.path.startsWith(p + '/'))
+    .sort((a, b) => b.length - a.length)[0]
+  return hit || ''
+})
+
+const isChildActive = (path) => !!path && activePath.value === path
+const isGroupActive = (item) => !!(item.children && item.children.some(c => activePath.value === c.path))
+
+// 手风琴：同时只展开一个分组；记住上次展开项，跨刷新保持
+const EXPAND_STORAGE_KEY = 'sidebar_expanded_group'
+const expandedGroup = ref(null)
+
+const onParentClick = (item) => {
+  // 收起态看不到子项：点击先展开侧边栏并打开该组，不做跳转
+  if (isCollapsed.value) {
+    isCollapsed.value = false
+    expandedGroup.value = item.key
+  } else {
+    // 展开态：父项只负责展开/收起，页面跳转一律交给子项
+    expandedGroup.value = expandedGroup.value === item.key ? null : item.key
+  }
+  try {
+    if (expandedGroup.value) localStorage.setItem(EXPAND_STORAGE_KEY, expandedGroup.value)
+  } catch (e) { /* 隐私模式下忽略 */ }
+}
+
+watch(
+  () => [route.path, currentModule.value],
+  () => {
+    const group = menuItems.value.find(i => i.children && i.children.some(c => activePath.value === c.path))
+    if (group) {
+      expandedGroup.value = group.key
+      try { localStorage.setItem(EXPAND_STORAGE_KEY, group.key) } catch (e) { /* 隐私模式下忽略 */ }
+    }
+  },
+  { immediate: true }
+)
 
 const handleCommand = (cmd) => {
   if (cmd === 'logout') {
@@ -863,6 +1014,149 @@ const goPortal = () => {
   opacity: 1;
   visibility: visible;
   margin-left: 16px;
+}
+
+/* ===== 分组菜单：父项 + 手风琴子菜单 ===== */
+.menu-group {
+  display: block;
+}
+
+.menu-parent {
+  user-select: none;
+}
+
+.menu-arrow {
+  margin-left: auto;
+  flex-shrink: 0;
+  color: rgba(255, 255, 255, 0.35);
+  transition: transform 0.28s cubic-bezier(0.4, 0, 0.2, 1), color 0.2s ease;
+}
+
+.menu-parent.expanded .menu-arrow {
+  transform: rotate(180deg);
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.submenu {
+  overflow: hidden;
+  max-height: 0;
+  opacity: 0;
+  transition: max-height 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.2s ease;
+}
+
+.submenu.open {
+  /* 子项最多 3 个，260px 足够容纳，超出时由父级滚动兜底 */
+  max-height: 260px;
+  opacity: 1;
+}
+
+.submenu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px 10px 46px;
+  margin-top: 2px;
+  border-radius: 10px;
+  cursor: pointer;
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 14px;
+  position: relative;
+  transition: background 0.2s ease, color 0.2s ease;
+}
+
+.submenu-item::before {
+  content: '';
+  position: absolute;
+  left: 30px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.25);
+  transition: background 0.2s ease, box-shadow 0.2s ease;
+}
+
+.submenu-item:hover {
+  background: rgba(255, 255, 255, 0.07);
+  color: rgba(255, 255, 255, 0.95);
+}
+
+.submenu-item:hover::before {
+  background: rgba(255, 255, 255, 0.55);
+}
+
+.submenu-item.active {
+  background: rgba(99, 102, 241, 0.18);
+  color: #fff;
+  font-weight: 500;
+}
+
+.submenu-item.active::before {
+  background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+  box-shadow: 0 0 8px rgba(139, 92, 246, 0.8);
+}
+
+.submenu-text {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.submenu-item .menu-badge {
+  margin-left: auto;
+  padding: 2px 8px;
+}
+
+/* 收起态：图标居中，给浮层留出干净的锚点 */
+.sidebar.collapsed .menu-item,
+.sidebar.collapsed .module-switch {
+  padding-left: 12px;
+  padding-right: 12px;
+}
+
+/* 收起态浮层（teleport 到 body，需用全局选择器） */
+:global(.sidebar-flyout) {
+  background: #1e293b !important;
+  border: 1px solid rgba(255, 255, 255, 0.08) !important;
+  border-radius: 12px !important;
+  padding: 6px !important;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45) !important;
+}
+
+.flyout-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.flyout-title {
+  padding: 6px 10px 8px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.flyout-item {
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.72);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.18s ease, color 0.18s ease;
+}
+
+.flyout-item:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+}
+
+.flyout-item.active {
+  background: rgba(99, 102, 241, 0.22);
+  color: #fff;
+  font-weight: 500;
 }
 
 .sidebar-footer {

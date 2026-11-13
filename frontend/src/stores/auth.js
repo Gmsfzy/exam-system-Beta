@@ -13,7 +13,9 @@ export const useAuthStore = defineStore('auth', () => {
       return null
     }
   }
-  const user = ref(readStoredUser())
+  // 以 token 为唯一登录凭据：localStorage 里残留的 user 但没有 token 时，
+  // 不能再当成已登录，否则会带着空凭证去轮询受保护接口，反复 401。
+  const user = ref(token.value ? readStoredUser() : null)
 
   const login = async (username, password) => {
     localStorage.removeItem('token')
