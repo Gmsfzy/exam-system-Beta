@@ -50,6 +50,22 @@ STARTER_CODE = {
         '    }\n'
         '}\n'
     ),
+    'c': (
+        '#include <stdio.h>\n'
+        '\n'
+        'int main(void) {\n'
+        '    printf("Hello, C!\\n");\n'
+        '    return 0;\n'
+        '}\n'
+    ),
+    'cpp': (
+        '#include <iostream>\n'
+        '\n'
+        'int main() {\n'
+        '    std::cout << "Hello, C++!" << std::endl;\n'
+        '    return 0;\n'
+        '}\n'
+    ),
 }
 
 

@@ -48,8 +48,8 @@
             </el-select>
             <p v-if="createLangHint" class="nb-lang-hint">{{ createLangHint }}</p>
           </el-form-item>
-          <el-form-item v-if="form.language === 'java'" label="模板">
-            <el-checkbox v-model="form.scaffold">自动生成 Main 类与 main 方法</el-checkbox>
+          <el-form-item v-if="scaffoldLabel" label="模板">
+            <el-checkbox v-model="form.scaffold">{{ scaffoldLabel }}</el-checkbox>
           </el-form-item>
           <el-form-item label="描述">
             <el-input v-model="form.description" type="textarea" :rows="2" maxlength="500" />
@@ -150,6 +150,13 @@ const createLangHint = computed(() => {
   if (hit && hit.oneshot) return '该语言按「一个单元 = 一个完整程序」运行，不保留跨单元变量'
   return ''
 })
+// 创建时可勾选的起步模板：Java 生成 Main 类，C/C++ 生成 include + main（JS/Python 无固定入口，不提供）
+const SCAFFOLD_LABELS = {
+  java: '自动生成 Main 类与 main 方法',
+  c: '自动生成 include 与 main 函数',
+  cpp: '自动生成 include 与 main 函数',
+}
+const scaffoldLabel = computed(() => SCAFFOLD_LABELS[form.language] || '')
 // v6.9 阶段 4：.ipynb 导入/导出
 const importing = ref(false)
 const importInput = ref(null)
