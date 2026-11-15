@@ -419,7 +419,12 @@ const startNotificationPolling = () => {
 }
 
 // 对账：只取未读数（单列 COUNT），仅在数值变化时拉全量列表；旧逻辑每 30s 全量拉列表
+// 单飞护栏：挂载/回到前台/socket 重连可能在同一秒内触发多次，重叠请求只留最新一次，
+// 避免自己把前一个请求顶掉后在控制台留下 net::ERR_ABORTED
+let syncingUnread = false
 const syncUnread = async (force = false) => {
+  if (syncingUnread) return
+  syncingUnread = true
   try {
     const response = await authFetch('/api/notifications/unread')
     const data = await response.json()
@@ -433,6 +438,8 @@ const syncUnread = async (force = false) => {
     // 网络瞬断/页面跳转中止(ERR_ABORTED / Failed to fetch)属正常噪声,静默即可;30s 后会自动重试对账
     if (error instanceof TypeError) return
     console.error('未读数对账失败:', error)
+  } finally {
+    syncingUnread = false
   }
 }
 
