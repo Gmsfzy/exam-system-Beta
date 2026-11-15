@@ -74,4 +74,10 @@ jobs:
         run: npm ci
 
       - name: Build
+        # 6372 模块 + Monaco/Element Plus 全量下，runner 默认 V8 老生代约 2GB，
+        # 会在 chunk 渲染阶段 OOM（exit 134，日志 Mark-Compact 2004MB -> heap limit）。
+        # 4GB 相对 7GB 物理内存留足余量；不写 6144——会逼近 runner 上限，
+        # 一旦溢出是整体 Killed(exit 137)，比现在更难定位。
+        env:
+          NODE_OPTIONS: --max-old-space-size=4096
         run: npm run build

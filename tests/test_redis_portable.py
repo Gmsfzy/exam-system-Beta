@@ -114,11 +114,16 @@ def test_find_server_prefers_explicit_path(tmp_path):
 
 
 def test_find_server_picks_project_portable_dir(tmp_path):
-    """zip 解压常多套一层目录，根目录/bin/子目录/单层同名目录都要能发现。"""
+    """zip 解压常多套一层目录，根目录/bin/子目录/单层同名目录都要能发现。
+
+    可执行文件名按平台取字面量，而不是复用 rp._EXE：若实现里「平台→文件名」映射
+    写错（如写成 redis_server），复用常量会让本用例照样变绿（自证循环）。
+    """
+    exe_name = 'redis-server.exe' if os.name == 'nt' else 'redis-server'
     cfg = _cfg(tmp_path)
     nested = tmp_path / 'tools' / 'redis' / 'Redis-8.0.1-Windows-x64-msys2'
     nested.mkdir(parents=True)
-    target = nested / 'redis-server.exe'
+    target = nested / exe_name
     target.write_text('', encoding='utf-8')
     assert rp.find_server(cfg) == str(target)
 
