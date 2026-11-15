@@ -287,12 +287,21 @@ const authFetch = (url, options = {}) => {
 const unreadCount = ref(0)             // 角标以服务端计数为真值，推送/标记乐观更新，轮询对账纠偏
 const lastListUnread = ref(null)       // 上次对账时的服务端未读数，仅在变化时才拉全量列表
 
+// 统一安全解析：后端重启/热重载或 Vite 代理断开时可能回「空体」响应，
+// 直接 response.json() 会抛 SyntaxError: Unexpected end of JSON input。空体或非 2xx 一律当瞬时失败
+const readJson = async (response) => {
+  const raw = await response.text()
+  if (!response.ok || !raw) return null
+  try { return JSON.parse(raw) } catch (e) { return null }
+}
+
 const fetchNotifications = async () => {
   if (!auth.user) return
 
   try {
     const response = await authFetch('/api/notifications')
-    const data = await response.json()
+    const data = await readJson(response)
+    if (!data) return
     notifications.value = data.notifications || []
   } catch (error) {
     console.error('获取通知失败:', error)
@@ -427,7 +436,8 @@ const syncUnread = async (force = false) => {
   syncingUnread = true
   try {
     const response = await authFetch('/api/notifications/unread')
-    const data = await response.json()
+    const data = await readJson(response)
+    if (!data) return
     const serverUnread = data.unread_count ?? 0
     unreadCount.value = serverUnread
     if (force || serverUnread !== lastListUnread.value) {
