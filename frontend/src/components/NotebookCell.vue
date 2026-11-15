@@ -21,7 +21,7 @@
 
     <!-- 输入区 -->
     <div class="nb-cell-input">
-      <CodeEditor v-if="cell.cell_type === 'code'" v-model="cell.source" language="python" height="180px" />
+      <CodeEditor v-if="cell.cell_type === 'code'" v-model="cell.source" :language="cell.language || 'python'" height="180px" />
       <el-input v-else-if="!mdPreview" v-model="cell.source" type="textarea" :autosize="{ minRows: 3, maxRows: 16 }"
                 placeholder="支持 Markdown + LaTeX 公式（$...$ / $$...$$）" />
       <RichContent v-else :content="cell.source" class="nb-md-preview" />

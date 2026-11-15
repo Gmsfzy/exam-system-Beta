@@ -64,6 +64,15 @@ watch(
 )
 
 watch(
+  () => props.language,
+  (lang) => {
+    // v7.23 多语言：单元/题目切换语言时同步 Monaco 高亮（java/c/cpp/javascript 内置支持）
+    const model = editor && editor.getModel()
+    if (model) monaco.editor.setModelLanguage(model, lang || 'python')
+  }
+)
+
+watch(
   () => props.readonly,
   (v) => editor && editor.updateOptions({ readOnly: !!v })
 )
