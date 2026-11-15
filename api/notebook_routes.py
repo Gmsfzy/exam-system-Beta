@@ -21,7 +21,7 @@ from utils.logger import logger
 from utils.kernel import kernel_manager, run_cell, resolve_backend, interrupt_cell
 from utils.ipynb import notebook_to_ipynb, ipynb_to_cells
 from utils.cell_runner import (SUPPORTED_LANGUAGES, is_oneshot,
-                               language_catalog, normalize_language)
+                               language_catalog, normalize_language, starter_code)
 from config import Config
 
 api_notebook_bp = Blueprint('api_notebook', __name__)
@@ -111,8 +111,10 @@ def api_notebook_create():
     db.session.add(nb)
     db.session.flush()
     # 默认给一个空 code cell，打开即可写（语言随笔记本，Java/C/C++ 每个单元是完整程序）
+    # 勾选「自动生成类与 main 方法」时填起步模板（当前支持 Java，类名与 OJ 适配器一致为 Main）
+    source = starter_code(language) if data.get('scaffold') else ''
     db.session.add(NotebookCell(notebook_id=nb.id, order_num=1, cell_type='code',
-                                source='', language=language))
+                                source=source, language=language))
     db.session.commit()
     return jsonify(nb.to_dict(with_cells=True)), 201
 

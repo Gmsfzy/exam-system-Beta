@@ -48,6 +48,9 @@
             </el-select>
             <p v-if="createLangHint" class="nb-lang-hint">{{ createLangHint }}</p>
           </el-form-item>
+          <el-form-item v-if="form.language === 'java'" label="模板">
+            <el-checkbox v-model="form.scaffold">自动生成 Main 类与 main 方法</el-checkbox>
+          </el-form-item>
           <el-form-item label="描述">
             <el-input v-model="form.description" type="textarea" :rows="2" maxlength="500" />
           </el-form-item>
@@ -136,7 +139,7 @@ const scope = ref('mine')
 const list = ref([])
 const createVisible = ref(false)
 const creating = ref(false)
-const form = reactive({ title: '', description: '', visibility: 'private', language: 'python' })
+const form = reactive({ title: '', description: '', visibility: 'private', language: 'python', scaffold: false })
 
 // v7.23 多语言：python 持久 kernel，Java/JS/C/C++ 单次编译运行
 const langShort = { python: 'Python', java: 'Java', javascript: 'JavaScript', c: 'C', cpp: 'C++' }
@@ -178,7 +181,7 @@ const doCreate = async () => {
   try {
     const { data } = await request.post('/api/notebooks', { ...form })
     createVisible.value = false
-    form.title = ''; form.description = ''
+    form.title = ''; form.description = ''; form.scaffold = false
     router.push(`/learning/notebook/${data.id}`)
   } finally { creating.value = false }
 }

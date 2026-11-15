@@ -40,6 +40,25 @@ def is_oneshot(language):
     return (language or '').lower() in ONESHOT_LANGUAGES
 
 
+# 新建笔记本时的可选起步模板（创建对话框勾选「自动生成类与 main 方法」后填入首个单元）
+# Java 适配器固定编译 Main.java / public class Main，模板类名必须与之一致
+STARTER_CODE = {
+    'java': (
+        'public class Main {\n'
+        '    public static void main(String[] args) {\n'
+        '        System.out.println("Hello, Java!");\n'
+        '    }\n'
+        '}\n'
+    ),
+}
+
+
+def starter_code(language):
+    """返回该语言的起步模板；没有模板（或 python）返回空串"""
+    return STARTER_CODE.get((language or '').lower(), '')
+
+
+
 # ipynb 的 kernelspec 写法五花八门（python3/js/c++/node…），统一收敛到本系统取值
 _ALIASES = {
     'python': 'python', 'python3': 'python', 'ipython': 'python',
