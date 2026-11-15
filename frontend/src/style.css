@@ -133,6 +133,12 @@
   --el-bg-color: #1e293b;
   --el-bg-color-secondary: #334155;
   --el-bg-color-tertiary: #1e293b;
+  /* 未引入官方 dark css-vars，这个变量默认是 #fff，折叠面板/纯色标签等会整块发白 */
+  --el-fill-color-blank: #1e293b;
+  --el-fill-color-light: rgba(148, 163, 184, 0.08);
+  --el-collapse-header-bg-color: transparent;
+  --el-collapse-content-bg-color: transparent;
+  --el-collapse-border-color: rgba(148, 163, 184, 0.2);
   --el-border-color: rgba(148, 163, 184, 0.2);
   --el-border-color-light: rgba(148, 163, 184, 0.1);
   --el-text-color-primary: #ffffff;
@@ -692,6 +698,30 @@ html.dark {
 
 .dark .el-tabs__active-bar {
   background: #6366f1;
+}
+
+/* 折叠面板（学习规划仓按专业分组）：默认走 --el-fill-color-blank 的白色底，
+   暗色下会形成整块发白区域，这里统一改为透明并跟随主题边框 */
+.dark .el-collapse {
+  border-color: var(--border-color);
+}
+
+.dark .el-collapse-item__header,
+.dark .el-collapse-item__wrap {
+  background-color: transparent;
+  border-bottom-color: var(--border-color);
+}
+
+.dark .el-collapse-item__header {
+  color: var(--text-primary);
+}
+
+.dark .el-collapse-item__header:hover {
+  background-color: var(--bg-hover);
+}
+
+.dark .el-collapse-item__content {
+  color: var(--text-secondary);
 }
 
 .dark .el-message {
