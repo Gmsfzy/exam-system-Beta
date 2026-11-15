@@ -41,6 +41,13 @@
           <el-form-item label="标题" required>
             <el-input v-model="form.title" maxlength="120" placeholder="例如： pandas 练习 / 梯度下降实验" />
           </el-form-item>
+          <el-form-item label="语言">
+            <el-select v-model="form.language" style="width: 100%">
+              <el-option v-for="l in langOptions" :key="l.value" :value="l.value"
+                         :label="langShort[l.value] || l.label" :disabled="!l.available" />
+            </el-select>
+            <p v-if="createLangHint" class="nb-lang-hint">{{ createLangHint }}</p>
+          </el-form-item>
           <el-form-item label="描述">
             <el-input v-model="form.description" type="textarea" :rows="2" maxlength="500" />
           </el-form-item>
@@ -63,7 +70,13 @@
       <div class="nb-editor-head">
         <el-button v-if="!embedded" text :icon="Back" @click="goBack">返回</el-button>
         <el-input v-model="notebook.title" class="nb-title" maxlength="120" :disabled="readonly" @blur="saveMeta" />
-        <el-tag :type="meta.backend === 'docker' ? 'success' : 'warning'" size="small">
+        <el-select v-if="!readonly" v-model="notebook.language" size="small" class="nb-lang-select"
+                   @change="changeLanguage">
+          <el-option v-for="l in langOptions" :key="l.value" :value="l.value"
+                     :label="langShort[l.value] || l.label" :disabled="!l.available" />
+        </el-select>
+        <el-tag v-if="isOneshot" size="small" type="info">单次运行 · 单元即完整程序</el-tag>
+        <el-tag v-else :type="meta.backend === 'docker' ? 'success' : 'warning'" size="small">
           {{ meta.backend === 'docker' ? '容器隔离' : '本机防呆级' }}
         </el-tag>
         <span class="nb-spacer"></span>
@@ -72,7 +85,7 @@
           <el-button size="small" :icon="Plus" @click="addCell('code')">代码单元</el-button>
           <el-button size="small" :icon="DocumentAdd" @click="addCell('markdown')">Markdown 单元</el-button>
           <el-button size="small" type="success" :icon="VideoPlay" :loading="runningAll" @click="runAll">运行全部</el-button>
-          <el-button size="small" :icon="RefreshLeft" @click="resetKernel">重置 kernel</el-button>
+          <el-button v-if="!isOneshot" size="small" :icon="RefreshLeft" @click="resetKernel">重置 kernel</el-button>
           <el-button size="small" type="primary" :icon="Checked" :loading="saving" @click="saveAll">保存</el-button>
         </template>
         <el-tag v-else type="info">只读浏览</el-tag>
@@ -93,7 +106,7 @@
 // 后端 meta 提供隔离级别提示（docker=容器级 / subprocess=本机防呆级），只读笔记本（他人公开）禁止编辑
 // v6.7 六模块接入：embedded 模式由其他模块（作业/考试/竞赛/悬赏）通过 props 传入 ctx，
 // 走 /notebooks/ctx get-or-create；answerMode 下每个代码单元可「用作作答」回传给宿主
-import { ref, reactive, onMounted, watch } from 'vue'
+import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Delete, Back, VideoPlay, RefreshLeft, Checked, DocumentAdd, CopyDocument, Upload, Download } from '@element-plus/icons-vue'
@@ -115,18 +128,37 @@ const router = useRouter()
 const auth = useAuthStore()
 const currentUserId = ref(auth.user?.id)
 
-const meta = reactive({ backend: 'subprocess', timeout: 30, max_cells: 200, max_source: 20000 })
+const meta = reactive({
+  backend: 'subprocess', timeout: 30, max_cells: 200, max_source: 20000,
+  languages: [{ value: 'python', label: 'Python 3', available: true, oneshot: false }],
+})
 const scope = ref('mine')
 const list = ref([])
 const createVisible = ref(false)
 const creating = ref(false)
-const form = reactive({ title: '', description: '', visibility: 'private' })
+const form = reactive({ title: '', description: '', visibility: 'private', language: 'python' })
+
+// v7.23 多语言：python 持久 kernel，Java/JS/C/C++ 单次编译运行
+const langShort = { python: 'Python', java: 'Java', javascript: 'JavaScript', c: 'C', cpp: 'C++' }
+const langOptions = computed(() => meta.languages || [])
+const createLangHint = computed(() => {
+  const hit = langOptions.value.find(x => x.value === form.language)
+  if (hit && !hit.available) return hit.hint || '该语言工具链未安装，暂时不可用'
+  if (hit && hit.oneshot) return '该语言按「一个单元 = 一个完整程序」运行，不保留跨单元变量'
+  return ''
+})
 // v6.9 阶段 4：.ipynb 导入/导出
 const importing = ref(false)
 const importInput = ref(null)
 
 const notebook = ref(null)
 const cells = ref([])
+// 当前笔记本是否「单次运行」语言（Java/JS/C/C++）：用于隐藏 kernel 按钮与提示
+const isOneshot = computed(() => {
+  const l = notebook.value && notebook.value.language
+  const hit = langOptions.value.find(x => x.value === l)
+  return hit ? !!hit.oneshot : false
+})
 const runningId = ref(0)
 const runningAll = ref(false)
 const saving = ref(false)
@@ -246,6 +278,29 @@ const saveMeta = async () => {
   try { await request.put(`/api/notebooks/${notebook.value.id}`, { title: notebook.value.title }) } catch (e) { /* 拦截器已提示 */ }
 }
 
+// v7.23 切换语言：单元语言跟随笔记本；切回 python 会重建 kernel，原来的跨单元变量不再保留
+const changeLanguage = async (lang) => {
+  if (!notebook.value || readonly.value) return
+  const prev = notebook.value.language
+  if (lang === prev) return
+  try {
+    await ElMessageBox.confirm(
+      `切换为 ${langShort[lang] || lang} 后，所有单元按新语言执行，原有的跨单元变量/导入会失效。继续？`,
+      '切换语言', { type: 'warning' })
+  } catch (e) {
+    notebook.value.language = prev
+    return
+  }
+  try {
+    const { data } = await request.put(`/api/notebooks/${notebook.value.id}`, { language: lang })
+    notebook.value = { ...notebook.value, ...(data || {}), language: lang }
+    cells.value = cells.value.map(c => ({ ...c, language: lang }))
+    ElMessage.success(`已切换为 ${langShort[lang] || lang}`)
+  } catch (e) {
+    notebook.value.language = prev
+  }
+}
+
 const addCell = async (cellType) => {
   const { data } = await request.post(`/api/notebooks/${notebook.value.id}/cells`, { cell_type: cellType, source: '' })
   cells.value.push(data)
@@ -332,5 +387,9 @@ const saveAll = async () => {
 .nb-card-actions { text-align: right; margin-top: 4px; }
 .nb-editor-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
 .nb-title { max-width: 360px; font-size: 16px; font-weight: 600; }
+.nb-lang-select { width: 118px; }
+.nb-lang-hint {
+  margin: 4px 0 0; font-size: 12px; line-height: 1.5; color: var(--text-muted);
+}
 .nb-spacer { flex: 1; }
 </style>

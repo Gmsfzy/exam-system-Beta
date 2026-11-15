@@ -15,6 +15,28 @@ _STDERR_CAP = 8192
 _TIMEOUT_CLAMP = (0.5, 15.0)
 
 
+def _decode_output(raw):
+    """子进程字节解码：优先 UTF-8；中文 Windows 下 javac 诊断与 Java 输出是 GBK，按本地编码回落。
+
+    v7.23：笔记本里编译报错直接面向学生，乱码不可接受；OJ 侧同样受益。
+    """
+    if not raw:
+        return ''
+    try:
+        return raw.decode('utf-8')
+    except UnicodeDecodeError:
+        # 中文 Windows 下 javac/java 控制台输出是 GBK；不能用 locale.getpreferredencoding，
+        # 它会被 PYTHONUTF8/UTF-8 模式改写成 utf-8，导致回落仍是乱码
+        import locale
+        candidates = ('gbk', 'mbcs') if os.name == 'nt' else (locale.getpreferredencoding(False),)
+        for enc in candidates:
+            try:
+                return raw.decode(enc)
+            except (UnicodeDecodeError, LookupError):
+                continue
+        return raw.decode('utf-8', errors='replace')
+
+
 def _exec(argv, workdir, stdin='', timeout=5.0):
     """在 workdir 以最小 env 跑 argv，喂 stdin，返回与 run_python 同构的结果字典。
 
@@ -45,8 +67,8 @@ def _exec(argv, workdir, stdin='', timeout=5.0):
         except Exception:
             out, err = b'', b''
     return {
-        'stdout': (out or b'')[:MAX_OUTPUT].decode('utf-8', errors='replace'),
-        'stderr': (err or b'')[:_STDERR_CAP].decode('utf-8', errors='replace'),
+        'stdout': _decode_output((out or b'')[:MAX_OUTPUT]),
+        'stderr': _decode_output((err or b'')[:_STDERR_CAP]),
         'exit_code': proc.returncode,
         'timed_out': timed_out,
         'error': None,

@@ -20,6 +20,8 @@ from utils.timeutil import utcnow
 from utils.logger import logger
 from utils.kernel import kernel_manager, run_cell, resolve_backend, interrupt_cell
 from utils.ipynb import notebook_to_ipynb, ipynb_to_cells
+from utils.cell_runner import (SUPPORTED_LANGUAGES, is_oneshot,
+                               language_catalog, normalize_language)
 from config import Config
 
 api_notebook_bp = Blueprint('api_notebook', __name__)
@@ -55,6 +57,9 @@ def api_notebook_meta():
         'cell_type_labels': CELL_TYPE_LABELS,
         'visibility_labels': NOTEBOOK_VISIBILITY_LABELS,
         'ctx_labels': NOTEBOOK_CTX_LABELS,
+        # v7.23 多语言：python 走持久 kernel，Java/JS/C/C++ 单次编译运行（附工具链可用性）
+        'languages': language_catalog(),
+        'default_language': 'python',
     })
 
 
@@ -94,7 +99,10 @@ def api_notebook_create():
     title = (data.get('title') or '').strip()
     if not title:
         return jsonify({'message': '请填写笔记本标题'}), 400
-    nb = Notebook(user_id=user.id, title=title[:120],
+    language = (data.get('language') or 'python').lower()
+    if language not in SUPPORTED_LANGUAGES:
+        return jsonify({'message': f'不支持的语言：{language}'}), 400
+    nb = Notebook(user_id=user.id, title=title[:120], language=language,
                   description=(data.get('description') or '').strip() or None,
                   major_id=data.get('major_id'), course_id=data.get('course_id'),
                   ctx_type=data.get('ctx_type') if data.get('ctx_type') in NOTEBOOK_CTX_LABELS else None,
@@ -102,8 +110,9 @@ def api_notebook_create():
                   visibility=data.get('visibility') if data.get('visibility') in NOTEBOOK_VISIBILITY_LABELS else 'private')
     db.session.add(nb)
     db.session.flush()
-    # 默认给一个空 code cell，打开即可写
-    db.session.add(NotebookCell(notebook_id=nb.id, order_num=1, cell_type='code', source=''))
+    # 默认给一个空 code cell，打开即可写（语言随笔记本，Java/C/C++ 每个单元是完整程序）
+    db.session.add(NotebookCell(notebook_id=nb.id, order_num=1, cell_type='code',
+                                source='', language=language))
     db.session.commit()
     return jsonify(nb.to_dict(with_cells=True)), 201
 
@@ -135,6 +144,14 @@ def api_notebook_update(nid):
         nb.visibility = data['visibility']
     if data.get('status') in ('active', 'archived'):
         nb.status = data['status']
+    # v7.23 切换语言：单元语言跟随笔记本，切走后原 Python kernel 状态作废
+    lang = (data.get('language') or '').lower()
+    if lang and lang != nb.language:
+        if lang not in SUPPORTED_LANGUAGES:
+            return jsonify({'message': f'不支持的语言：{lang}'}), 400
+        nb.language = lang
+        kernel_manager.drop((nb.user_id, nb.id))
+        NotebookCell.query.filter_by(notebook_id=nb.id).update({'language': lang})
     db.session.commit()
     return jsonify(nb.to_dict())
 
@@ -193,14 +210,15 @@ def api_notebook_import():
     if not cells:
         return jsonify({'message': '.ipynb 无有效单元'}), 400
 
-    # 本系统 notebook 当前仅支持 python 内核，非 python 仍按 python 建本（源码原样保留）
+    # v7.23 按 kernelspec 识别语言（python3/js/c++/node 均可收敛）；不认识的语言回落 python
+    language = normalize_language(language)
     nb = Notebook(user_id=user.id, title=(title or '导入的笔记本')[:120],
-                  language='python', visibility='private')
+                  language=language, visibility='private')
     db.session.add(nb)
     db.session.flush()
     for i, c in enumerate(cells, start=1):
         db.session.add(NotebookCell(notebook_id=nb.id, order_num=i, cell_type=c['cell_type'],
-                                    source=c['source'], language='python', outputs=c['outputs']))
+                                    source=c['source'], language=language, outputs=c['outputs']))
     db.session.commit()
     return jsonify(nb.to_dict(with_cells=True)), 201
 
@@ -263,7 +281,7 @@ def api_notebook_fork(nid):
         return jsonify({'message': '笔记本不存在'}), 404
     if src.user_id != user.id and src.visibility != 'public':
         return jsonify({'message': '仅公开笔记本可 fork'}), 403
-    nb = Notebook(user_id=user.id, title=f'副本 - {src.title}'[:120],
+    nb = Notebook(user_id=user.id, title=f'副本 - {src.title}'[:120], language=src.language,
                   description=src.description, forked_from_id=src.id, visibility='private')
     db.session.add(nb)
     db.session.flush()
@@ -359,7 +377,8 @@ def api_cell_run(nid, cid):
         return jsonify({'message': '仅代码单元可执行'}), 400
 
     try:
-        res = run_cell(nb.user_id, nb.id, cell.source or '')
+        res = run_cell(nb.user_id, nb.id, cell.source or '',
+                       language=(cell.language or nb.language))
     except Exception:
         logger.exception('[notebook] kernel 执行异常')
         return jsonify({'message': 'kernel 执行异常，请稍后重试'}), 500
@@ -393,7 +412,8 @@ def api_cell_run(nid, cid):
     cell.exec_count = (cell.exec_count or 0) + 1
     cell.last_run_at = utcnow()
     db.session.commit()
-    return jsonify({'cell': cell.to_dict(), 'backend': resolve_backend(),
+    return jsonify({'cell': cell.to_dict(),
+                    'backend': 'oneshot' if is_oneshot(cell.language or nb.language) else resolve_backend(),
                     'timed_out': bool(res.get('timed_out'))})
 
 
@@ -402,6 +422,8 @@ def api_kernel_reset(nid):
     _u, nb, err = _get_own_notebook(nid)
     if err:
         return err
+    if is_oneshot(nb.language):
+        return jsonify({'message': '单次运行模式没有常驻 kernel，无需重置'})
     kernel_manager.drop((nb.user_id, nb.id))
     return jsonify({'message': 'kernel 已重置，跨 cell 状态已清空'})
 

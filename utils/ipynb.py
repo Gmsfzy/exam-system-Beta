@@ -20,6 +20,16 @@
 """
 
 
+# 导出时按 notebook.language 生成 kernelspec（Jupyter 侧据此选内核；无对应内核时仍可读源码）
+_KERNELSPEC = {
+    'python': {'display_name': 'Python 3', 'language': 'python', 'name': 'python3'},
+    'java': {'display_name': 'Java 17', 'language': 'java', 'name': 'java'},
+    'javascript': {'display_name': 'Node.js', 'language': 'javascript', 'name': 'nodejs'},
+    'c': {'display_name': 'C (GCC)', 'language': 'c', 'name': 'c'},
+    'cpp': {'display_name': 'C++ (G++)', 'language': 'c++', 'name': 'cpp'},
+}
+
+
 # ── 文本/行 双向辅助 ─────────────────────────────────────────────
 def _to_lines(text):
     """字符串 → nbformat 行数组（每行保留结尾换行符；空串 → []）。"""
@@ -72,7 +82,10 @@ def notebook_to_ipynb(nb, language='python'):
     """notebook（含 cells 的内部 dict）→ nbformat v4 dict。
 
     nb: Notebook.to_dict(with_cells=True) 形状；cells 已按 order_num 排好。
+    v7.23：kernelspec 跟随 notebook.language，Java/C/C++ 导出后 Jupyter 侧也能识别语言。
     """
+    lang = (language or 'python').lower()
+    meta = _KERNELSPEC.get(lang, _KERNELSPEC['python'])
     cells = []
     exec_no = 1
     for c in nb.get('cells') or []:
@@ -91,8 +104,8 @@ def notebook_to_ipynb(nb, language='python'):
     return {
         'cells': cells,
         'metadata': {
-            'kernelspec': {'display_name': 'Python 3', 'language': 'python', 'name': 'python3'},
-            'language_info': {'name': (language or 'python'), 'version': ''},
+            'kernelspec': dict(meta),
+            'language_info': {'name': meta['language'], 'version': ''},
         },
         'nbformat': 4,
         'nbformat_minor': 5,

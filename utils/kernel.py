@@ -388,9 +388,17 @@ class KernelManager:
 kernel_manager = KernelManager()
 
 
-def run_cell(user_id, notebook_id, code, timeout=None, strict=True):
+def run_cell(user_id, notebook_id, code, timeout=None, strict=True, language='python'):
     """执行一个 cell。strict=True（subprocess 后端）时先做静态危险模式拒绝。
-    返回结果字典；拒绝时返回 {error: '...'}。"""
+    返回结果字典；拒绝时返回 {error: '...'}。
+
+    v7.23：非 Python 语言（Java/JS/C/C++）没有持久 kernel，交给 utils.cell_runner
+    一次性编译运行；语言为空或 python 时仍走原有持久 kernel。
+    """
+    from utils.cell_runner import is_oneshot, run_oneshot
+    if is_oneshot(language):
+        return run_oneshot(language, code, timeout=timeout)
+
     if strict and resolve_backend() == 'subprocess':
         from oj.runner import check_code
         reason = check_code(code)
