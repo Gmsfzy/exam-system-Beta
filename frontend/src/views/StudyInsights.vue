@@ -89,6 +89,7 @@
           </div>
           <MdView :content="viewer[key] || ''" class="v-sec-body" />
         </div>
+        <MaterialAttachments :items="viewer.attachments || []" class="v-attachments" />
         <div v-if="isMine && viewer.share_post_id" class="v-shared">
           <el-link type="primary" :underline="false" @click="goPost(viewer.share_post_id)">
             已分享到社区中心，查看该帖
@@ -158,6 +159,9 @@
                 <el-option v-for="t in allTags" :key="t" :label="t" :value="t" />
               </el-select>
             </el-form-item>
+            <el-form-item label="附件（可选）">
+              <AttachmentEditor v-model="editor.attachments" />
+            </el-form-item>
           </el-form>
 
           <div class="section-list">
@@ -167,8 +171,7 @@
                 <span class="sec-block-title">{{ label }}</span>
                 <span class="sec-block-hint">{{ SECTION_HINT[key] }}</span>
               </div>
-              <el-input v-model="editor[key]" type="textarea" :autosize="{ minRows: 4, maxRows: 12 }"
-                        maxlength="4000" show-word-limit />
+              <MdField v-model="editor[key]" :min-rows="4" :max-rows="12" :maxlength="4000" />
             </div>
           </div>
 
@@ -230,6 +233,9 @@ import request from '../utils/request'
 import { errTip } from '../utils/errs'
 import { useDialogSize } from '../utils/dialogSize'
 import MdView from '../components/MdView.vue'
+import MdField from '../components/MdField.vue'
+import AttachmentEditor from '../components/AttachmentEditor.vue'
+import MaterialAttachments from '../components/MaterialAttachments.vue'
 import { useAuthStore } from '../stores/auth'
 
 const auth = useAuthStore()
@@ -376,6 +382,7 @@ const saving = ref(false)
 const editor = reactive({
   id: null, title: '', period_type: 'week', range: null, period_note: '',
   tags: [], gains: '', summary: '', reflection: '', source: 'manual',
+  attachments: [],
 })
 
 // 底部实时字数：三段合并计数（不计空白），让「写了多少」不用自己数
@@ -507,6 +514,7 @@ function openEditor(i, opts = {}) {
     ? [i.period_start.slice(0, 10), i.period_end.slice(0, 10)] : null
   editor.period_note = i ? (i.period_note || '') : ''
   editor.tags = i ? [...(i.tags || [])] : []
+  editor.attachments = i ? [...(i.attachments || [])] : []
   editor.gains = i ? (i.gains || '') : ''
   editor.summary = i ? (i.summary || '') : ''
   editor.reflection = i ? (i.reflection || '') : ''
@@ -530,6 +538,7 @@ async function save() {
     period_start: editor.range?.[0] || null, period_end: editor.range?.[1] || null,
     period_note: editor.period_note.trim() || null, tags: editor.tags,
     gains: editor.gains, summary: editor.summary, reflection: editor.reflection,
+    attachments: editor.attachments || [],
   }
   try {
     if (editor.id) {

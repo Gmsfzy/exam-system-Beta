@@ -9,7 +9,7 @@
       <span class="ae-count">{{ list.length }} / {{ MAX }}</span>
     </div>
     <div class="ae-tip">
-      Word / Excel / PPT / PDF / 图片 / 视频 / 代码均可上传，单文件 ≤ 50MB；
+      Word / Excel / PPT / PDF / 图片 / 视频 / 代码均可上传，单文件 ≤ 500MB；
       思维导图用 <code>```mermaid mindmap```</code> 写进正文，或挂 XMind 导出的图片/PDF。
     </div>
 
@@ -91,7 +91,7 @@ async function onPicked(ev) {
   try {
     const fd = new FormData()
     fd.append('file', file)
-    const { data } = await request.post('/api/learning/attachments', fd, { timeout: 60000 })
+    const { data } = await request.post('/api/learning/attachments', fd, { timeout: 15 * 60 * 1000 })
     // type 只为立刻显示图标而粗判，落库后以后端按后缀归一化的 type 为准
     commit([...list.value, {
       name: data.name || file.name, ext: data.ext || '', stored_name: data.stored_name,
@@ -99,7 +99,7 @@ async function onPicked(ev) {
     }])
     ElMessage.success(`附件「${file.name}」已上传，保存资料后生效`)
   } catch (e) {
-    /* 拦截器已提示（类型不支持 / 超 50MB / 登录态失效） */
+    /* 拦截器已提示（类型不支持 / 超 500MB / 登录态失效） */
   } finally {
     uploading.value = false
   }

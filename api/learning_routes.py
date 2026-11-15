@@ -4684,6 +4684,9 @@ def _insight_to_dict(i, with_content=True):
         'period_start': iso_local(i.period_start), 'period_end': iso_local(i.period_end),
         'period_note': i.period_note, 'period_text': _insight_period_text(i),
         'tags': list(i.tags or []), 'source': i.source,
+        'attachments': _attachments_out_items(
+            _normalize_attachments(i.attachment_json or []),
+            f'/api/learning/insights/{i.id}/attachments'),
         'plan_id': i.plan_id, 'knowledge_point_id': i.knowledge_point_id,
         'is_public': bool(i.is_public), 'views': int(i.views or 0),
         'share_post_id': i.share_post_id,
@@ -4867,6 +4870,7 @@ def api_insight_create():
         title=str(data.get('title') or '').strip()[:200] or f'{INSIGHT_PERIOD_LABELS[period_type]}学习心得',
         period_type=period_type, period_start=s, period_end=e, period_note=note,
         tags=_clean_insight_tags(data.get('tags')),
+        attachment_json=_normalize_attachments(data.get('attachments')) or None,
         plan_id=data.get('plan_id') or None,
         knowledge_point_id=data.get('knowledge_point_id') or None,
         source='ai_draft' if data.get('source') == 'ai_draft' else 'manual',
@@ -4987,6 +4991,8 @@ def api_insight_update(iid):
     i.period_type, i.period_start, i.period_end, i.period_note = period_type, s, e, note
     if 'tags' in data:
         i.tags = _clean_insight_tags(data.get('tags'))
+    if 'attachments' in data:
+        i.attachment_json = _normalize_attachments(data.get('attachments')) or None
     if 'plan_id' in data:
         i.plan_id = data.get('plan_id') or None
     if 'knowledge_point_id' in data:
@@ -5010,6 +5016,25 @@ def api_insight_delete(iid):
     db.session.delete(i)
     db.session.commit()
     return jsonify({'message': '已删除'})
+
+
+@api_learning_bp.route('/learning/insights/<int:iid>/attachments/<int:idx>/download', methods=['GET'])
+def api_insight_attachment_download(iid, idx):
+    """心得附件下载/内联预览：本人或已公开的心得可读。"""
+    user = verify_token()
+    if not user:
+        return jsonify({'message': '未登录'}), 401
+    i = db.session.get(StudyInsight, iid)
+    if not i or (i.user_id != user.id and not i.is_public):
+        return jsonify({'message': '心得不存在'}), 404
+    atts = i.attachment_json or []
+    if idx < 0 or idx >= len(atts) or not isinstance(atts[idx], dict):
+        return jsonify({'message': '附件不存在'}), 404
+    att = atts[idx]
+    inline = request.args.get('inline') == '1'
+    return send_from_directory(_UPLOAD_DIR, os.path.basename(att.get('stored_name') or ''),
+                               as_attachment=not inline,
+                               download_name=att.get('name') or att.get('filename'))
 
 
 @api_learning_bp.route('/learning/insights/<int:iid>/public', methods=['PUT'])
@@ -5461,8 +5486,9 @@ def _md_excerpt(text, limit=100):
 def _note_to_dict(n, brief=False):
     d = {'id': n.id, 'title': n.title, 'category': n.category,
          'tags': n.tags or [], 'pinned': bool(n.pinned), 'source': n.source,
-         'attachments': [{'filename': a.get('filename'), 'size': a.get('size', 0)}
-                         for a in (n.attachment_json or [])],
+         'attachments': _attachments_out_items(
+             _normalize_attachments(n.attachment_json or []),
+             f'/api/learning/attachments/{n.id}'),
          'created_at': iso_local(n.created_at), 'updated_at': iso_local(n.updated_at)}
     if brief:
         d['excerpt'] = _md_excerpt(n.content, 100)
@@ -5527,6 +5553,8 @@ def api_note_create():
     n = StudyNote(user_id=user.id, title=title[:200], content=content,
                   category=str(data.get('category') or '').strip()[:50] or None,
                   tags=_clean_note_tags(data.get('tags')))
+    if 'attachments' in data:
+        n.attachment_json = _normalize_attachments(data.get('attachments')) or None
     db.session.add(n)
     db.session.commit()
     return jsonify({'message': '已创建', 'note': _note_to_dict(n)})
@@ -5567,6 +5595,8 @@ def api_note_update(nid):
         n.category = str(data.get('category') or '').strip()[:50] or None
     if 'tags' in data:
         n.tags = _clean_note_tags(data.get('tags'))
+    if 'attachments' in data:
+        n.attachment_json = _normalize_attachments(data.get('attachments')) or None
     if 'pinned' in data:
         n.pinned = bool(data.get('pinned'))
     db.session.commit()
@@ -5741,7 +5771,7 @@ def api_learning_attachment():
         atts = list(note.attachment_json or [])
         atts.append({'filename': file.filename, 'stored_name': stored, 'size': size,
                      'uploaded_at': utcnow().isoformat()})
-        note.attachment_json = atts
+        note.attachment_json = _normalize_attachments(atts)
         db.session.commit()
         return jsonify({'message': '附件已上传', 'attachments': len(atts),
                         'url': f'/learning/attachments/{note.id}/0/download'}), 201
@@ -5763,8 +5793,10 @@ def api_learning_attachment_download(nid, idx):
     if idx < 0 or idx >= len(atts):
         return jsonify({'message': '附件不存在'}), 404
     att = atts[idx]
-    return send_from_directory(_UPLOAD_DIR, att['stored_name'],
-                               as_attachment=True, download_name=att.get('filename'))
+    inline = request.args.get('inline') == '1'
+    return send_from_directory(_UPLOAD_DIR, os.path.basename(att.get('stored_name') or ''),
+                               as_attachment=not inline,
+                               download_name=att.get('name') or att.get('filename'))
 
 
 @api_learning_bp.route('/learning/attachments/<int:nid>/<int:idx>', methods=['DELETE'])
@@ -5863,23 +5895,24 @@ def _normalize_attachments(raw):
     return out
 
 
-def _attachments_out(m):
-    """附件输出：补上前端直接可用的 url 与受控下载/预览地址。
+def _attachments_out_items(atts, base):
+    """附件输出（通用）：补上前端直接可用的 url 与受控下载/预览地址。
 
     图片/视频/PDF 走 /uploads/（UUID 名不可枚举，与笔记插图、题面图同一口径）；
     Office 文档与压缩包只给 API 下载地址（浏览器开不了 docx，内联只会是个碎图）。
     .html 附件不给内联预览：上传白名单里 html 属「代码」类，同源内联别人写的 html
-    等于把存储型 XSS 请进来，故只下载（思维导图请用 mermaid/markdown 源文件或图片）。"""
+    等于把存储型 XSS 请进来，故只下载（思维导图请用 mermaid/markdown 源文件或图片）。
+    base 为「下载路由前缀」，最终拼成 {base}/{idx}/download[?inline=1]。"""
     out = []
-    for i, a in enumerate(m.attachment_json or []):
+    for i, a in enumerate(atts or []):
         if not isinstance(a, dict):
             continue
         d = dict(a)
         stored = d.get('stored_name')
         if stored:
             d['url'] = f'/uploads/{stored}'
-            d['download_url'] = f'/api/learning/materials/{m.id}/attachments/{i}/download'
-            d['inline_url'] = (f'/api/learning/materials/{m.id}/attachments/{i}/download?inline=1'
+            d['download_url'] = f'{base}/{i}/download'
+            d['inline_url'] = (f'{base}/{i}/download?inline=1'
                                if d.get('type') in ('image', 'video', 'pdf', 'text') else None)
         else:
             d['url'] = d.get('url') or ''
@@ -5887,6 +5920,12 @@ def _attachments_out(m):
             d['inline_url'] = d['url'] if d.get('type') in ('image', 'video') else None
         out.append(d)
     return out
+
+
+def _attachments_out(m):
+    """资料附件输出（资料库专用下载路由）"""
+    return _attachments_out_items(m.attachment_json,
+                                 f'/api/learning/materials/{m.id}/attachments')
 
 
 def _material_to_dict(m, with_content=False, current_user_id=None):

@@ -3,7 +3,7 @@
 
 竞赛（资料包/作品）、自主学习（笔记/资料附件）、征集悬赏（投稿附件）共用同一
 扩展名白名单与落盘逻辑：文档 / 表格(csv/xls/xlsx) / 压缩包 / 图片 / 视频 / 代码，
-不收可执行文件。UUID 命名平铺存入根目录 uploads/，单文件上限 50MB
+不收可执行文件。UUID 命名平铺存入根目录 uploads/，单文件上限 500MB
 （app.py 另有全局 MAX_CONTENT_LENGTH + nosniff 兜底）。
 """
 import os
@@ -29,7 +29,7 @@ ALLOWED_EXTENSIONS = {
     '.py', '.java', '.c', '.cpp', '.js', '.ts', '.html', '.css', '.sql',
 }
 
-MAX_FILE_BYTES = 50 * 1024 * 1024
+MAX_FILE_BYTES = 500 * 1024 * 1024
 
 
 def _describe_exts():
@@ -55,7 +55,7 @@ def save_upload(file, prefix, upload_dir=None):
     size = file.stream.tell()
     file.stream.seek(0)
     if size > MAX_FILE_BYTES:
-        raise ValueError('文件大小不能超过 50MB')
+        raise ValueError(f'文件大小不能超过 {MAX_FILE_BYTES // (1024 * 1024)}MB')
     os.makedirs(upload_dir, exist_ok=True)
     stored = f'{prefix}_{secrets.token_hex(12)}{ext}'
     file.save(os.path.join(upload_dir, stored))

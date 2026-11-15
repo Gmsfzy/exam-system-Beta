@@ -22,6 +22,8 @@ import MarkdownIt from 'markdown-it'
 import DOMPurify from 'dompurify'
 import katex from 'katex'
 import 'katex/dist/katex.min.css'
+// v7.24 化学式：KaTeX mhchem 扩展，$\ce{H2SO4}$ / $\ce{CO2 + H2O -> H2CO3}$ 直接渲染
+import 'katex/contrib/mhchem'
 
 const props = defineProps({
   content: { type: String, default: '' },

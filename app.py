@@ -31,7 +31,7 @@ app.config['SQLALCHEMY_ENGINE_OPTIONS'] = resolve_engine_options(_uri)
 app.config['DB_ACTIVE_BACKEND'] = backend_of(_uri)
 app.config['DB_URL_SAFE'] = redact_url(_uri)
 # 全局请求体上限：Flask 在解析前拦截超大上传/请求（413），防止磁盘/内存被灌满
-app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
+app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024
 # CORS 白名单与 Socket.IO 统一来自 Config.CORS_ORIGINS（环境变量/开发预置/生产空）
 CORS(app, supports_credentials=True, origins=Config.CORS_ORIGINS)
 

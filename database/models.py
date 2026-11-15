@@ -986,6 +986,9 @@ class StudyInsight(db.Model):
     period_end = db.Column(UTCDateTime)
     period_note = db.Column(db.String(80))                        # 阶段名/自定义说明
     tags = db.Column(JSONType)                                    # 标签字符串数组
+    # v7.24 文档附件：Word/Excel/PPT/PDF/图片/视频/压缩包等，形态与资料附件一致
+    # [{name, type, ext, stored_name, size, url?, uploaded_at}]
+    attachment_json = db.Column(JSONType)
     plan_id = db.Column(db.Integer, db.ForeignKey('study_plan.id'))
     knowledge_point_id = db.Column(db.Integer, db.ForeignKey('knowledge_point.id'))
     source = db.Column(db.String(10), nullable=False, default='manual')  # manual 手写 / ai_draft AI 初稿改定

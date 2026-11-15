@@ -61,14 +61,9 @@
           <span class="note-time">{{ fmtTime(viewer.updated_at) }}</span>
         </div>
         <el-scrollbar max-height="60vh">
-          <RichContent :content="viewer.content || '（空白笔记）'" class="viewer-content" />
+          <MdView :content="viewer.content || '（空白笔记）'" class="viewer-content" />
         </el-scrollbar>
-        <div v-if="(viewer.attachments || []).length" class="viewer-attach">
-          <span class="img-label">附件：</span>
-          <a v-for="(a, i) in viewer.attachments" :key="i" class="att-link" @click="downloadFromViewer(i, a)">
-            {{ a.filename }}（{{ fmtSize(a.size) }}）
-          </a>
-        </div>
+        <MaterialAttachments :items="viewer.attachments || []" />
       </div>
       <template #footer>
         <el-button type="danger" plain @click="removeNoteFromViewer">删除</el-button>
@@ -134,26 +129,25 @@
         <div v-if="editorAttachments.length" class="editor-attach">
           <span class="img-label">附件：</span>
           <a v-for="(a, i) in editorAttachments" :key="i" class="att-link" @click="downloadAttachment(i, a)">
-            {{ a.filename }}（{{ fmtSize(a.size) }}）
+            {{ a.name || a.filename }}（{{ fmtSize(a.size) }}）
           </a>
           <el-button v-for="(a, i) in editorAttachments" :key="'d' + i" link type="danger" size="small"
                      @click="removeAttachment(i)">删{{ i + 1 }}</el-button>
         </div>
-        <div v-else-if="!editor.id" class="attach-hint">附件可传文档/表格(含csv)/压缩包/图片/视频/代码，≤50MB；新建笔记需先保存后再上传附件</div>
+        <div v-else-if="!editor.id" class="attach-hint">附件可传 PDF/Word/Excel/PPT/图片/视频/代码，≤500MB；新建笔记需先保存后再上传附件</div>
         <div class="editor-mode">
           <el-radio-group v-model="editMode" size="small">
             <el-radio-button value="write">编写</el-radio-button>
             <el-radio-button value="preview">预览</el-radio-button>
           </el-radio-group>
-          <span class="mode-hint">正文支持 Markdown 与 LaTeX 公式（$...$），预览即最终阅读效果</span>
+          <span class="mode-hint">正文支持 Markdown、公式与化学式（$...$、$\ce{...}$）、代码块、mermaid 流程图/思维导图，预览即最终阅读效果</span>
         </div>
-        <el-input v-show="editMode === 'write'" v-model="editor.content" type="textarea"
-                  :autosize="{ minRows: 12, maxRows: 26 }"
-                  maxlength="20000" show-word-limit
-                  placeholder="支持 Markdown 语法；插入的图片以链接形式嵌入，保存后可在阅读视图直接看到" />
+        <MdField v-show="editMode === 'write'" v-model="editor.content" :previewable="false"
+                 :min-rows="12" :max-rows="26" :maxlength="20000"
+                 placeholder="支持 Markdown 语法；工具栏可插入公式、化学式、代码、流程图与思维导图" />
         <el-scrollbar v-if="editMode === 'preview'" class="editor-preview"
                       :style="{ maxHeight: editorSize.full ? 'calc(100vh - 300px)' : Math.max(240, editorSize.h - 280) + 'px' }">
-          <RichContent :content="editor.content || '（暂无内容）'" />
+          <MdView :content="editor.content || '（暂无内容）'" />
         </el-scrollbar>
         <div v-if="editorImages.length" class="editor-images">
           <span class="img-label">已插入图片：</span>
@@ -210,7 +204,9 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Search, Plus, Top, Picture, Paperclip, MagicStick } from '@element-plus/icons-vue'
 import request from '../utils/request'
 import { useDialogSize } from '../utils/dialogSize'
-import RichContent from '../components/RichContent.vue'
+import MdView from '../components/MdView.vue'
+import MdField from '../components/MdField.vue'
+import MaterialAttachments from '../components/MaterialAttachments.vue'
 
 const notes = ref([])
 const allTags = ref([])
@@ -284,17 +280,6 @@ async function removeNoteFromViewer() {
     viewerVisible.value = false
     await load()
   } catch (e) { /* 取消或失败 */ }
-}
-
-async function downloadFromViewer(idx, a) {
-  try {
-    const res = await request.get(`/api/learning/attachments/${viewer.id}/${idx}/download`, { responseType: 'blob' })
-    const link = document.createElement('a')
-    link.href = URL.createObjectURL(res.data)
-    link.download = a.filename || 'download'
-    link.click()
-    URL.revokeObjectURL(link.href)
-  } catch (e) { /* ignore */ }
 }
 
 // ── 编辑器 ──
@@ -419,10 +404,13 @@ async function onAttachChange(ev) {
     const fd = new FormData()
     fd.append('file', file)
     fd.append('note_id', String(editor.id))
-    await request.post('/api/learning/attachments', fd)
+    await request.post('/api/learning/attachments', fd, { timeout: 15 * 60 * 1000 })
     editorAttachments.value.push({ filename: file.name, size: file.size })
     ElMessage.success(`附件「${file.name}」已上传`)
     await load()
+    // 重载后拿服务端归一化的附件（含名称/大小/类型），保证阅读视图能预览 PDF/图片/视频
+    const fresh = notes.value.find(x => x.id === editor.id)
+    if (fresh) editorAttachments.value = [...(fresh.attachments || [])]
   } catch (e) { /* 拦截器已提示 */ }
   attaching.value = false
 }
@@ -432,7 +420,7 @@ async function downloadAttachment(idx, a) {
     const res = await request.get(`/api/learning/attachments/${editor.id}/${idx}/download`, { responseType: 'blob' })
     const link = document.createElement('a')
     link.href = URL.createObjectURL(res.data)
-    link.download = a.filename || 'download'
+    link.download = a.name || a.filename || 'download'
     link.click()
     URL.revokeObjectURL(link.href)
   } catch (e) { /* ignore */ }

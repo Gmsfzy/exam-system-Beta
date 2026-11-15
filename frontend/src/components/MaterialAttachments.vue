@@ -18,15 +18,16 @@
           <el-button v-if="a.stored_name" size="small" text @click="download(a)">下载</el-button>
           <el-button size="small" text @click="copyLink(a)">复制链接</el-button>
         </div>
-        <div v-if="opened[i]" class="att-body">
-          <!-- 图片/视频/音频：直接给媒体元素，路径由后端拼好（UUID 名，与笔记插图同一口径） -->
-          <img v-if="a.type === 'image'" :src="a.inline_url || a.url" :alt="a.name" class="att-media" />
-          <video v-else-if="a.type === 'video'" :src="a.inline_url || a.url" controls
+        <div v-if="opened[i]" v-loading="loading[i]" class="att-body">
+          <!-- 图片/视频/PDF：先带 token 取 blob 再给媒体元素。
+               直接用接口地址当 src 发不出 Authorization 头，会被 401 挡掉（附件属私有资源） -->
+          <img v-if="a.type === 'image' && blobs[i]" :src="blobs[i]" :alt="a.name" class="att-media" />
+          <video v-else-if="a.type === 'video' && blobs[i]" :src="blobs[i]" controls
                  class="att-media att-video"></video>
           <!-- PDF：浏览器原生渲染，不必引 pdfjs（本站已有 pdfjs 但那是作业批注场景） -->
-          <iframe v-else-if="a.type === 'pdf'" :src="a.inline_url || a.url" class="att-frame"></iframe>
+          <iframe v-else-if="a.type === 'pdf' && blobs[i]" :src="blobs[i]" class="att-frame"></iframe>
           <!-- 纯文本/Markdown/mermaid 源：拉回来交给 MdView，公式与导图一并渲染 -->
-          <div v-else-if="a.type === 'text'" v-loading="loading[i]" class="att-text">
+          <div v-else-if="a.type === 'text'" class="att-text">
             <MdView :content="texts[i] || ''" />
           </div>
         </div>
@@ -38,7 +39,7 @@
 <script setup>
 // 资料附件预览（v7.18 需求 h）：文档/表格/PPT/PDF/链接/视频/图片/思维导图
 // 类型判定与 url 拼装都在后端 _attachments_out 里做好，这里只按 type 选渲染器。
-import { reactive } from 'vue'
+import { reactive, onBeforeUnmount } from 'vue'
 import { ElMessage } from 'element-plus'
 import request from '../utils/request'
 import MdView from './MdView.vue'
@@ -55,6 +56,26 @@ const ICONS = {
 const opened = reactive({})
 const texts = reactive({})
 const loading = reactive({})
+const blobs = reactive({})
+
+async function ensureBlob(a, i) {
+  if (blobs[i]) return
+  const url = a.inline_url || a.url
+  if (!url) return
+  loading[i] = true
+  try {
+    const res = await request.get(url, { responseType: 'blob' })
+    blobs[i] = URL.createObjectURL(res.data)
+  } catch (e) {
+    ElMessage.error('附件预览加载失败，可点“下载”保存后查看')
+  } finally {
+    loading[i] = false
+  }
+}
+
+onBeforeUnmount(() => {
+  Object.values(blobs).forEach(u => { try { URL.revokeObjectURL(u) } catch (e) { /* ignore */ } })
+})
 
 function fmtSize(n) {
   if (!n) return ''
@@ -69,7 +90,9 @@ function openable(a) {
 
 async function toggle(a, i) {
   opened[i] = !opened[i]
-  if (!opened[i] || texts[i] !== undefined || a.type !== 'text') return
+  if (!opened[i]) return
+  if (['image', 'video', 'pdf'].includes(a.type)) { ensureBlob(a, i); return }
+  if (texts[i] !== undefined || a.type !== 'text') return
   // 文本类走受控下载接口取原文：私有资料的附件不该靠猜 UUID 直接拿 /uploads/
   loading[i] = true
   try {
