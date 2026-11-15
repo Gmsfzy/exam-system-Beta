@@ -109,48 +109,94 @@
       </template>
     </el-dialog>
 
-    <!-- ══ 编辑抽屉：固定三段，空段可以留空 ══ -->
-    <el-drawer v-model="editorVisible" :title="editor.id ? '编辑心得' : '写心得'" size="48%">
-      <div class="editor-body">
-        <el-input v-model="editor.title" placeholder="标题（留空会按周期自动起名）" maxlength="200" show-word-limit />
-        <div class="editor-row">
-          <el-select v-model="editor.period_type" style="width: 120px">
-            <el-option v-for="(label, k) in PERIOD_LABELS" :key="k" :label="label" :value="k" />
-          </el-select>
-          <el-date-picker v-model="editor.range" type="daterange" value-format="YYYY-MM-DD"
-                          start-placeholder="起始日" end-placeholder="结束日" style="width: 260px" />
-          <el-input v-model="editor.period_note" placeholder="阶段名（可留空）" maxlength="80" style="flex: 1" />
-        </div>
-        <el-select v-model="editor.tags" multiple filterable allow-create default-first-option
-                   placeholder="标签（回车创建，最多 8 个）" style="width: 100%">
-          <el-option v-for="t in allTags" :key="t" :label="t" :value="t" />
-        </el-select>
-        <p class="period-hint">
-          {{ PERIOD_HINT[editor.period_type] || '按日/周/月不选日期时，自动取到最近的整周期' }}
-        </p>
-        <div v-for="(label, key) in SECTION_LABELS" :key="key" class="sec-block">
-          <div class="sec-block-head">
-            <span class="sec-block-title">{{ label }}</span>
-            <span class="sec-block-hint">{{ SECTION_HINT[key] }}</span>
+    <!-- ══ 编辑弹窗（v7.22）：居中、可拖拽改宽高、可放大还原，尺寸记在本机 ══ -->
+    <el-dialog v-model="editorVisible" :width="editorSize.w + 'px'" :top="editorSize.top + 'px'"
+               :fullscreen="editorSize.full" :close-on-click-modal="false" :show-close="false"
+               draggable class="editor-dialog">
+      <template #header="{ close }">
+        <div class="ed-head">
+          <div class="ed-head-main">
+            <span class="ed-title">{{ editor.id ? '编辑心得' : '写心得' }}</span>
+            <span class="ed-sub">按周期回看，三段各写一点就好，留空也能存</span>
           </div>
-          <el-input v-model="editor[key]" type="textarea" :rows="6" maxlength="4000" show-word-limit
-                    :placeholder="SECTION_HINT[key]" />
+          <div class="ed-tools">
+            <el-button size="small" text @click="resetEditorSize">复位</el-button>
+            <el-button size="small" text @click="toggleEditorFull">
+              {{ editorSize.full ? '还原' : '放大' }}
+            </el-button>
+            <el-button size="small" text @click="close">✕</el-button>
+          </div>
         </div>
-        <p class="tip">三段都允许留空，但至少写一段才能保存。</p>
-        <div v-if="pendingDraft" class="draft-ask">
-          <span class="draft-ask-text">
-            本机还有一份 {{ fmtTime(new Date(pendingDraft.at).toISOString()) }} 没保存的内容（{{ pendingWords }} 字）
-          </span>
-          <el-button size="small" type="primary" plain @click="usePendingDraft">接着写</el-button>
-          <el-button size="small" text @click="dropPendingDraft">丢掉</el-button>
-        </div>
-        <p v-if="draftState" class="tip draft-state">{{ draftState }}</p>
-      </div>
-      <template #footer>
-        <el-button @click="editorVisible = false">取消</el-button>
-        <el-button type="primary" :loading="saving" @click="save">保存</el-button>
       </template>
-    </el-drawer>
+
+      <div class="editor-shell">
+        <div class="editor-body" :style="editorBodyStyle">
+          <el-form :model="editor" label-position="top" class="editor-form">
+            <el-form-item label="标题">
+              <el-input v-model="editor.title" placeholder="留空会按周期自动起名" maxlength="200" show-word-limit />
+            </el-form-item>
+            <div class="period-grid">
+              <el-form-item label="周期类型">
+                <el-select v-model="editor.period_type" style="width: 100%">
+                  <el-option v-for="(label, k) in PERIOD_LABELS" :key="k" :label="label" :value="k" />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="日期范围">
+                <el-date-picker v-model="editor.range" type="daterange" value-format="YYYY-MM-DD"
+                                start-placeholder="起始日" end-placeholder="结束日" style="width: 100%" />
+              </el-form-item>
+              <el-form-item label="阶段名">
+                <el-input v-model="editor.period_note" placeholder="可留空" maxlength="80" />
+              </el-form-item>
+            </div>
+            <p class="period-hint">
+              {{ PERIOD_HINT[editor.period_type] || '按日/周/月不选日期时，自动取到最近的整周期' }}
+            </p>
+            <el-form-item label="标签">
+              <el-select v-model="editor.tags" multiple filterable allow-create default-first-option
+                         placeholder="输入后回车创建，最多 8 个" style="width: 100%">
+                <el-option v-for="t in allTags" :key="t" :label="t" :value="t" />
+              </el-select>
+            </el-form-item>
+          </el-form>
+
+          <div class="section-list">
+            <div v-for="(label, key, i) in SECTION_LABELS" :key="key" class="sec-block">
+              <div class="sec-block-head">
+                <span class="sec-step">{{ String(i + 1).padStart(2, '0') }}</span>
+                <span class="sec-block-title">{{ label }}</span>
+                <span class="sec-block-hint">{{ SECTION_HINT[key] }}</span>
+              </div>
+              <el-input v-model="editor[key]" type="textarea" :autosize="{ minRows: 4, maxRows: 12 }"
+                        maxlength="4000" show-word-limit />
+            </div>
+          </div>
+
+          <p class="tip">三段都允许留空，但至少写一段才能保存。</p>
+          <div v-if="pendingDraft" class="draft-ask">
+            <span class="draft-ask-text">
+              本机还有一份 {{ fmtTime(new Date(pendingDraft.at).toISOString()) }} 没保存的内容（{{ pendingWords }} 字）
+            </span>
+            <el-button size="small" type="primary" plain @click="usePendingDraft">接着写</el-button>
+            <el-button size="small" text @click="dropPendingDraft">丢掉</el-button>
+          </div>
+          <p v-if="draftState" class="tip draft-state">{{ draftState }}</p>
+        </div>
+        <span v-if="!editorSize.full" class="dlg-grip" title="拖动调节窗口大小"
+              @mousedown.stop="startGrip"></span>
+      </div>
+
+      <template #footer>
+        <div class="editor-footer">
+          <span class="foot-words">已写 {{ editorWords }} 字<span class="foot-tip"> ·
+            {{ editorSize.full ? '放大模式，点“还原”可继续拖拽缩放' : '拖动右下角可调窗口大小' }}</span></span>
+          <div>
+            <el-button @click="editorVisible = false">取消</el-button>
+            <el-button type="primary" :loading="saving" @click="save">保存心得</el-button>
+          </div>
+        </div>
+      </template>
+    </el-dialog>
 
     <!-- ══ AI 起稿：只喂聚合数据，草稿回来由本人改 ══ -->
     <el-dialog v-model="draftVisible" title="AI 依据学习数据起稿" width="560px">
@@ -182,6 +228,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Search, Plus, MagicStick } from '@element-plus/icons-vue'
 import request from '../utils/request'
 import { errTip } from '../utils/errs'
+import { useDialogSize } from '../utils/dialogSize'
 import MdView from '../components/MdView.vue'
 import { useAuthStore } from '../stores/auth'
 
@@ -330,6 +377,17 @@ const editor = reactive({
   id: null, title: '', period_type: 'week', range: null, period_note: '',
   tags: [], gains: '', summary: '', reflection: '', source: 'manual',
 })
+
+// 底部实时字数：三段合并计数（不计空白），让「写了多少」不用自己数
+const editorWords = computed(() =>
+  [editor.gains, editor.summary, editor.reflection]
+    .join('').replace(/\s/g, '').length)
+
+// 弹窗尺寸偏好：居中弹窗 + 右下角拖拽改宽高 + 放大/还原，记在本机
+const {
+  size: editorSize, bodyStyle: editorBodyStyle,
+  startGrip, toggleFull: toggleEditorFull, reset: resetEditorSize,
+} = useDialogSize('insight_editor_size', { w: 900, h: 600 })
 
 // ── 本机暂存（v7.20）──
 // AI 起的稿子当时没点保存就找不回来了：服务端只在校验通过后才写 study_insight，
@@ -585,14 +643,34 @@ async function runDraft() {
 .switch-box { display: inline-flex; align-items: center; gap: 8px; margin-right: 10px; }
 .switch-label { font-size: 12px; color: var(--text-muted); }
 
-.editor-body { display: flex; flex-direction: column; gap: 12px; }
-.editor-row { display: flex; gap: 10px; flex-wrap: wrap; }
-.period-hint { font-size: 12px; color: var(--text-muted); margin: -4px 0 0; }
-.sec-block { border-top: 1px dashed var(--border-color); padding-top: 10px; }
-.sec-block-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 6px; }
-.sec-block-title { font-size: 13px; font-weight: 700; color: #7c3aed; }
-.sec-block-hint { font-size: 11px; color: var(--text-muted); }
-.tip { font-size: 12px; color: var(--text-muted); }
+/* ── 编辑弹窗（v7.22 居中可缩放，通用皮肤见 style.css .editor-dialog）── */
+.foot-tip { color: var(--text-muted); }
+.period-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0 12px;
+}
+.period-hint { font-size: 12px; color: var(--text-muted); margin: -8px 0 8px; line-height: 1.6; }
+.section-list { display: flex; flex-direction: column; gap: 14px; }
+.sec-block {
+  border: 1px solid var(--border-color); border-radius: 10px; padding: 12px 14px;
+  background: var(--bg-card); transition: border-color .2s, box-shadow .2s;
+}
+.sec-block:focus-within {
+  border-color: rgba(139, 92, 246, .5);
+  box-shadow: 0 0 0 3px rgba(139, 92, 246, .1);
+}
+.sec-block-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+.sec-step {
+  width: 20px; height: 20px; border-radius: 6px; flex-shrink: 0;
+  background: rgba(139, 92, 246, .12); color: #7c3aed;
+  font-size: 11px; font-weight: 700; display: flex;
+  align-items: center; justify-content: center;
+}
+.sec-block-title { font-size: 13px; font-weight: 700; color: #7c3aed; flex-shrink: 0; }
+.sec-block-hint { font-size: 11px; color: var(--text-muted); line-height: 1.5; }
+.tip { font-size: 12px; color: var(--text-muted); margin: 0; }
+.editor-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.foot-words { font-size: 12px; color: var(--text-muted); }
 
 .draft-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
 .draft-label { font-size: 13px; color: var(--text-primary); }

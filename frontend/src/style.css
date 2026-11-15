@@ -1623,3 +1623,36 @@ html.dark .el-input-number .el-input__inner {
   color: #f1f5f9 !important;
   background: transparent !important;
 }
+/* ── 编辑器弹窗（v7.22）：居中、可拖拽缩放、可放大还原 ─────────── */
+.editor-dialog {
+  border-radius: 16px; overflow: hidden; max-width: 96vw;
+  box-shadow: 0 24px 60px -20px rgba(15, 23, 42, 0.35);
+}
+.editor-dialog .el-dialog__header {
+  margin-right: 0; padding: 16px 20px 12px;
+  border-bottom: 1px solid var(--border-color);
+  background: linear-gradient(180deg, rgba(139, 92, 246, 0.07), transparent);
+}
+.editor-dialog .el-dialog__body { padding: 14px 20px 0; }
+.editor-dialog .el-dialog__footer {
+  padding: 10px 20px 14px; border-top: 1px solid var(--border-color);
+}
+.editor-shell { position: relative; }
+.ed-head { display: flex; align-items: flex-start; gap: 12px; }
+.ed-head-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.ed-title { font-size: 17px; font-weight: 700; color: var(--text-primary); }
+.ed-sub { font-size: 12px; color: var(--text-muted); }
+.ed-tools { display: flex; align-items: center; gap: 2px; flex-shrink: 0; }
+.dlg-grip {
+  position: absolute; right: 2px; bottom: 2px; width: 16px; height: 16px;
+  cursor: nwse-resize; opacity: 0.5; border-right: 3px solid #8b5cf6;
+  border-bottom: 3px solid #8b5cf6; border-radius: 0 0 4px 0;
+}
+.dlg-grip:hover { opacity: 1; }
+.editor-body { display: flex; flex-direction: column; gap: 12px; }
+.editor-form .el-form-item__label {
+  padding-bottom: 4px; font-size: 13px; font-weight: 600; line-height: 1.4;
+}
+.editor-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.foot-words { font-size: 12px; color: var(--text-muted); }
+@media (max-width: 768px) { .editor-dialog { width: 96vw !important; } }

@@ -212,6 +212,14 @@
         </template>
       </el-dialog>
 
+      <!-- 富文本节点阅读弹窗（规划仓导入的纯文字学习说明） -->
+      <el-dialog v-model="textDlg" :title="textNode?.title || '学习内容'" width="560px">
+        <p class="text-node-content">{{ textNode?.content }}</p>
+        <template #footer>
+          <el-button type="primary" @click="textDlg = false">知道了</el-button>
+        </template>
+      </el-dialog>
+
       <!-- 结业测评弹窗 -->
       <QuizDialog v-model="finalDlg" :payload="{ path_id: pathId }" title="路径结业测评" @finished="onFinalFinished" />
     </template>
@@ -416,7 +424,26 @@ const deleteNode = async (n) => {
   } catch (e) { /* 拦截器已提示 */ }
 }
 
-const goNode = (n) => router.push(`/learning/node/${n.id}?path=${pathId}`)
+// 非结构化节点（v7.21 规划仓生成）：外链直接开新标签、附件直接下载、富文本弹窗阅读
+const textDlg = ref(false)
+const textNode = ref(null)
+
+const goNode = (n) => {
+  if (n.node_type === 'link' && n.url) {
+    window.open(n.url, '_blank', 'noopener')
+    return
+  }
+  if (n.node_type === 'file' && n.file_url) {
+    window.open(n.file_url, '_blank', 'noopener')
+    return
+  }
+  if (n.node_type === 'text' && n.content) {
+    textNode.value = n
+    textDlg.value = true
+    return
+  }
+  router.push(`/learning/node/${n.id}?path=${pathId}`)
+}
 
 // ── 知识图谱导航（首次展开时懒加载） ──
 const showGraph = ref(false)
@@ -736,5 +763,12 @@ onMounted(loadPath)
   text-align: center;
   color: var(--text-muted);
   padding: 40px 0;
+}
+
+.text-node-content {
+  margin: 0;
+  white-space: pre-wrap;
+  line-height: 1.8;
+  color: var(--text-primary);
 }
 </style>

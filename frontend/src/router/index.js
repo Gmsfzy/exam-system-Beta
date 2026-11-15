@@ -89,6 +89,8 @@ const routes = [
       // v7.19 证书广场：全站公开证书卡片墙（他人公开的那部分走脱敏视图，不展示编号与佐证）
       { path: 'learning/cert-square', name: 'CertificateSquare', component: () => import('../views/CertificateSquare.vue'), meta: { module: 'learning' } },
       { path: 'learning/paths', name: 'MajorPaths', component: () => import('../views/MajorPathsView.vue'), meta: { module: 'learning' } },
+      // v7.21 学习规划仓：专业课程库 + 模板库，一键生成个人学习路径
+      { path: 'learning/repository', name: 'PlanRepository', component: () => import('../views/PlanRepository.vue'), meta: { module: 'learning' } },
       { path: 'learning/paths/:id', name: 'PathDetail', component: () => import('../views/PathDetailView.vue'), meta: { module: 'learning' } },
       { path: 'learning/node/:nodeId', name: 'NodeLearn', component: () => import('../views/NodeLearnView.vue'), meta: { module: 'learning' } },
       { path: 'learning/graph', name: 'KnowledgeGraph', component: () => import('../views/KnowledgeGraphView.vue'), meta: { module: 'learning' } },

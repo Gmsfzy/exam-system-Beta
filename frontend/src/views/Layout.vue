@@ -564,6 +564,7 @@ const learningGroups = [
   {
     key: 'plan', label: '学习规划', icon: iconMap.Compass,
     children: [
+      { path: '/learning/repository', label: '学习规划仓' },
       { path: '/learning/paths', label: '专业路径' },
       { path: '/learning/dashboard', label: '学习规划' },
       { path: '/learning/plan', label: '学习计划' },

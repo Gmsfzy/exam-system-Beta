@@ -569,21 +569,36 @@ class LearningPath(db.Model):
 
 
 class LearningPathNode(db.Model):
-    """路径节点：路径中的一个学习步骤，挂知识点或章节（二选一）"""
+    """路径节点：路径中的一个学习步骤。
+
+    学习对象六选一（至少挂一种，v7.21 放宽）：
+    知识点 / 章节 / 课程 / 外链 / 富文本 / 附件。外链与富文本是「非结构化素材」的
+    落点——规划仓模板里既有结构化条目，也有老师随手放进来的资料链接。
+    """
     id = db.Column(db.Integer, primary_key=True)
     path_id = db.Column(db.Integer, db.ForeignKey('learning_path.id'), nullable=False)
-    node_type = db.Column(db.String(20), nullable=False, default='knowledge_point')  # knowledge_point/chapter
+    node_type = db.Column(db.String(20), nullable=False, default='knowledge_point')  # knowledge_point/chapter/course/link/text/file
     knowledge_point_id = db.Column(db.Integer, db.ForeignKey('knowledge_point.id'))
     chapter_id = db.Column(db.Integer, db.ForeignKey('chapter.id'))
+    course_id = db.Column(db.Integer, db.ForeignKey('course.id'))          # v7.21 整门课程节点
     order_num = db.Column(db.Integer, nullable=False, default=0)
     role = db.Column(db.String(20), nullable=False, default='core')  # core/elective/review
     estimated_minutes = db.Column(db.Integer, default=30)
     notebook_id = db.Column(db.Integer, db.ForeignKey('notebook.id'), nullable=True)  # 配套代码笔记本
+    # ── v7.21 非结构化素材 ──────────────────────────────
+    title = db.Column(db.String(200))        # 外链/富文本/附件的展示标题
+    url = db.Column(db.String(500))          # 外链地址
+    content = db.Column(db.Text)             # 富文本 / 学习说明
+    file_name = db.Column(db.String(255))    # 附件落盘文件名（uploads/ 下）
+    file_size = db.Column(db.Integer)        # 附件字节数
 
     __table_args__ = (
-        # 知识点与章节至少挂一个
-        db.CheckConstraint('(knowledge_point_id IS NOT NULL) OR (chapter_id IS NOT NULL)',
-                           name='_node_ref_check'),
+        # 六类学习对象至少挂一种（v7.21 由「知识点或章节」放宽）
+        db.CheckConstraint(
+            '(knowledge_point_id IS NOT NULL) OR (chapter_id IS NOT NULL) '
+            'OR (course_id IS NOT NULL) OR (url IS NOT NULL) '
+            'OR (content IS NOT NULL) OR (file_name IS NOT NULL)',
+            name='_node_ref_check'),
         # 同一路径内顺序号唯一（重排序时先置负数临时值再落最终值）
         db.UniqueConstraint('path_id', 'order_num', name='_path_node_order_uc'),
         db.Index('ix_path_node_path', 'path_id'),
@@ -591,7 +606,75 @@ class LearningPathNode(db.Model):
 
     knowledge_point = db.relationship('KnowledgePoint')
     chapter = db.relationship('Chapter')
+    course = db.relationship('Course')
     notebook = db.relationship('Notebook', foreign_keys=[notebook_id])
+
+
+class PlanTemplate(db.Model):
+    """学习规划仓模板（v7.21）：可复用的学习路线模板，任何登录用户可建。
+
+    template_type：structured 结构化（条目挂课程/章节/知识点）
+                   unstructured 非结构化（条目为外链/富文本/附件）
+    visibility：private 仅自己可见 / public 公开到模板市场
+    """
+    __tablename__ = 'plan_template'
+    id = db.Column(db.Integer, primary_key=True)
+    title = db.Column(db.String(100), nullable=False)
+    description = db.Column(db.Text)
+    major_id = db.Column(db.Integer, db.ForeignKey('major.id'))          # 可空：跨专业通用模板
+    template_type = db.Column(db.String(20), nullable=False, default='structured')
+    visibility = db.Column(db.String(10), nullable=False, default='private')
+    difficulty = db.Column(db.String(20), default='medium')
+    target_hours = db.Column(db.Integer)
+    use_count = db.Column(db.Integer, nullable=False, default=0)
+    owner_id = db.Column(db.Integer, db.ForeignKey('user.id'), index=True)
+    created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
+    updated_at = db.Column(UTCDateTime, nullable=False, default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (
+        db.Index('ix_plan_tpl_visibility', 'visibility'),
+        db.Index('ix_plan_tpl_major', 'major_id'),
+    )
+
+    owner = db.relationship('User')
+    major = db.relationship('Major')
+    items = db.relationship('PlanTemplateItem', backref='template', lazy=True,
+                            cascade='all, delete-orphan',
+                            order_by='PlanTemplateItem.order_num')
+
+
+class PlanTemplateItem(db.Model):
+    """模板条目：模板中的一个有序学习步骤，指向某类学习对象。"""
+    __tablename__ = 'plan_template_item'
+    id = db.Column(db.Integer, primary_key=True)
+    template_id = db.Column(db.Integer, db.ForeignKey('plan_template.id'), nullable=False)
+    item_type = db.Column(db.String(20), nullable=False, default='course')  # course/chapter/knowledge_point/link/text/file
+    title = db.Column(db.String(200))
+    course_id = db.Column(db.Integer, db.ForeignKey('course.id'))
+    chapter_id = db.Column(db.Integer, db.ForeignKey('chapter.id'))
+    knowledge_point_id = db.Column(db.Integer, db.ForeignKey('knowledge_point.id'))
+    url = db.Column(db.String(500))
+    content = db.Column(db.Text)
+    file_name = db.Column(db.String(255))
+    file_size = db.Column(db.Integer)
+    required = db.Column(db.Boolean, nullable=False, default=True)
+    estimated_minutes = db.Column(db.Integer, default=60)
+    order_num = db.Column(db.Integer, nullable=False, default=0)
+
+    __table_args__ = (
+        db.UniqueConstraint('template_id', 'order_num', name='_plan_tpl_item_order_uc'),
+        db.Index('ix_plan_tpl_item_tpl', 'template_id'),
+        # 条目必须挂一种学习对象
+        db.CheckConstraint(
+            '(course_id IS NOT NULL) OR (chapter_id IS NOT NULL) '
+            'OR (knowledge_point_id IS NOT NULL) OR (url IS NOT NULL) '
+            'OR (content IS NOT NULL) OR (file_name IS NOT NULL)',
+            name='_plan_tpl_item_ref_check'),
+    )
+
+    course = db.relationship('Course')
+    chapter = db.relationship('Chapter')
+    knowledge_point = db.relationship('KnowledgePoint')
 
 
 class UserPathEnrollment(db.Model):

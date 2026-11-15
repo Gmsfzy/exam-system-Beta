@@ -26,6 +26,7 @@ from database.models import (
     Exam, ExamSession, ExamStudent, ExamStatusEnum, Answer, Result,
     KnowledgePoint, KnowledgeEdge,
     LearningPath, LearningPathNode,
+    PlanTemplate, PlanTemplateItem,
     UserPathEnrollment, UserNodeProgress, LearningResource,
     KnowledgeMastery, UserKpNote, QuizAttempt, QuizAttemptAnswer,
     ReviewItem, StudyCheckin, PathCertificate, DailyTask,
@@ -1530,19 +1531,49 @@ def _kp_to_dict(kp, with_chapter=True):
     return d
 
 
+def _node_display_title(n):
+    """节点展示标题：显式 title 优先（v7.21 非结构化节点），否则回落主数据名"""
+    if n.title:
+        return n.title
+    if n.knowledge_point:
+        return n.knowledge_point.name
+    if n.chapter:
+        return n.chapter.name
+    if n.course:
+        return n.course.name
+    if n.url:
+        return n.url
+    if n.file_name:
+        return '附件资料'
+    return '未命名节点'
+
+
+def _node_has_ref(node):
+    """节点是否挂了学习对象（与 DB CHECK 同口径：六类至少一种）"""
+    return bool(node.knowledge_point_id or node.chapter_id or node.course_id
+                or node.url or node.content or node.file_name)
+
+
 def _node_to_dict(n, progress=None):
     kp = n.knowledge_point
     chapter = n.chapter
     d = {
         'id': n.id, 'path_id': n.path_id, 'node_type': n.node_type,
         'knowledge_point_id': n.knowledge_point_id, 'chapter_id': n.chapter_id,
-        'title': kp.name if kp else (chapter.name if chapter else '未命名节点'),
+        'course_id': n.course_id,
+        'title': _node_display_title(n),
         'description': kp.description if kp else (chapter.description if chapter else None),
         'difficulty': kp.difficulty if kp else None,
         'order_num': n.order_num, 'role': n.role,
         'estimated_minutes': n.estimated_minutes,
         'notebook_id': n.notebook_id,
         'notebook_title': n.notebook.title if n.notebook else None,
+        # v7.21 非结构化素材（外链/富文本/附件）
+        'url': n.url,
+        'content': n.content,
+        'file_name': n.file_name,
+        'file_size': n.file_size,
+        'file_url': f'/uploads/{n.file_name}' if n.file_name else None,
         'progress_status': progress.status if progress else None,
     }
     return d
@@ -2265,6 +2296,11 @@ def api_node_create(path_id):
     node_type = data.get('node_type', 'knowledge_point')
     kp_id = data.get('knowledge_point_id')
     chapter_id = data.get('chapter_id')
+    course_id = data.get('course_id')
+    title = (data.get('title') or '').strip()[:200] or None
+    url = (data.get('url') or '').strip()[:500] or None
+    content = (data.get('content') or '').strip() or None
+    file_name = (data.get('file_name') or '').strip()[:255] or None
 
     if node_type == 'knowledge_point':
         if not kp_id or not db.session.get(KnowledgePoint, kp_id):
@@ -2274,6 +2310,18 @@ def api_node_create(path_id):
         if not chapter_id or not db.session.get(Chapter, chapter_id):
             return jsonify({'message': '章节不存在'}), 404
         kp_id = None
+    elif node_type == 'course':
+        if not course_id or not db.session.get(Course, course_id):
+            return jsonify({'message': '课程不存在'}), 404
+    elif node_type == 'link':
+        if not url:
+            return jsonify({'message': '外链节点需要填写链接地址'}), 400
+    elif node_type == 'text':
+        if not content:
+            return jsonify({'message': '富文本节点需要填写内容'}), 400
+    elif node_type == 'file':
+        if not file_name:
+            return jsonify({'message': '附件节点需要先上传文件'}), 400
     else:
         return jsonify({'message': '无效的节点类型'}), 400
 
@@ -2285,7 +2333,10 @@ def api_node_create(path_id):
         .filter_by(path_id=path_id).scalar() or 0
     node = LearningPathNode(
         path_id=path_id, node_type=node_type,
-        knowledge_point_id=kp_id, chapter_id=chapter_id,
+        knowledge_point_id=kp_id, chapter_id=chapter_id, course_id=course_id,
+        title=title, url=url, content=content,
+        file_name=file_name,
+        file_size=int(data.get('file_size') or 0) or None,
         order_num=max_order + 1,
         role=data.get('role', 'core'),
         estimated_minutes=int(data.get('estimated_minutes', 30) or 30),
@@ -2317,6 +2368,17 @@ def api_node_update(path_id, node_id):
     for k in ('role', 'estimated_minutes', 'node_type'):
         if k in data:
             setattr(node, k, data[k])
+    for k, limit in (('title', 200), ('url', 500), ('file_name', 255)):
+        if k in data:
+            setattr(node, k, (str(data.get(k) or '').strip()[:limit]) or None)
+    if 'content' in data:
+        node.content = (str(data.get('content') or '').strip()) or None
+    if 'file_size' in data:
+        node.file_size = int(data.get('file_size') or 0) or None
+    if 'course_id' in data:
+        if data['course_id'] and not db.session.get(Course, data['course_id']):
+            return jsonify({'message': '课程不存在'}), 404
+        node.course_id = data['course_id']
     if 'knowledge_point_id' in data:
         if data['knowledge_point_id'] and not db.session.get(KnowledgePoint, data['knowledge_point_id']):
             return jsonify({'message': '知识点不存在'}), 404
@@ -2329,8 +2391,8 @@ def api_node_update(path_id, node_id):
         if data['notebook_id'] and not db.session.get(Notebook, data['notebook_id']):
             return jsonify({'message': '笔记本不存在'}), 404
         node.notebook_id = data['notebook_id']
-    if not node.knowledge_point_id and not node.chapter_id:
-        return jsonify({'message': '节点必须挂知识点或章节'}), 400
+    if not _node_has_ref(node):
+        return jsonify({'message': '节点必须挂课程/章节/知识点/外链/富文本/附件之一'}), 400
 
     # 位置调整：先置负数临时值再落最终值（规避顺序号唯一约束的换位冲突）
     if 'order_num' in data:
@@ -2376,6 +2438,521 @@ def api_node_delete(path_id, node_id):
     _sync_enrollment_totals(path_id)
     db.session.commit()
     return jsonify({'message': '节点已删除'})
+
+
+# ── 学习规划仓（v7.21）：专业课程库 + 模板库 + 一键生成个人路径 ─────────
+
+_TPL_ITEM_TYPES = ('course', 'chapter', 'knowledge_point', 'link', 'text', 'file')
+
+
+def _tpl_item_title(it):
+    """模板条目展示标题：显式 title 优先，否则按挂载对象取主数据名"""
+    if it.title:
+        return it.title
+    if it.course:
+        return it.course.name
+    if it.chapter:
+        return it.chapter.name
+    if it.knowledge_point:
+        return it.knowledge_point.name
+    if it.url:
+        return it.url
+    if it.file_name:
+        return '附件资料'
+    return '未命名条目'
+
+
+def _tpl_item_to_dict(it):
+    return {
+        'id': it.id,
+        'template_id': it.template_id,
+        'item_type': it.item_type,
+        'title': _tpl_item_title(it),
+        'raw_title': it.title,
+        'course_id': it.course_id,
+        'chapter_id': it.chapter_id,
+        'knowledge_point_id': it.knowledge_point_id,
+        'course_name': it.course.name if it.course else None,
+        'chapter_name': it.chapter.name if it.chapter else None,
+        'knowledge_point_name': it.knowledge_point.name if it.knowledge_point else None,
+        'url': it.url,
+        'content': it.content,
+        'file_name': it.file_name,
+        'file_size': it.file_size,
+        'file_url': f'/uploads/{it.file_name}' if it.file_name else None,
+        'required': bool(it.required),
+        'estimated_minutes': it.estimated_minutes,
+        'order_num': it.order_num,
+    }
+
+
+def _tpl_to_dict(t, current_user_id=None, with_items=False):
+    items = t.items
+    d = {
+        'id': t.id,
+        'title': t.title,
+        'description': t.description,
+        'major_id': t.major_id,
+        'major_name': t.major.name if t.major else None,
+        'template_type': t.template_type,
+        'visibility': t.visibility,
+        'difficulty': t.difficulty,
+        'target_hours': t.target_hours,
+        'use_count': t.use_count or 0,
+        'owner_id': t.owner_id,
+        'owner_name': t.owner.username if t.owner else None,
+        'is_mine': bool(current_user_id and t.owner_id == current_user_id),
+        'items_count': len(items),
+        'total_minutes': sum(i.estimated_minutes or 0 for i in items),
+        'created_at': iso_local(t.created_at),
+        'updated_at': iso_local(t.updated_at) if t.updated_at else None,
+    }
+    if with_items:
+        d['items'] = [_tpl_item_to_dict(i) for i in items]
+    return d
+
+
+def _normalize_tpl_item(data, order_num):
+    """校验并规整一条模板条目；非法抛 ValueError（消息可直接回前端）"""
+    item_type = data.get('item_type') or 'course'
+    if item_type not in _TPL_ITEM_TYPES:
+        raise ValueError('无效的条目类型')
+    title = (str(data.get('title') or '').strip())[:200] or None
+    url = (str(data.get('url') or '').strip())[:500] or None
+    content = (str(data.get('content') or '').strip()) or None
+    file_name = (str(data.get('file_name') or '').strip())[:255] or None
+    course_id = data.get('course_id') or None
+    chapter_id = data.get('chapter_id') or None
+    kp_id = data.get('knowledge_point_id') or None
+
+    if item_type == 'course':
+        if not course_id or not db.session.get(Course, course_id):
+            raise ValueError('课程条目指向的课程不存在')
+    elif item_type == 'chapter':
+        if not chapter_id or not db.session.get(Chapter, chapter_id):
+            raise ValueError('章节条目指向的章节不存在')
+    elif item_type == 'knowledge_point':
+        if not kp_id or not db.session.get(KnowledgePoint, kp_id):
+            raise ValueError('知识点条目指向的知识点不存在')
+    elif item_type == 'link':
+        if not url:
+            raise ValueError('外链条目需要填写链接地址')
+    elif item_type == 'text':
+        if not content:
+            raise ValueError('富文本条目需要填写内容')
+    elif item_type == 'file':
+        if not file_name:
+            raise ValueError('附件条目需要先上传文件')
+
+    return PlanTemplateItem(
+        item_type=item_type, title=title,
+        course_id=course_id if item_type == 'course' else None,
+        chapter_id=chapter_id if item_type == 'chapter' else None,
+        knowledge_point_id=kp_id if item_type == 'knowledge_point' else None,
+        url=url if item_type == 'link' else None,
+        content=content if item_type == 'text' else None,
+        file_name=file_name if item_type == 'file' else None,
+        file_size=int(data.get('file_size') or 0) or None,
+        required=bool(data.get('required', True)),
+        estimated_minutes=int(data.get('estimated_minutes') or 60),
+        order_num=order_num,
+    )
+
+
+def _replace_tpl_items(tpl, raw_items):
+    """整列重写模板条目（删旧建新）：条目顺序即学习顺序"""
+    if not isinstance(raw_items, list):
+        raise ValueError('条目列表格式错误')
+    # 先删后建：order_num 的唯一约束不允许新旧混存
+    PlanTemplateItem.query.filter_by(template_id=tpl.id).delete()
+    db.session.flush()
+    for idx, raw in enumerate(raw_items, start=1):
+        if not isinstance(raw, dict):
+            raise ValueError('条目格式错误')
+        item = _normalize_tpl_item(raw, idx)
+        item.template_id = tpl.id
+        db.session.add(item)
+
+
+def _get_own_template(user, tid):
+    tpl = db.session.get(PlanTemplate, tid)
+    if not tpl:
+        return None, (jsonify({'message': '模板不存在'}), 404)
+    if tpl.owner_id != user.id:
+        return None, (jsonify({'message': '只有模板创建者可以修改'}), 403)
+    return tpl, None
+
+
+@api_learning_bp.route('/learning/plan-templates/catalog', methods=['GET'])
+def api_plan_catalog():
+    """专业课程库：全量专业 → 课程（含章节/知识点规模），供规划仓左侧选材"""
+    user, err = _require_login()
+    if err:
+        return err
+
+    kw = (request.args.get('q') or '').strip()
+    courses = Course.query.order_by(Course.name).all()
+    if kw:
+        like = f'%{kw}%'
+        courses = [c for c in courses if kw in (c.name or '')]
+
+    chapter_rows = db.session.query(Chapter.course_id, func.count(Chapter.id)) \
+        .group_by(Chapter.course_id).all()
+    chapter_count = dict(chapter_rows)
+    kp_rows = db.session.query(Chapter.course_id, func.count(KnowledgePoint.id)) \
+        .join(KnowledgePoint, KnowledgePoint.chapter_id == Chapter.id) \
+        .filter(KnowledgePoint.status == 'active') \
+        .group_by(Chapter.course_id).all()
+    kp_count = dict(kp_rows)
+
+    by_major = defaultdict(list)
+    for c in courses:
+        by_major[c.major_id].append({
+            'id': c.id, 'name': c.name, 'description': c.description,
+            'credit': c.credit, 'semester': c.semester,
+            'chapters_count': chapter_count.get(c.id, 0),
+            'knowledge_points_count': kp_count.get(c.id, 0),
+        })
+
+    majors = Major.query.order_by(Major.name).all()
+    out = []
+    for m in majors:
+        cl = by_major.get(m.id, [])
+        if not cl:
+            continue
+        out.append({
+            'id': m.id, 'name': m.name, 'description': m.description,
+            'department_name': m.department.name if m.department else None,
+            'courses': cl, 'courses_count': len(cl),
+        })
+
+    return jsonify({
+        'majors': out,
+        'totals': {
+            'majors': len(out),
+            'courses': len(courses),
+            'chapters': sum(chapter_count.values()),
+            'knowledge_points': sum(kp_count.values()),
+        },
+    })
+
+
+@api_learning_bp.route('/learning/plan-templates', methods=['GET'])
+def api_plan_template_list():
+    """模板列表：scope=market 公开模板 / mine 我的模板 / all 两者合并"""
+    user, err = _require_login()
+    if err:
+        return err
+
+    scope = (request.args.get('scope') or 'market').strip()
+    major_id = request.args.get('major_id', type=int)
+    tpl_type = request.args.get('type')
+    kw = (request.args.get('q') or '').strip()
+    page = max(int(request.args.get('page', 1) or 1), 1)
+    per_page = min(max(int(request.args.get('per_page', 24) or 24), 1), 100)
+
+    q = PlanTemplate.query
+    if scope == 'mine':
+        q = q.filter(PlanTemplate.owner_id == user.id)
+    elif scope == 'all':
+        q = q.filter(or_(PlanTemplate.visibility == 'public',
+                         PlanTemplate.owner_id == user.id))
+    else:
+        q = q.filter(PlanTemplate.visibility == 'public')
+    if major_id:
+        q = q.filter(PlanTemplate.major_id == major_id)
+    if tpl_type in ('structured', 'unstructured'):
+        q = q.filter(PlanTemplate.template_type == tpl_type)
+    if kw:
+        q = q.filter(or_(PlanTemplate.title.ilike(f'%{kw}%'),
+                         PlanTemplate.description.ilike(f'%{kw}%')))
+
+    total = q.count()
+    rows = q.order_by(PlanTemplate.use_count.desc(), PlanTemplate.created_at.desc()) \
+        .offset((page - 1) * per_page).limit(per_page).all()
+    return jsonify({
+        'total': total, 'page': page, 'per_page': per_page,
+        'items': [_tpl_to_dict(t, user.id) for t in rows],
+    })
+
+
+@api_learning_bp.route('/learning/plan-templates/upload', methods=['POST'])
+@limiter.limit(RateLimitConfig.DATA_WRITE)
+def api_plan_template_upload():
+    """模板附件上传：复用统一白名单与 50MB 上限，返回 stored_name 供条目引用"""
+    user, err = _require_login()
+    if err:
+        return err
+    file = request.files.get('file')
+    try:
+        stored, size = save_upload(file, 'plan_tpl', _UPLOAD_DIR)
+    except ValueError as e:
+        return jsonify({'message': str(e)}), 400
+    return jsonify({
+        'message': '已上传',
+        'file_name': stored,
+        'original_name': file.filename[:200],
+        'file_size': size,
+        'file_url': f'/uploads/{stored}',
+    }), 201
+
+
+@api_learning_bp.route('/learning/plan-templates/<int:tid>', methods=['GET'])
+def api_plan_template_detail(tid):
+    user, err = _require_login()
+    if err:
+        return err
+    tpl = db.session.get(PlanTemplate, tid)
+    if not tpl:
+        return jsonify({'message': '模板不存在'}), 404
+    if tpl.visibility != 'public' and tpl.owner_id != user.id:
+        return jsonify({'message': '模板不存在'}), 404
+    return jsonify(_tpl_to_dict(tpl, user.id, with_items=True))
+
+
+@api_learning_bp.route('/learning/plan-templates', methods=['POST'])
+@limiter.limit(RateLimitConfig.DATA_WRITE)
+def api_plan_template_create():
+    user, err = _require_login()
+    if err:
+        return err
+
+    data = request.get_json(silent=True) or {}
+    title = (data.get('title') or '').strip()
+    if not title:
+        return jsonify({'message': '模板标题不能为空'}), 400
+    major_id = data.get('major_id') or None
+    if major_id and not db.session.get(Major, major_id):
+        return jsonify({'message': '专业不存在'}), 404
+    tpl_type = data.get('template_type') if data.get('template_type') in ('structured', 'unstructured') else 'structured'
+    visibility = data.get('visibility') if data.get('visibility') in ('public', 'private') else 'private'
+
+    tpl = PlanTemplate(
+        title=title[:100],
+        description=(data.get('description') or '').strip() or None,
+        major_id=major_id,
+        template_type=tpl_type,
+        visibility=visibility,
+        difficulty=data.get('difficulty') or 'medium',
+        target_hours=int(data.get('target_hours') or 0) or None,
+        owner_id=user.id,
+    )
+    db.session.add(tpl)
+    db.session.flush()
+    if 'items' in data:
+        try:
+            _replace_tpl_items(tpl, data.get('items') or [])
+        except ValueError as e:
+            db.session.rollback()
+            return jsonify({'message': str(e)}), 400
+    db.session.commit()
+    return jsonify({'id': tpl.id, 'message': '模板已创建'}), 201
+
+
+@api_learning_bp.route('/learning/plan-templates/<int:tid>', methods=['PUT'])
+@limiter.limit(RateLimitConfig.DATA_WRITE)
+def api_plan_template_update(tid):
+    user, err = _require_login()
+    if err:
+        return err
+    tpl, err = _get_own_template(user, tid)
+    if err:
+        return err
+
+    data = request.get_json(silent=True) or {}
+    if 'title' in data:
+        title = (data.get('title') or '').strip()
+        if not title:
+            return jsonify({'message': '模板标题不能为空'}), 400
+        tpl.title = title[:100]
+    if 'description' in data:
+        tpl.description = (data.get('description') or '').strip() or None
+    if 'major_id' in data:
+        major_id = data.get('major_id') or None
+        if major_id and not db.session.get(Major, major_id):
+            return jsonify({'message': '专业不存在'}), 404
+        tpl.major_id = major_id
+    if data.get('template_type') in ('structured', 'unstructured'):
+        tpl.template_type = data['template_type']
+    if data.get('visibility') in ('public', 'private'):
+        tpl.visibility = data['visibility']
+    if 'difficulty' in data:
+        tpl.difficulty = data.get('difficulty') or 'medium'
+    if 'target_hours' in data:
+        tpl.target_hours = int(data.get('target_hours') or 0) or None
+    if 'items' in data:
+        try:
+            _replace_tpl_items(tpl, data.get('items') or [])
+        except ValueError as e:
+            db.session.rollback()
+            return jsonify({'message': str(e)}), 400
+    db.session.commit()
+    return jsonify({'message': '已保存', 'template': _tpl_to_dict(tpl, user.id, with_items=True)})
+
+
+@api_learning_bp.route('/learning/plan-templates/<int:tid>', methods=['DELETE'])
+def api_plan_template_delete(tid):
+    user, err = _require_login()
+    if err:
+        return err
+    tpl, err = _get_own_template(user, tid)
+    if err:
+        return err
+
+    db.session.delete(tpl)
+    db.session.commit()
+    # 已生成的个人路径是独立副本，不随模板删除
+    return jsonify({'message': '模板已删除，已生成的个人路径不受影响'})
+
+
+@api_learning_bp.route('/learning/plan-templates/<int:tid>/items', methods=['POST'])
+@limiter.limit(RateLimitConfig.DATA_WRITE)
+def api_plan_template_item_add(tid):
+    user, err = _require_login()
+    if err:
+        return err
+    tpl, err = _get_own_template(user, tid)
+    if err:
+        return err
+
+    data = request.get_json(silent=True) or {}
+    max_order = db.session.query(func.max(PlanTemplateItem.order_num)) \
+        .filter_by(template_id=tid).scalar() or 0
+    try:
+        item = _normalize_tpl_item(data, max_order + 1)
+    except ValueError as e:
+        return jsonify({'message': str(e)}), 400
+    item.template_id = tpl.id
+    db.session.add(item)
+    db.session.commit()
+    return jsonify({'id': item.id, 'item': _tpl_item_to_dict(item), 'message': '条目已添加'}), 201
+
+
+@api_learning_bp.route('/learning/plan-templates/<int:tid>/items/<int:item_id>', methods=['PUT'])
+def api_plan_template_item_update(tid, item_id):
+    user, err = _require_login()
+    if err:
+        return err
+    tpl, err = _get_own_template(user, tid)
+    if err:
+        return err
+    item = db.session.get(PlanTemplateItem, item_id)
+    if not item or item.template_id != tpl.id:
+        return jsonify({'message': '条目不存在'}), 404
+
+    data = request.get_json(silent=True) or {}
+    try:
+        fresh = _normalize_tpl_item({**{
+            'item_type': item.item_type, 'title': item.title,
+            'course_id': item.course_id, 'chapter_id': item.chapter_id,
+            'knowledge_point_id': item.knowledge_point_id, 'url': item.url,
+            'content': item.content, 'file_name': item.file_name,
+            'file_size': item.file_size, 'required': item.required,
+            'estimated_minutes': item.estimated_minutes,
+        }, **data}, item.order_num)
+    except ValueError as e:
+        return jsonify({'message': str(e)}), 400
+    for k in ('item_type', 'title', 'course_id', 'chapter_id', 'knowledge_point_id',
+              'url', 'content', 'file_name', 'file_size', 'required',
+              'estimated_minutes', 'order_num'):
+        setattr(item, k, getattr(fresh, k))
+    db.session.commit()
+    return jsonify({'message': '已更新', 'item': _tpl_item_to_dict(item)})
+
+
+@api_learning_bp.route('/learning/plan-templates/<int:tid>/items/<int:item_id>', methods=['DELETE'])
+def api_plan_template_item_delete(tid, item_id):
+    user, err = _require_login()
+    if err:
+        return err
+    tpl, err = _get_own_template(user, tid)
+    if err:
+        return err
+    item = db.session.get(PlanTemplateItem, item_id)
+    if not item or item.template_id != tpl.id:
+        return jsonify({'message': '条目不存在'}), 404
+
+    db.session.delete(item)
+    db.session.flush()
+    # 删除后重排，保持顺序号连续（唯一约束下不能留空洞）
+    remain = PlanTemplateItem.query.filter_by(template_id=tid) \
+        .order_by(PlanTemplateItem.order_num).all()
+    for i, it in enumerate(remain, start=1):
+        if it.order_num != i:
+            it.order_num = -i
+    db.session.flush()
+    for i, it in enumerate(remain, start=1):
+        it.order_num = i
+    db.session.commit()
+    return jsonify({'message': '条目已删除'})
+
+
+@api_learning_bp.route('/learning/plan-templates/<int:tid>/use', methods=['POST'])
+@limiter.limit(RateLimitConfig.DATA_WRITE)
+def api_plan_template_use(tid):
+    """一键使用模板：复制条目为我的个人学习路径（独立副本，后续改动互不影响）"""
+    user, err = _require_login()
+    if err:
+        return err
+    tpl = db.session.get(PlanTemplate, tid)
+    if not tpl:
+        return jsonify({'message': '模板不存在'}), 404
+    if tpl.visibility != 'public' and tpl.owner_id != user.id:
+        return jsonify({'message': '模板不存在'}), 404
+    if not tpl.items:
+        return jsonify({'message': '模板还没有条目，无法生成学习路径'}), 400
+
+    data = request.get_json(silent=True) or {}
+    major_id = data.get('major_id') or tpl.major_id
+    if not major_id:
+        return jsonify({'message': '该模板未指定专业，请先选择所属专业'}), 400
+    if not db.session.get(Major, major_id):
+        return jsonify({'message': '专业不存在'}), 404
+
+    title = (data.get('title') or '').strip() or tpl.title
+    # 同专业下标题+版本唯一：撞名时追加时间戳，不覆盖已有路径
+    if LearningPath.query.filter_by(major_id=major_id, title=title[:100], version='v1').first():
+        title = f'{title[:80]} {fmt_local(utcnow(), "%m-%d %H:%M")}'
+
+    path = LearningPath(
+        major_id=major_id, title=title[:100],
+        description=tpl.description,
+        target_hours=tpl.target_hours,
+        difficulty=tpl.difficulty or 'medium',
+        creator_id=user.id,
+        status='draft',
+    )
+    db.session.add(path)
+    db.session.flush()
+
+    node_ids = []
+    for idx, it in enumerate(tpl.items, start=1):
+        node = LearningPathNode(
+            path_id=path.id, node_type=it.item_type,
+            knowledge_point_id=it.knowledge_point_id,
+            chapter_id=it.chapter_id, course_id=it.course_id,
+            title=it.title, url=it.url, content=it.content,
+            file_name=it.file_name, file_size=it.file_size,
+            order_num=idx,
+            role='core' if it.required else 'elective',
+            estimated_minutes=it.estimated_minutes or 60,
+        )
+        db.session.add(node)
+        db.session.flush()
+        node_ids.append(node.id)
+
+    db.session.add(UserPathEnrollment(
+        user_id=user.id, path_id=path.id,
+        total_count=len(node_ids),
+        current_node_id=node_ids[0] if node_ids else None,
+    ))
+    tpl.use_count = (tpl.use_count or 0) + 1
+    db.session.commit()
+    return jsonify({
+        'message': '已生成学习路径并加入我的学习路径',
+        'path_id': path.id,
+        'nodes_count': len(node_ids),
+    }), 201
 
 
 # ── 用户选课与节点进度 ─────────────────────────────────────────────

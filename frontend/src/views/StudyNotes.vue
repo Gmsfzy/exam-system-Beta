@@ -77,19 +77,46 @@
       </template>
     </el-dialog>
 
-    <!-- 笔记编辑抽屉 -->
-    <el-drawer v-model="editorVisible" :title="editor.id ? '编辑笔记' : '新建笔记'" size="46%">
-      <div class="editor-body">
-        <el-input v-model="editor.title" placeholder="笔记标题" maxlength="200" show-word-limit />
-        <div class="editor-row">
-          <el-select v-model="editor.category" placeholder="分类（可选）" clearable filterable allow-create style="width: 200px">
-            <el-option v-for="c in allCategories" :key="c" :label="c" :value="c" />
-          </el-select>
-          <el-select v-model="editor.tags" multiple filterable allow-create default-first-option
-                     placeholder="标签（回车创建）" style="flex: 1">
-            <el-option v-for="t in allTags" :key="t" :label="t" :value="t" />
-          </el-select>
+    <!-- 笔记编辑弹窗（与心得编辑器同一套：居中、可拖拽缩放、可放大还原） -->
+    <el-dialog v-model="editorVisible" :width="editorSize.w + 'px'" :top="editorSize.top + 'px'"
+               :fullscreen="editorSize.full" :close-on-click-modal="false" :show-close="false"
+               draggable class="editor-dialog">
+      <template #header="{ close }">
+        <div class="ed-head">
+          <div class="ed-head-main">
+            <span class="ed-title">{{ editor.id ? '编辑笔记' : '新建笔记' }}</span>
+            <span class="ed-sub">支持 Markdown 与 LaTeX；写完切到预览就是最终阅读效果</span>
+          </div>
+          <div class="ed-tools">
+            <el-button size="small" text @click="resetEditorSize">复位</el-button>
+            <el-button size="small" text @click="toggleEditorFull">
+              {{ editorSize.full ? '还原' : '放大' }}
+            </el-button>
+            <el-button size="small" text @click="close">✕</el-button>
+          </div>
         </div>
+      </template>
+
+      <div class="editor-shell">
+        <div class="editor-body" :style="editorBodyStyle">
+        <el-form :model="editor" label-position="top" class="editor-form">
+          <el-form-item label="标题">
+            <el-input v-model="editor.title" placeholder="给这篇笔记起个名字" maxlength="200" show-word-limit />
+          </el-form-item>
+          <div class="meta-grid">
+            <el-form-item label="分类">
+              <el-select v-model="editor.category" placeholder="可选" clearable filterable allow-create style="width: 100%">
+                <el-option v-for="c in allCategories" :key="c" :label="c" :value="c" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="标签">
+              <el-select v-model="editor.tags" multiple filterable allow-create default-first-option
+                         placeholder="输入后回车创建" style="width: 100%">
+                <el-option v-for="t in allTags" :key="t" :label="t" :value="t" />
+              </el-select>
+            </el-form-item>
+          </div>
+        </el-form>
         <div class="editor-tools">
           <el-button size="small" :loading="uploading" @click="pickImage">
             <el-icon><Picture /></el-icon>&nbsp;插入图片
@@ -120,23 +147,34 @@
           </el-radio-group>
           <span class="mode-hint">正文支持 Markdown 与 LaTeX 公式（$...$），预览即最终阅读效果</span>
         </div>
-        <el-input v-show="editMode === 'write'" v-model="editor.content" type="textarea" :rows="14"
+        <el-input v-show="editMode === 'write'" v-model="editor.content" type="textarea"
+                  :autosize="{ minRows: 12, maxRows: 26 }"
                   maxlength="20000" show-word-limit
                   placeholder="支持 Markdown 语法；插入的图片以链接形式嵌入，保存后可在阅读视图直接看到" />
-        <el-scrollbar v-if="editMode === 'preview'" max-height="42vh" class="editor-preview">
+        <el-scrollbar v-if="editMode === 'preview'" class="editor-preview"
+                      :style="{ maxHeight: editorSize.full ? 'calc(100vh - 300px)' : Math.max(240, editorSize.h - 280) + 'px' }">
           <RichContent :content="editor.content || '（暂无内容）'" />
         </el-scrollbar>
         <div v-if="editorImages.length" class="editor-images">
           <span class="img-label">已插入图片：</span>
           <a v-for="(u, i) in editorImages" :key="i" :href="u" target="_blank" class="img-link">图 {{ i + 1 }}</a>
         </div>
+        </div>
+        <span v-if="!editorSize.full" class="dlg-grip" title="拖动调节窗口大小"
+              @mousedown.stop="startGrip"></span>
       </div>
       <template #footer>
-        <el-button v-if="editor.id" type="danger" plain @click="removeNote">删除</el-button>
-        <el-button @click="editorVisible = false">取消</el-button>
-        <el-button type="primary" :loading="saving" :disabled="!editor.title.trim()" @click="saveNote">保存</el-button>
+        <div class="editor-footer">
+          <span class="foot-words">正文 {{ editorWords }} 字<span class="foot-tip"> ·
+            {{ editorSize.full ? '放大模式，点“还原”可继续拖拽缩放' : '拖动右下角可调窗口大小' }}</span></span>
+          <div>
+            <el-button v-if="editor.id" type="danger" plain @click="removeNote">删除</el-button>
+            <el-button @click="editorVisible = false">取消</el-button>
+            <el-button type="primary" :loading="saving" :disabled="!editor.title.trim()" @click="saveNote">保存</el-button>
+          </div>
+        </div>
       </template>
-    </el-drawer>
+    </el-dialog>
 
     <!-- 即问即讲弹窗 -->
     <el-dialog v-model="explainVisible" title="即问即讲 · 知识点讲解卡" width="620px" top="6vh">
@@ -171,6 +209,7 @@ import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Search, Plus, Top, Picture, Paperclip, MagicStick } from '@element-plus/icons-vue'
 import request from '../utils/request'
+import { useDialogSize } from '../utils/dialogSize'
 import RichContent from '../components/RichContent.vue'
 
 const notes = ref([])
@@ -265,6 +304,14 @@ const uploading = ref(false)
 const fileInput = ref(null)
 const editMode = ref('write')
 const editor = reactive({ id: null, title: '', content: '', category: '', tags: [], pinned: false })
+
+// 弹窗尺寸偏好：居中弹窗 + 右下角拖拽改宽高 + 放大/还原，记在本机
+const {
+  size: editorSize, bodyStyle: editorBodyStyle,
+  startGrip, toggleFull: toggleEditorFull, reset: resetEditorSize,
+} = useDialogSize('note_editor_size', { w: 960, h: 640 })
+
+const editorWords = computed(() => (editor.content || '').replace(/\s/g, '').length)
 
 const editorImages = computed(() =>
   (editor.content.match(/\/uploads\/[\w.\-/]+/g) || []))
@@ -487,9 +534,13 @@ async function removeCard(cid) {
 .note-meta { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .note-time { font-size: 11px; color: var(--text-muted); margin-left: auto; }
 
-.editor-body { display: flex; flex-direction: column; gap: 12px; }
-.editor-row { display: flex; gap: 10px; }
-.editor-tools { display: flex; align-items: center; gap: 14px; }
+/* 编辑弹窗皮肤见 style.css .editor-dialog / .editor-body / .editor-form */
+.meta-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 0 12px;
+}
+.foot-tip { color: var(--text-muted); }
+.editor-tools { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
 .editor-mode { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .mode-hint { font-size: 12px; color: var(--text-muted); }
 .editor-preview { border: 1px solid var(--border-color); border-radius: 8px; padding: 12px 14px; min-height: 180px; }
