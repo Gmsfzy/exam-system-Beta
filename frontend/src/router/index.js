@@ -127,8 +127,12 @@ const routes = [
       { path: 'homeworks/peer-reviews', name: 'PeerReviewCenter', component: () => import('../views/PeerReviewCenter.vue'), meta: { module: 'homework', requiresStudent: true } },
       { path: 'homeworks/:id/take', name: 'HomeworkTake', component: () => import('../views/HomeworkTake.vue'), meta: { module: 'homework', requiresStudent: true } },
 
-      // ── 社区中心模块（v5.29 · Phase 1 论坛 MVP）──
-      { path: 'community', name: 'CommunityForum', component: () => import('../views/CommunityForum.vue'), meta: { module: 'community', public: true } },
+      // ── 社区中心模块（v5.29 论坛 MVP / v7.25 微博化动态）──
+      { path: 'community', name: 'CommunityHome', component: () => import('../views/CommunityHome.vue'), meta: { module: 'community', public: true } },
+      { path: 'community/forum', name: 'CommunityForum', component: () => import('../views/CommunityForum.vue'), meta: { module: 'community', public: true } },
+      { path: 'community/moment/:id', name: 'CommunityMomentDetail', component: () => import('../views/CommunityMomentDetail.vue'), meta: { module: 'community', public: true } },
+      { path: 'community/topic/:id', name: 'CommunityTopic', component: () => import('../views/CommunityTopic.vue'), meta: { module: 'community', public: true } },
+      { path: 'community/messages', name: 'CommunityMessages', component: () => import('../views/CommunityMessages.vue'), meta: { module: 'community' } },
       { path: 'community/new', name: 'CommunityNewPost', component: () => import('../views/CommunityNewPost.vue'), meta: { module: 'community' } },
       { path: 'community/favorites', name: 'CommunityFavorites', component: () => import('../views/CommunityFavorites.vue'), meta: { module: 'community' } },
       { path: 'community/notifications', name: 'CommunityNotifications', component: () => import('../views/CommunityNotifications.vue'), meta: { module: 'community' } },

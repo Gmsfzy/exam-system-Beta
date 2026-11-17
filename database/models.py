@@ -1688,6 +1688,9 @@ class CommunityNotification(db.Model):
     type = db.Column(db.String(20), nullable=False, index=True)
     post_id = db.Column(db.Integer, db.ForeignKey('community_post.id'), nullable=True, index=True)
     comment_id = db.Column(db.Integer, db.ForeignKey('community_comment.id'), nullable=True)
+    # v7.25 微博化：动态与其评论的通知落点（与 post_id/comment_id 互斥使用）
+    moment_id = db.Column(db.Integer, db.ForeignKey('community_moment.id'), nullable=True, index=True)
+    moment_comment_id = db.Column(db.Integer, db.ForeignKey('community_moment_comment.id'), nullable=True)
     content = db.Column(db.String(200), nullable=True)
     is_read = db.Column(db.Boolean, nullable=False, default=False, index=True)
     created_at = db.Column(UTCDateTime, nullable=False, default=utcnow, index=True)
@@ -1699,6 +1702,7 @@ class CommunityNotification(db.Model):
     actor = db.relationship('User', foreign_keys=[actor_id], backref='community_notifications_sent')
     recipient = db.relationship('User', foreign_keys=[user_id], backref=db.backref('community_notifications', cascade='all, delete-orphan'))
     post = db.relationship('CommunityPost', backref='notifications')
+    moment = db.relationship('CommunityMoment', backref='notifications')
 
     TYPE_LABELS = {
         'comment': '评论了你的帖子',
@@ -1708,6 +1712,10 @@ class CommunityNotification(db.Model):
         'accept': '采纳了你的回答',
         'hidden': '你的内容因举报被折叠',
         'report': '举报已处理',
+        'moment_comment': '评论了你的动态',
+        'moment_reply': '回复了你的评论',
+        'repost': '转发了你的动态',
+        'quote': '引用了你的动态',
     }
 
     def to_dict(self):
@@ -1720,6 +1728,9 @@ class CommunityNotification(db.Model):
             'post_id': self.post_id,
             'post_title': self.post.title if self.post else None,
             'comment_id': self.comment_id,
+            'moment_id': self.moment_id,
+            'moment_comment_id': self.moment_comment_id,
+            'moment_preview': (self.moment.content or '')[:80] if self.moment else None,
             'content': self.content,
             'is_read': self.is_read,
             'created_at': self.created_at.isoformat() if self.created_at else None,
@@ -1759,6 +1770,445 @@ class CommunityReport(db.Model):
             'status': self.status,
             'created_at': self.created_at.isoformat() if self.created_at else None,
         }
+
+
+# ──────────────────────────────────────────────────────────────
+# v7.25 社区中心 · 微博化：动态（moment）
+# 与 CommunityPost（论坛长帖）并行，语义不互相侵入：
+# 动态 = 一句话/短文 + 转发引用 + 话题 + 关注流；论坛帖 = 分类/悬赏/已解决/投票。
+# ──────────────────────────────────────────────────────────────
+
+class CommunityMomentVisibilityEnum:
+    """动态可见范围：公开 / 仅关注者 / 仅自己。"""
+    PUBLIC = 'public'
+    FOLLOWERS = 'followers'
+    PRIVATE = 'private'
+    ALL = (PUBLIC, FOLLOWERS, PRIVATE)
+
+    LABELS = {
+        PUBLIC: '公开',
+        FOLLOWERS: '仅关注者',
+        PRIVATE: '仅自己',
+    }
+
+    @classmethod
+    def label(cls, value):
+        return cls.LABELS.get(value, value)
+
+
+class CommunityRepostTypeEnum:
+    """转发形态：repost=纯转发（只带快照）/ quote=引用转发（可加评论）。"""
+    REPOST = 'repost'
+    QUOTE = 'quote'
+    ALL = (REPOST, QUOTE)
+
+
+class CommunityMoment(db.Model):
+    """社区动态（微博形态）。
+
+    - 短动态正文落 content（≤500），长文落 long_body（is_long=True）；
+    - 转发/引用用 repost_of_id 指向原动态，并冗余 repost_snapshot 只读快照，
+      原动态删除后仍可展示，避免递归 join；
+    - 匿名动态 author_id 存真实值，序列化时脱敏；他人主页不展示匿名动态。"""
+    __tablename__ = 'community_moment'
+
+    id = db.Column(db.Integer, primary_key=True)
+    author_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False, index=True)
+
+    content = db.Column(db.String(500), nullable=False, default='')
+    long_body = db.Column(db.Text, nullable=True)
+    is_long = db.Column(db.Boolean, nullable=False, default=False)
+    visibility = db.Column(db.String(12), nullable=False, default='public')
+
+    is_anonymous = db.Column(db.Boolean, nullable=False, default=False)
+    anon_index = db.Column(db.Integer, nullable=True)
+
+    # 转发：repost_of_id 指向被转发动态；repost_type 与 repost_of_id 必须同时有/同时无
+    repost_of_id = db.Column(db.Integer, db.ForeignKey('community_moment.id'), nullable=True)
+    repost_type = db.Column(db.String(10), nullable=True)
+    repost_snapshot = db.Column(JSONType, nullable=True)
+
+    deleted = db.Column(db.Boolean, nullable=False, default=False)
+    hidden = db.Column(db.Boolean, nullable=False, default=False)
+    report_count = db.Column(db.Integer, nullable=False, default=0)
+
+    like_count = db.Column(db.Integer, nullable=False, default=0)
+    comment_count = db.Column(db.Integer, nullable=False, default=0)
+    favorite_count = db.Column(db.Integer, nullable=False, default=0)
+    repost_count = db.Column(db.Integer, nullable=False, default=0)
+
+    created_at = db.Column(UTCDateTime, nullable=False, default=utcnow, index=True)
+    updated_at = db.Column(UTCDateTime, nullable=False, default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (
+        db.CheckConstraint(
+            "visibility IN ('public', 'followers', 'private')",
+            name='_community_moment_vis_ck',
+        ),
+        db.CheckConstraint(
+            "repost_type IS NULL OR repost_type IN ('repost', 'quote')",
+            name='_community_moment_repost_type_ck',
+        ),
+        db.CheckConstraint(
+            "(repost_type IS NULL AND repost_of_id IS NULL) OR (repost_type IS NOT NULL AND repost_of_id IS NOT NULL)",
+            name='_community_moment_repost_pair_ck',
+        ),
+        db.Index('ix_community_moment_author_created', 'author_id', 'created_at'),
+        db.Index('ix_community_moment_created', 'created_at'),
+        db.Index('ix_community_moment_repost_of', 'repost_of_id'),
+    )
+
+    author = db.relationship(
+        'User', foreign_keys=[author_id],
+        backref=db.backref('community_moments', cascade='all, delete-orphan'),
+    )
+    repost_of = db.relationship(
+        'CommunityMoment', remote_side=[id], foreign_keys=[repost_of_id],
+        backref=db.backref('reposts', lazy='dynamic'),
+    )
+    comments = db.relationship(
+        'CommunityMomentComment', backref='moment', lazy=True,
+        cascade='all, delete-orphan', order_by='CommunityMomentComment.created_at',
+    )
+    favorites = db.relationship(
+        'CommunityMomentFavorite', backref='moment', lazy=True,
+        cascade='all, delete-orphan',
+    )
+    topic_links = db.relationship(
+        'CommunityMomentTopic', backref='moment', lazy=True,
+        cascade='all, delete-orphan',
+    )
+
+    def to_dict(self, viewer=None):
+        """序列化动态（viewer 用于匿名/折叠权限判断）。"""
+        is_author = viewer is not None and viewer.id == self.author_id
+        is_teacher_or_admin = viewer is not None and viewer.role in ('teacher', 'admin')
+
+        display_username = None
+        display_anon = None
+        if self.is_anonymous:
+            display_anon = f'匿名#{self.anon_index or "?"}'
+            if is_teacher_or_admin:
+                display_username = self.author.username
+        else:
+            display_username = self.author.username if self.author else '未知用户'
+
+        can_view_content = (not self.hidden) or is_author or is_teacher_or_admin
+        content = self.content if can_view_content else '该内容因多次举报已被折叠'
+        long_body = self.long_body if can_view_content else None
+
+        return {
+            'id': self.id,
+            'author_id': self.author_id,
+            'display_username': display_username,
+            'display_anon': display_anon,
+            'is_anonymous': self.is_anonymous,
+            'is_author': is_author,
+            'content': content,
+            'long_body': long_body,
+            'is_long': bool(self.is_long),
+            'visibility': self.visibility,
+            'visibility_label': CommunityMomentVisibilityEnum.label(self.visibility),
+            'deleted': self.deleted,
+            'hidden': self.hidden,
+            'can_view_content': can_view_content,
+            'report_count': self.report_count,
+            'repost_of_id': self.repost_of_id,
+            'repost_type': self.repost_type,
+            'repost_snapshot': self.repost_snapshot,
+            'like_count': self.like_count,
+            'comment_count': self.comment_count,
+            'favorite_count': self.favorite_count,
+            'repost_count': self.repost_count,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class CommunityMomentComment(db.Model):
+    """动态评论：支持楼中楼与匿名，软删保留层级。"""
+    __tablename__ = 'community_moment_comment'
+
+    id = db.Column(db.Integer, primary_key=True)
+    moment_id = db.Column(db.Integer, db.ForeignKey('community_moment.id'), nullable=False, index=True)
+    author_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False, index=True)
+    content = db.Column(db.Text, nullable=False)
+    parent_id = db.Column(db.Integer, db.ForeignKey('community_moment_comment.id'), nullable=True, index=True)
+
+    is_anonymous = db.Column(db.Boolean, nullable=False, default=False)
+    anon_index = db.Column(db.Integer, nullable=True)
+
+    deleted = db.Column(db.Boolean, nullable=False, default=False)
+    hidden = db.Column(db.Boolean, nullable=False, default=False)
+    report_count = db.Column(db.Integer, nullable=False, default=0)
+    like_count = db.Column(db.Integer, nullable=False, default=0)
+
+    created_at = db.Column(UTCDateTime, nullable=False, default=utcnow, index=True)
+
+    __table_args__ = (
+        db.Index('ix_community_moment_comment_moment_created', 'moment_id', 'created_at'),
+    )
+
+    author = db.relationship(
+        'User', backref=db.backref('community_moment_comments', cascade='all, delete-orphan'),
+    )
+    parent = db.relationship('CommunityMomentComment', remote_side=[id], backref='replies')
+
+    def to_dict(self, viewer=None):
+        is_author = viewer is not None and viewer.id == self.author_id
+        is_moment_author = bool(viewer and self.moment and self.moment.author_id == viewer.id)
+        is_teacher_or_admin = viewer is not None and viewer.role in ('teacher', 'admin')
+
+        display_username = None
+        display_anon = None
+        if self.is_anonymous:
+            display_anon = f'匿名#{self.anon_index or "?"}'
+            if is_teacher_or_admin:
+                display_username = self.author.username
+        else:
+            display_username = self.author.username if self.author else '未知用户'
+
+        can_view_content = (not self.hidden) or is_author or is_moment_author or is_teacher_or_admin
+        content = self.content if can_view_content else '该评论因多次举报已被折叠'
+
+        return {
+            'id': self.id,
+            'moment_id': self.moment_id,
+            'parent_id': self.parent_id,
+            'author_id': self.author_id,
+            'display_username': display_username,
+            'display_anon': display_anon,
+            'is_anonymous': self.is_anonymous,
+            'content': content,
+            'deleted': self.deleted,
+            'hidden': self.hidden,
+            'can_view_content': can_view_content,
+            'report_count': self.report_count,
+            'like_count': self.like_count,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class CommunityTopic(db.Model):
+    """动态话题（#话题#）：同名复用，热度由 moment_count 维护。"""
+    __tablename__ = 'community_topic'
+
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(30), nullable=False, unique=True)
+    is_official = db.Column(db.Boolean, nullable=False, default=False)
+    is_hidden = db.Column(db.Boolean, nullable=False, default=False)
+    moment_count = db.Column(db.Integer, nullable=False, default=0)
+    created_by = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=True)
+    created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
+
+    __table_args__ = (
+        db.Index('ix_community_topic_moment_count', 'moment_count'),
+    )
+
+    creator = db.relationship('User')
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'name': self.name,
+            'is_official': bool(self.is_official),
+            'is_hidden': bool(self.is_hidden),
+            'moment_count': self.moment_count,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class CommunityMomentTopic(db.Model):
+    """动态 ↔ 话题 关联（一条动态最多 4 个话题，由 API 层校验）。"""
+    __tablename__ = 'community_moment_topic'
+
+    id = db.Column(db.Integer, primary_key=True)
+    moment_id = db.Column(db.Integer, db.ForeignKey('community_moment.id'), nullable=False, index=True)
+    topic_id = db.Column(db.Integer, db.ForeignKey('community_topic.id'), nullable=False, index=True)
+    created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
+
+    __table_args__ = (
+        db.UniqueConstraint('moment_id', 'topic_id', name='_community_moment_topic_uc'),
+        db.Index('ix_community_moment_topic_topic_moment', 'topic_id', 'moment_id'),
+    )
+
+    topic = db.relationship('CommunityTopic', backref=db.backref('moment_links', cascade='all, delete-orphan'))
+
+
+class CommunityMomentFavorite(db.Model):
+    """动态收藏：CommunityFavorite 的 post_id 是强外键，动态侧只能独立建表。"""
+    __tablename__ = 'community_moment_favorite'
+
+    id = db.Column(db.Integer, primary_key=True)
+    moment_id = db.Column(db.Integer, db.ForeignKey('community_moment.id'), nullable=False, index=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False, index=True)
+    created_at = db.Column(UTCDateTime, nullable=False, default=utcnow, index=True)
+
+    __table_args__ = (
+        db.UniqueConstraint('moment_id', 'user_id', name='_community_moment_favorite_uc'),
+    )
+
+    user = db.relationship('User', backref=db.backref('community_moment_favorites', cascade='all, delete-orphan'))
+
+
+# ──────────────────────────────────────────────────────────────
+# v7.25 社区微博化：私信 / 拉黑 / 管理端查看留痕
+# 合规口径：私信不物理删除，a/b_deleted_at 仅对本人隐藏；教师仅能凭举报查看上下文。
+# ──────────────────────────────────────────────────────────────
+
+class CommunityDmConversation(db.Model):
+    """一对一私信会话：user_a_id < user_b_id 保证同一对用户只有一条会话。"""
+    __tablename__ = 'community_dm_conversation'
+
+    id = db.Column(db.Integer, primary_key=True)
+    user_a_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False, index=True)
+    user_b_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False, index=True)
+
+    last_message_id = db.Column(db.Integer, nullable=True)
+    last_message_at = db.Column(UTCDateTime, nullable=True)
+    a_unread = db.Column(db.Integer, nullable=False, default=0)
+    b_unread = db.Column(db.Integer, nullable=False, default=0)
+    a_deleted_at = db.Column(UTCDateTime, nullable=True)
+    b_deleted_at = db.Column(UTCDateTime, nullable=True)
+
+    created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
+    updated_at = db.Column(UTCDateTime, nullable=False, default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (
+        db.UniqueConstraint('user_a_id', 'user_b_id', name='_community_dm_conv_uc'),
+        db.CheckConstraint('user_a_id < user_b_id', name='_community_dm_conv_order_ck'),
+        db.Index('ix_community_dm_conv_a_time', 'user_a_id', 'last_message_at'),
+        db.Index('ix_community_dm_conv_b_time', 'user_b_id', 'last_message_at'),
+    )
+
+    user_a = db.relationship(
+        'User', foreign_keys=[user_a_id],
+        backref=db.backref('dm_conversations_as_a', cascade='all, delete-orphan'),
+    )
+    user_b = db.relationship(
+        'User', foreign_keys=[user_b_id],
+        backref=db.backref('dm_conversations_as_b', cascade='all, delete-orphan'),
+    )
+    messages = db.relationship(
+        'CommunityDmMessage', backref='conversation', lazy=True,
+        cascade='all, delete-orphan', order_by='CommunityDmMessage.id',
+    )
+
+    def peer_of(self, user_id):
+        return self.user_b if self.user_a_id == user_id else self.user_a
+
+    def unread_of(self, user_id):
+        return self.b_unread if self.user_b_id == user_id else self.a_unread
+
+    def is_hidden_for(self, user_id):
+        return (self.b_deleted_at if self.user_b_id == user_id else self.a_deleted_at) is not None
+
+    def hide_for(self, user_id, when=None):
+        when = when or utcnow()
+        if self.user_b_id == user_id:
+            self.b_deleted_at = when
+        else:
+            self.a_deleted_at = when
+
+    def restore_for(self, user_id):
+        if self.user_b_id == user_id:
+            self.b_deleted_at = None
+        else:
+            self.a_deleted_at = None
+
+
+class CommunityDmMessage(db.Model):
+    """私信消息：软状态保留（recalled 只做撤回标记，不物理删）。"""
+    __tablename__ = 'community_dm_message'
+
+    id = db.Column(db.Integer, primary_key=True)
+    conversation_id = db.Column(
+        db.Integer, db.ForeignKey('community_dm_conversation.id'), nullable=False, index=True,
+    )
+    sender_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False, index=True)
+    receiver_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False, index=True)
+
+    content = db.Column(db.Text, nullable=False, default='')
+    content_type = db.Column(db.String(12), nullable=False, default='text')   # text/image
+    image_url = db.Column(db.String(300), nullable=True)
+
+    is_read = db.Column(db.Boolean, nullable=False, default=False)
+    read_at = db.Column(UTCDateTime, nullable=True)
+    recalled = db.Column(db.Boolean, nullable=False, default=False)
+    created_at = db.Column(UTCDateTime, nullable=False, default=utcnow, index=True)
+
+    __table_args__ = (
+        db.CheckConstraint('sender_id != receiver_id', name='_community_dm_msg_sender_ck'),
+        db.Index('ix_community_dm_msg_conv_id', 'conversation_id', 'id'),
+        db.Index('ix_community_dm_msg_receiver_read', 'receiver_id', 'is_read'),
+    )
+
+    sender = db.relationship('User', foreign_keys=[sender_id])
+    receiver = db.relationship('User', foreign_keys=[receiver_id])
+
+    def to_dict(self):
+        preview = '［消息已撤回］' if self.recalled else (
+            self.content if self.content_type == 'text' else '［图片］'
+        )
+        return {
+            'id': self.id,
+            'conversation_id': self.conversation_id,
+            'sender_id': self.sender_id,
+            'receiver_id': self.receiver_id,
+            'content': (self.content or '')[:2000],
+            'content_type': self.content_type,
+            'image_url': self.image_url,
+            'is_read': self.is_read,
+            'recalled': self.recalled,
+            'preview': preview[:80],
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class CommunityUserBlock(db.Model):
+    """拉黑关系：blocker 屏蔽 blocked，双方私信与互动一律拒绝。"""
+    __tablename__ = 'community_user_block'
+
+    id = db.Column(db.Integer, primary_key=True)
+    blocker_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False, index=True)
+    blocked_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False, index=True)
+    reason = db.Column(db.String(200), nullable=True)
+    created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
+
+    __table_args__ = (
+        db.UniqueConstraint('blocker_id', 'blocked_id', name='_community_user_block_uc'),
+        db.CheckConstraint('blocker_id != blocked_id', name='_community_user_block_self_ck'),
+        db.Index('ix_community_user_block_blocked', 'blocked_id'),
+    )
+
+    blocker = db.relationship('User', foreign_keys=[blocker_id])
+    blocked = db.relationship('User', foreign_keys=[blocked_id])
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'blocker_id': self.blocker_id,
+            'blocked_id': self.blocked_id,
+            'blocked_name': self.blocked.username if self.blocked else None,
+            'reason': self.reason,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class CommunityDmAccessLog(db.Model):
+    """管理端私信查看留痕：教师每次凭举报查看会话上下文都写一条。"""
+    __tablename__ = 'community_dm_access_log'
+
+    id = db.Column(db.Integer, primary_key=True)
+    admin_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False, index=True)
+    conversation_id = db.Column(
+        db.Integer, db.ForeignKey('community_dm_conversation.id'), nullable=False, index=True,
+    )
+    report_id = db.Column(db.Integer, db.ForeignKey('community_report.id'), nullable=True)
+    created_at = db.Column(UTCDateTime, nullable=False, default=utcnow, index=True)
+
+    admin = db.relationship('User')
+    conversation = db.relationship('CommunityDmConversation')
 
 
 # ── v6.6 代码笔记本（Notebook）：Jupyter 式分单元代码/Markdown 混排 + 持久 kernel 执行 ──

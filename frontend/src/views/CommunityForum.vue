@@ -80,7 +80,7 @@
         clearable
         :prefix-icon="Search"
         style="max-width: 280px"
-        @keyup.enter="reload"
+        @keyup.enter="onSearchEnter"
         @clear="reload"
       />
     </div>
@@ -97,16 +97,43 @@
       >#{{ t.tag }} <span class="tag-count">{{ t.count }}</span></el-check-tag>
     </div>
 
-    <el-empty v-if="!loading && !posts.length" description="还没有帖子，来发第一个吧 🎉">
+    <!-- 空态区分：筛选无结果 与 社区还没有帖子是两件事 -->
+    <el-empty
+      v-if="!loading && !posts.length && hasActiveFilter"
+      :image-size="90"
+      description="没有匹配的帖子，换个筛选条件试试"
+    >
+      <el-button :icon="RefreshLeft" @click="resetFilters">清空筛选</el-button>
+    </el-empty>
+    <el-empty
+      v-else-if="!loading && !posts.length"
+      :image-size="90"
+      description="还没有帖子，来发第一个吧"
+    >
       <el-button type="primary" :icon="ChatLineSquare" @click="goNewPost">发第一个帖</el-button>
     </el-empty>
 
-    <div class="post-grid" v-loading="loading" v-else>
-      <div
+    <!-- 首屏骨架：避免加载时一片空白 -->
+    <div v-else-if="loading && !posts.length" class="post-grid">
+      <div v-for="n in 6" :key="`sk-${n}`" class="post-card skeleton-card" aria-hidden="true">
+        <div class="sk sk-tag"></div>
+        <div class="sk sk-title"></div>
+        <div class="sk sk-line"></div>
+        <div class="sk sk-line short"></div>
+      </div>
+    </div>
+
+    <div class="post-grid" v-else v-loading="loading" :aria-busy="loading">
+      <article
         v-for="p in posts"
         :key="p.id"
         class="post-card"
+        role="button"
+        tabindex="0"
+        :aria-label="`查看帖子：${p.title}`"
         @click="goDetail(p.id)"
+        @keydown.enter.prevent="goDetail(p.id)"
+        @keydown.space.prevent="goDetail(p.id)"
       >
         <div class="card-top">
           <el-tag size="small" :type="catTagType(p.category)" effect="light">
@@ -134,7 +161,7 @@
             @click.stop="toggleTag(t)"
           >#{{ t }}</el-tag>
         </div>
-        <p class="card-summary">{{ p.content || '' }}</p>
+        <p class="card-summary">{{ summaryOf(p) }}</p>
         <div v-if="p.linked_type" class="card-linked">
           <el-tag size="small" type="warning" effect="plain" class="linked-tag">
             <el-icon><Link /></el-icon>
@@ -152,7 +179,7 @@
           <span><el-icon><ChatDotRound /></el-icon> {{ p.comment_count || 0 }}</span>
           <span><el-icon><Collection /></el-icon> {{ p.favorite_count || 0 }}</span>
         </div>
-      </div>
+      </article>
     </div>
 
     <el-pagination
@@ -169,10 +196,10 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import {
-  ChatDotRound, ChatLineSquare, Search, Star, Link, Bell, Warning, Collection,
+  ChatDotRound, ChatLineSquare, Search, Star, Link, Bell, Warning, Collection, RefreshLeft,
 } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import request from '../utils/request'
@@ -198,14 +225,66 @@ const category = ref('')
 const sort = ref('new')
 const resolved = ref('')
 const keyword = ref('')
-const tag = ref((route.query.tag || '').trim())
+const tag = ref('')
 const hotTags = ref([])
 const circles = ref([])
-const courseId = ref(parseInt(route.query.course_id, 10) || null)
+const courseId = ref(null)
 const page = ref(1)
 const pageSize = ref(20)
 const total = ref(0)
 const unread = ref(0)
+
+const hasActiveFilter = computed(() => !!(
+  category.value || keyword.value.trim() || tag.value || courseId.value ||
+  resolved.value !== '' || sort.value !== 'new' || (linkedType.value && linkedId.value)
+))
+
+// ── 地址栏同步：筛选条件写入 query，刷新 / 分享 / 从详情页返回都不丢状态 ──
+let appliedQ = '' // 已生效的搜索词，用来区分“用户输入”与“地址栏回填”
+
+const normalize = (obj) => JSON.stringify(
+  Object.keys(obj).sort().reduce((acc, k) => {
+    if (obj[k] !== '' && obj[k] != null) acc[k] = String(obj[k])
+    return acc
+  }, {})
+)
+
+const buildQuery = () => {
+  const q = {}
+  if (category.value) q.category = category.value
+  if (sort.value === 'hot') q.sort = 'hot'
+  if (resolved.value !== '') q.resolved = resolved.value
+  if (keyword.value.trim()) q.q = keyword.value.trim()
+  if (tag.value) q.tag = tag.value
+  if (courseId.value) q.course_id = String(courseId.value)
+  if (page.value > 1) q.page = String(page.value)
+  if (linkedType.value && linkedId.value) {
+    q.linked_type = linkedType.value
+    q.linked_id = String(linkedId.value)
+  }
+  return q
+}
+
+const applyRouteQuery = () => {
+  const q = route.query || {}
+  category.value = (q.category || '').trim()
+  sort.value = q.sort === 'hot' ? 'hot' : 'new'
+  resolved.value = ['1', '0'].includes(q.resolved) ? q.resolved : ''
+  keyword.value = (q.q || '').trim()
+  appliedQ = keyword.value
+  tag.value = (q.tag || '').trim()
+  courseId.value = parseInt(q.course_id, 10) || null
+  page.value = Math.max(1, parseInt(q.page, 10) || 1)
+}
+
+const syncQuery = () => {
+  const next = buildQuery()
+  appliedQ = keyword.value.trim()
+  if (normalize(next) === normalize(route.query || {})) return
+  router.replace({ path: '/community', query: next })
+}
+
+applyRouteQuery()
 
 const DEFAULT_CATEGORIES = [
   { key: 'discussion', name: '错题讨论' },
@@ -246,6 +325,17 @@ const fmtTime = (s) => {
   }
 }
 
+// 摘要：去掉 Markdown 标记并截断，避免把整篇正文（最多 5000 字）塞进列表 DOM
+const summaryOf = (p) => {
+  const raw = (p?.content || '')
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, '[图片]')
+    .replace(/```[\s\S]*?```/g, '[代码]')
+    .replace(/[#>*`~]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+  return raw.length > 140 ? `${raw.slice(0, 140)}…` : raw
+}
+
 const loadCategories = async () => {
   try {
     const res = await request.get('/api/community/categories')
@@ -261,7 +351,11 @@ const loadCategories = async () => {
   }
 }
 
+// 请求竞态守卫：只接受最后一次请求的结果，避免快速切换筛选时旧响应覆盖新响应
+let loadSeq = 0
+
 const load = async () => {
+  const seq = ++loadSeq
   loading.value = true
   try {
     const params = { page: page.value, per_page: pageSize.value, sort: sort.value }
@@ -276,20 +370,56 @@ const load = async () => {
       params.linked_id = linkedId.value
     }
     const res = await request.get('/api/community/posts', { params })
+    if (seq !== loadSeq) return
     const data = res.data || {}
     posts.value = data.items || data.posts || []
     total.value = data.total || 0
   } catch (e) {
+    if (seq !== loadSeq) return
     console.error('加载社区帖子失败:', e)
     ElMessage.error('加载帖子失败')
   } finally {
-    loading.value = false
+    if (seq === loadSeq) loading.value = false
   }
 }
 
+// 筛选变化：回到第一页、写回地址栏、再请求
 const reload = () => {
   page.value = 1
+  syncQuery()
   load()
+}
+
+const onPage = (p) => {
+  if (p === page.value) return
+  page.value = p
+  syncQuery()
+  load()
+}
+
+const resetFilters = () => {
+  category.value = ''
+  sort.value = 'new'
+  resolved.value = ''
+  keyword.value = ''
+  tag.value = ''
+  courseId.value = null
+  page.value = 1
+  appliedQ = ''
+  router.replace({ path: '/community' })
+  load()
+}
+
+// 搜索防抖：停顿 350ms 自动搜索，回车立即搜索
+let searchTimer = null
+watch(keyword, (val) => {
+  if (val.trim() === appliedQ) return // 由地址栏回填/重置触发，跳过
+  clearTimeout(searchTimer)
+  searchTimer = setTimeout(() => reload(), 350)
+})
+const onSearchEnter = () => {
+  clearTimeout(searchTimer)
+  reload()
 }
 
 const loadHotTags = async () => {
@@ -314,10 +444,6 @@ const toggleTag = (t) => {
   tag.value = tag.value === t ? '' : t
   reload()
 }
-const onPage = (p) => {
-  page.value = p
-  load()
-}
 
 const goDetail = (id) => router.push(`/community/${id}`)
 const goNewPost = () => router.push('/community/new')
@@ -333,20 +459,35 @@ const loadUnread = async () => {
   }
 }
 
+// 未读角标轮询：仅页面可见时刷新，切到后台不打扰
+let unreadTimer = null
+const startUnreadPolling = () => {
+  if (!isLoggedIn.value) return
+  unreadTimer = setInterval(() => {
+    if (document.visibilityState === 'visible') loadUnread()
+  }, 60000)
+}
+
 onMounted(async () => {
   await loadCategories()
   load()
   loadUnread()
   loadHotTags()
   loadCircles()
+  startUnreadPolling()
 })
 
-// 从详情页在不同关联对象间跳转时,query 变化需重新加载
-watch(() => [route.query.linked_type, route.query.linked_id, route.query.tag, route.query.course_id], () => {
-  tag.value = (route.query.tag || '').trim()
-  courseId.value = parseInt(route.query.course_id, 10) || null
-  page.value = 1
-  load()
+// 地址栏变化（前进/后退/外部跳转）时恢复筛选并重新加载
+watch(() => route.fullPath, () => {
+  if (route.path !== '/community') return
+  const before = normalize(buildQuery())
+  applyRouteQuery()
+  if (normalize(buildQuery()) !== before) load()
+})
+
+onBeforeUnmount(() => {
+  clearTimeout(searchTimer)
+  clearInterval(unreadTimer)
 })
 </script>
 
@@ -411,6 +552,10 @@ watch(() => [route.query.linked_type, route.query.linked_id, route.query.tag, ro
   box-shadow: 0 8px 24px rgba(20, 184, 166, 0.12);
   border-color: #14b8a6;
 }
+.post-card:focus-visible {
+  outline: 2px solid #14b8a6;
+  outline-offset: 2px;
+}
 
 .card-top { display: flex; gap: 6px; align-items: center; }
 .card-title { font-size: 16px; font-weight: 600; line-height: 1.4; margin: 0; color: var(--el-text-color-primary, #303133); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
@@ -441,4 +586,34 @@ watch(() => [route.query.linked_type, route.query.linked_id, route.query.tag, ro
 .card-meta .el-icon { margin-right: 2px; }
 
 .pager { margin-top: 24px; justify-content: center; }
+
+/* 首屏骨架 */
+.skeleton-card { pointer-events: none; }
+.sk {
+  border-radius: 6px;
+  background: linear-gradient(90deg, rgba(0,0,0,.06) 25%, rgba(0,0,0,.10) 37%, rgba(0,0,0,.06) 63%);
+  background-size: 400% 100%;
+  animation: sk-shimmer 1.4s ease infinite;
+}
+.sk-tag { width: 64px; height: 20px; }
+.sk-title { width: 78%; height: 20px; margin-top: 4px; }
+.sk-line { width: 100%; height: 12px; }
+.sk-line.short { width: 62%; }
+@keyframes sk-shimmer {
+  0% { background-position: 100% 50%; }
+  100% { background-position: 0 50%; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sk { animation: none; background: rgba(0,0,0,.07); }
+}
+
+/* 小屏：单列卡片，筛选控件占满整行 */
+@media (max-width: 640px) {
+  .post-grid { grid-template-columns: 1fr; gap: 12px; }
+  .header-actions { flex-wrap: wrap; }
+  .filters { gap: 8px; }
+  .filters :deep(.el-select),
+  .filters :deep(.el-input) { width: 100% !important; max-width: 100% !important; }
+  .post-card { padding: 14px; }
+}
 </style>

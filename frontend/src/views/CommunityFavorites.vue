@@ -5,16 +5,40 @@
     <div class="page-header">
       <div>
         <h2><el-icon :size="22" class="title-icon"><Star /></el-icon> 我的收藏</h2>
-        <p class="sub-info">收藏的帖子会集中在这里，方便随时回看</p>
+        <p class="sub-info">收藏的帖子与动态会集中在这里，方便随时回看</p>
       </div>
-      <el-button :icon="ChatDotRound" @click="router.push('/community')">回到论坛</el-button>
+      <el-button :icon="ChatDotRound" @click="router.push('/community')">回到社区</el-button>
     </div>
 
-    <el-empty v-if="!loading && !posts.length" description="还没有收藏任何帖子">
-      <el-button type="primary" @click="router.push('/community')">去逛逛社区</el-button>
+    <el-tabs v-model="kind" class="kind-tabs" @tab-change="onKindChange">
+      <el-tab-pane label="帖子" name="post" />
+      <el-tab-pane label="动态" name="moment" />
+    </el-tabs>
+
+    <el-empty v-if="!loading && kind === 'post' && !posts.length" description="还没有收藏任何帖子">
+      <el-button type="primary" @click="router.push('/community/forum')">去论坛逛逛</el-button>
+    </el-empty>
+    <el-empty v-else-if="!loading && kind === 'moment' && !moments.length" description="还没有收藏任何动态">
+      <el-button type="primary" @click="router.push('/community')">去动态广场看看</el-button>
     </el-empty>
 
-    <div class="post-grid" v-else>
+    <div v-else-if="kind === 'moment'" class="moment-list">
+      <MomentCard
+        v-for="m in moments"
+        :key="m.id"
+        :moment="m"
+        :current-user-id="currentUserId"
+        :show-follow="false"
+        @open="openMoment"
+        @comment="openMoment"
+        @repost="openMoment"
+        @like="toggleMomentLike"
+        @favorite="unfavoriteMoment"
+        @topic="(t) => router.push(`/community/topic/${t.id}`)"
+      />
+    </div>
+
+    <div v-else class="post-grid">
       <div v-for="p in posts" :key="p.id" class="post-card" @click="goDetail(p.id)">
         <div class="card-top">
           <el-tag size="small" effect="light">{{ p.category_label || p.category }}</el-tag>
@@ -52,15 +76,21 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { computed, ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Star, ChatDotRound } from '@element-plus/icons-vue'
 import request from '../utils/request'
+import { useAuthStore } from '../stores/auth'
+import MomentCard from '../components/MomentCard.vue'
 
 const router = useRouter()
+const auth = useAuthStore()
+const currentUserId = computed(() => auth.user?.id || null)
+const kind = ref('post')
 const loading = ref(false)
 const posts = ref([])
+const moments = ref([])
 const page = ref(1)
 const pageSize = ref(20)
 const total = ref(0)
@@ -68,12 +98,21 @@ const total = ref(0)
 const load = async () => {
   loading.value = true
   try {
-    const res = await request.get('/api/community/favorites', {
-      params: { page: page.value, per_page: pageSize.value },
-    })
-    const data = res.data || {}
-    posts.value = data.items || []
-    total.value = data.total || 0
+    if (kind.value === 'moment') {
+      const res = await request.get('/api/community/moments/favorites', {
+        params: { page: page.value, per_page: pageSize.value },
+      })
+      const data = res.data || {}
+      moments.value = data.items || []
+      total.value = data.total || 0
+    } else {
+      const res = await request.get('/api/community/favorites', {
+        params: { page: page.value, per_page: pageSize.value },
+      })
+      const data = res.data || {}
+      posts.value = data.items || []
+      total.value = data.total || 0
+    }
   } catch (e) {
     console.error('加载收藏失败:', e)
   } finally {
@@ -84,6 +123,35 @@ const load = async () => {
 const goBack = () => window.history.back()
 const goDetail = (id) => router.push(`/community/${id}`)
 const onPage = (p) => { page.value = p; load() }
+
+const onKindChange = () => {
+  page.value = 1
+  total.value = 0
+  load()
+}
+
+const openMoment = (m) => router.push(`/community/moment/${m.id}`)
+
+const toggleMomentLike = async (m) => {
+  try {
+    const res = m.liked
+      ? await request.delete(`/api/community/moments/${m.id}/like`)
+      : await request.post(`/api/community/moments/${m.id}/like`)
+    m.liked = res.data.liked
+    m.like_count = res.data.like_count
+  } catch (e) { /* 已提示 */ }
+}
+
+const unfavoriteMoment = async (m) => {
+  try {
+    await request.delete(`/api/community/moments/${m.id}/favorite`)
+    moments.value = moments.value.filter((x) => x.id !== m.id)
+    total.value = Math.max(0, total.value - 1)
+    ElMessage.success('已取消收藏')
+  } catch (e) {
+    console.error('取消收藏失败:', e)
+  }
+}
 
 const unfavorite = async (p) => {
   try {
@@ -105,6 +173,8 @@ onMounted(load)
 .page-header h2 { margin: 0 0 4px; display: flex; align-items: center; gap: 8px; }
 .sub-info { color: var(--el-text-color-secondary, #909399); font-size: 13px; margin: 0; }
 .title-icon { color: #14b8a6; }
+.kind-tabs { margin-bottom: 14px; }
+.moment-list { display: flex; flex-direction: column; gap: 12px; }
 .post-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 16px; }
 .post-card { background: var(--el-bg-color, #fff); border: 1px solid var(--el-border-color-light, #e4e7ed); border-radius: 12px; padding: 18px; cursor: pointer; transition: all .25s; display: flex; flex-direction: column; gap: 10px; }
 .post-card:hover { transform: translateY(-3px); box-shadow: 0 8px 24px rgba(20,184,166,.12); border-color: #14b8a6; }

@@ -17,6 +17,19 @@
       </template>
     </el-page-header>
 
+    <!-- 加载失败：给出明确原因与出口，避免整页空白 -->
+    <el-result
+      v-if="!loading && !post && loadError"
+      icon="warning"
+      title="帖子无法打开"
+      :sub-title="loadError"
+      class="load-fail"
+    >
+      <template #extra>
+        <el-button @click="router.push('/community')">返回社区</el-button>
+      </template>
+    </el-result>
+
     <template v-if="post">
       <!-- 帖子信息 -->
       <div class="section post-head">
@@ -122,8 +135,12 @@
             v-for="o in post.poll.options"
             :key="o.id"
             class="poll-option"
+            role="button"
+            tabindex="0"
             :class="{ voted: post.poll.voted_option_id === o.id }"
             @click="vote(o.id)"
+            @keydown.enter.prevent="vote(o.id)"
+            @keydown.space.prevent="vote(o.id)"
           >
             <div class="poll-bar" :style="{ width: o.percent + '%' }"></div>
             <div class="poll-row">
@@ -247,8 +264,9 @@
         <div
           v-for="c in threadedComments"
           :key="c.id"
+          :data-comment-id="c.id"
           class="comment-item"
-          :class="{ reply: c.depth > 0, folded: c.hidden }"
+          :class="{ reply: c.depth > 0, folded: c.hidden, 'just-added': c.id === justAddedId }"
           :style="{ marginLeft: Math.min(c.depth, 5) * 28 + 'px' }"
         >
           <div class="comment-head">
@@ -385,6 +403,11 @@ const submittingReport = ref(false)
 
 const post = ref(null)
 const comments = ref([])
+const loadError = ref('')
+const justAddedId = ref(null)
+const likePending = ref(false)
+const favPending = ref(false)
+const voting = ref(false)
 
 const liked = ref(false)
 const likeCount = ref(0)
@@ -528,12 +551,17 @@ const threadedComments = computed(() => {
   return flat
 })
 
-const goBack = () => window.history.back()
+// 从站外直接打开详情页时 history 里没有站内上一页，回退会离开站点，这里兜底回社区列表
+const goBack = () => {
+  if (window.history.state?.back) router.back()
+  else router.push('/community')
+}
 const goLogin = () => router.push(`/login?redirect=${encodeURIComponent(route.fullPath)}`)
 
 // ── 加载数据 ──
 const load = async () => {
   loading.value = true
+  loadError.value = ''
   try {
     const id = route.params.id
     const res = await request.get(`/api/community/posts/${id}`)
@@ -545,6 +573,10 @@ const load = async () => {
     favoriteCount.value = post.value.favorite_count || 0
     comments.value = post.value.comments || []
   } catch (e) {
+    const status = e?.response?.status
+    loadError.value = status === 404
+      ? '帖子不存在或已被删除'
+      : '网络异常或服务不可用，请稍后重试'
     console.error('加载帖子详情失败:', e)
   } finally {
     loading.value = false
@@ -557,6 +589,8 @@ const toggleLike = async () => {
     ElMessage.warning('请先登录')
     return goLogin()
   }
+  if (likePending.value) return // 防连点：请求未完成前忽略重复点击
+  likePending.value = true
   const prevLiked = liked.value
   const prevCount = likeCount.value
   liked.value = !liked.value
@@ -571,6 +605,8 @@ const toggleLike = async () => {
     liked.value = prevLiked
     likeCount.value = prevCount
     console.error('点赞操作失败:', e)
+  } finally {
+    likePending.value = false
   }
 }
 
@@ -580,6 +616,8 @@ const toggleFavorite = async () => {
     ElMessage.warning('请先登录')
     return goLogin()
   }
+  if (favPending.value) return // 防连点
+  favPending.value = true
   const prevFavorited = favorited.value
   const prevCount = favoriteCount.value
   favorited.value = !favorited.value
@@ -596,6 +634,8 @@ const toggleFavorite = async () => {
     favorited.value = prevFavorited
     favoriteCount.value = prevCount
     console.error('收藏操作失败:', e)
+  } finally {
+    favPending.value = false
   }
 }
 
@@ -621,6 +661,8 @@ const vote = async (optionId) => {
     ElMessage.warning('请先登录')
     return goLogin()
   }
+  if (voting.value) return // 防连点：投票结果会整体覆盖，连点会闪烁
+  voting.value = true
   try {
     const res = await request.post(`/api/community/posts/${post.value.id}/vote`, {
       option_id: optionId,
@@ -628,6 +670,8 @@ const vote = async (optionId) => {
     post.value.poll = res.data
   } catch (e) {
     // request 拦截器已提示
+  } finally {
+    voting.value = false
   }
 }
 
@@ -709,8 +753,18 @@ const submitComment = async () => {
     if (replyTarget.value) payload.parent_id = replyTarget.value.id
     const res = await request.post(`/api/community/posts/${post.value.id}/comments`, payload)
     const comment = res.data?.comment || res.data
-    if (comment) comments.value.push(comment)
-    if (post.value) post.value.comment_count = (post.value.comment_count || 0) + 1
+    if (comment) {
+      comments.value.push(comment)
+      if (post.value) post.value.comment_count = (post.value.comment_count || 0) + 1
+      // 新评论滚动到可视区并短暂高亮，让用户确认发表成功
+      justAddedId.value = comment.id
+      await nextTick()
+      const el = document.querySelector(`[data-comment-id="${comment.id}"]`)
+      el?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      setTimeout(() => {
+        if (justAddedId.value === comment.id) justAddedId.value = null
+      }, 2000)
+    }
     newComment.content = ''
     newComment.is_anonymous = false
     replyTarget.value = null
@@ -726,8 +780,24 @@ const submitComment = async () => {
 const deleteComment = async (c) => {
   try {
     await request.delete(`/api/community/comments/${c.id}`)
+    // 后端会级联删除子回复，这里同步移除整棵子树；不整页重载以保住滚动位置
+    const doomed = new Set([c.id])
+    let grew = true
+    while (grew) {
+      grew = false
+      comments.value.forEach((x) => {
+        if (x.parent_id && doomed.has(x.parent_id) && !doomed.has(x.id)) {
+          doomed.add(x.id)
+          grew = true
+        }
+      })
+    }
+    const removed = comments.value.filter((x) => doomed.has(x.id)).length
+    comments.value = comments.value.filter((x) => !doomed.has(x.id))
+    if (post.value) {
+      post.value.comment_count = Math.max(0, (post.value.comment_count || 0) - removed)
+    }
     ElMessage.success('评论已删除')
-    load()
   } catch (e) {
     console.error('删除评论失败:', e)
   }
@@ -913,6 +983,7 @@ onMounted(load)
 }
 .poll-option:hover { border-color: #14b8a6; }
 .poll-option.voted { border-color: #14b8a6; }
+.poll-option:focus-visible { outline: 2px solid #14b8a6; outline-offset: 2px; }
 .poll-bar {
   position: absolute;
   inset: 0 auto 0 0;
@@ -983,6 +1054,29 @@ onMounted(load)
 }
 .comment-item.folded { opacity: .8; }
 .comment-item:last-child { border-bottom: none; }
+
+/* 新发表评论的高亮，2 秒后自动褪去 */
+.comment-item.just-added {
+  animation: comment-flash 2s ease-out;
+  border-radius: 8px;
+}
+@keyframes comment-flash {
+  0% { background: rgba(20, 184, 166, 0.16); }
+  100% { background: transparent; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .comment-item.just-added { animation: none; background: rgba(20, 184, 166, 0.12); }
+}
+
+.load-fail { padding-top: 48px; }
+
+/* 小屏：收紧留白，标题降一级 */
+@media (max-width: 640px) {
+  .section { padding: 16px; }
+  .post-head { padding: 18px; }
+  .post-title { font-size: 20px; }
+  .post-actions { flex-wrap: wrap; gap: 8px; }
+}
 
 .comment-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
 .author-line { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }

@@ -235,7 +235,7 @@ import {
   SwitchButton, ArrowDown, School, Fold, Expand, Grid,
   Star, Calendar, VideoPlay, TrendCharts, Medal, Trophy, Lightning,
   Sunny, Moon, Check, Warning, InfoFilled,
-  Money, EditPen, Tickets, Close, Reading, Connection, Notebook, Memo, ChatDotRound, Compass
+  Money, EditPen, Tickets, Close, Reading, Connection, Notebook, Memo, ChatDotRound, ChatLineSquare, Message, Compass
 } from '@element-plus/icons-vue'
 
 const route = useRoute()
@@ -562,7 +562,7 @@ const iconMap = {
   Document, Collection, HomeFilled, Bell, User, Setting,
   SwitchButton, ArrowDown, School, Fold, Expand, Grid,
   Star, Calendar, VideoPlay, TrendCharts, Medal, Trophy, Lightning,
-  Money, EditPen, Tickets, Reading, Connection, Notebook, Memo, Warning, ChatDotRound, Compass
+  Money, EditPen, Tickets, Reading, Connection, Notebook, Memo, Warning, ChatDotRound, ChatLineSquare, Message, Compass
 }
 
 // 自主学习侧边栏：原本 18 个页面平铺太长，压缩为 6 个分组 + 2 个独立入口。
@@ -697,14 +697,18 @@ const moduleMenus = {
   },
   community: {
     teacher: [
-      { path: '/community', label: '社区中心', icon: iconMap.ChatDotRound },
+      { path: '/community', label: '社区动态', icon: iconMap.ChatDotRound },
+      { path: '/community/forum', label: '论坛', icon: iconMap.ChatLineSquare },
+      { path: '/community/messages', label: '私信', icon: iconMap.Message },
       { path: '/community/favorites', label: '我的收藏', icon: iconMap.Star },
       { path: '/community/notifications', label: '消息中心', icon: iconMap.Bell },
       { path: '/community/reports', label: '举报管理', icon: iconMap.Warning },
       { path: '/community/admin', label: '社区管理', icon: iconMap.Setting },
     ],
     student: [
-      { path: '/community', label: '社区中心', icon: iconMap.ChatDotRound },
+      { path: '/community', label: '社区动态', icon: iconMap.ChatDotRound },
+      { path: '/community/forum', label: '论坛', icon: iconMap.ChatLineSquare },
+      { path: '/community/messages', label: '私信', icon: iconMap.Message },
       { path: '/community/favorites', label: '我的收藏', icon: iconMap.Star },
       { path: '/community/notifications', label: '消息中心', icon: iconMap.Bell },
     ]

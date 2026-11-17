@@ -6,14 +6,32 @@
       <div class="profile-card">
         <el-avatar :size="64" class="avatar">{{ initial }}</el-avatar>
         <div class="info">
-          <h2 class="name">
-            {{ profile.user.username }}
+          <div class="name-line">
+            <h2 class="name">{{ profile.user.username }}</h2>
             <el-tag v-if="profile.user.role === 'teacher'" size="small" type="warning">教师</el-tag>
             <el-tag v-else size="small" type="info">学生</el-tag>
-          </h2>
+            <template v-if="!isSelf && auth.token">
+              <el-button
+                size="small"
+                :type="followStats.is_following ? 'info' : 'primary'"
+                :plain="!!followStats.is_following"
+                :loading="followPending"
+                @click="toggleFollow"
+              >{{ followStats.is_following ? '已关注' : '+ 关注' }}</el-button>
+              <el-button
+                size="small"
+                plain
+                @click="router.push({ path: '/community/messages', query: { peer: profile.user.id } })"
+              >私信</el-button>
+              <el-tag v-if="followStats.is_mutual" size="small" type="success" effect="plain">互关</el-tag>
+            </template>
+          </div>
           <p class="joined">
             加入于 {{ fmtDate(profile.user.created_at) }}
             <span v-if="isSelf" class="self-tag">这是你的主页</span>
+            <span class="follow-nums">
+              关注 {{ followStats.following_count }} · 粉丝 {{ followStats.fans_count }}
+            </span>
           </p>
         </div>
       </div>
@@ -112,6 +130,35 @@
               @current-change="onPage"
             />
           </el-tab-pane>
+          <el-tab-pane :label="`动态 (${momentTotal})`" name="moments">
+            <div v-if="momentsLoading" v-loading="true" class="moments-loading" />
+            <el-empty v-else-if="!moments.length" :image-size="60" description="还没有公开动态" />
+            <div v-else class="moment-list">
+              <MomentCard
+                v-for="m in moments"
+                :key="m.id"
+                :moment="m"
+                :current-user-id="auth.user?.id || null"
+                :show-follow="false"
+                @open="(x) => router.push(`/community/moment/${x.id}`)"
+                @comment="(x) => router.push(`/community/moment/${x.id}`)"
+                @repost="(x) => router.push(`/community/moment/${x.id}`)"
+                @like="toggleMomentLike"
+                @favorite="toggleMomentFavorite"
+                @topic="(t) => router.push(`/community/topic/${t.id}`)"
+              />
+            </div>
+            <el-pagination
+              v-if="momentTotal > pageSize"
+              class="pager"
+              background
+              layout="prev, pager, next"
+              :current-page="page"
+              :page-size="pageSize"
+              :total="momentTotal"
+              @current-change="onPage"
+            />
+          </el-tab-pane>
         </el-tabs>
       </div>
     </template>
@@ -121,8 +168,10 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { ElMessage } from 'element-plus'
 import request from '../utils/request'
 import { useAuthStore } from '../stores/auth'
+import MomentCard from '../components/MomentCard.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -133,6 +182,16 @@ const profile = ref(null)
 const tab = ref('posts')
 const page = ref(1)
 const pageSize = ref(20)
+const moments = ref([])
+const momentTotal = ref(0)
+const momentsLoading = ref(false)
+const followPending = ref(false)
+const followStats = ref({
+  following_count: 0,
+  fans_count: 0,
+  is_following: false,
+  is_mutual: false,
+})
 
 const isSelf = computed(() => auth.user?.id === profile.value?.user?.id)
 const initial = computed(() => (profile.value?.user?.username || '?').slice(0, 1).toUpperCase())
@@ -161,18 +220,81 @@ const load = async () => {
       params: { page: page.value, per_page: pageSize.value },
     })
     profile.value = res.data || null
+    loadFollowStats()
   } finally {
     loading.value = false
   }
 }
 
+const loadFollowStats = async () => {
+  try {
+    const res = await request.get(`/api/community/users/${route.params.id}/follow-stats`)
+    followStats.value = res.data || followStats.value
+  } catch {
+    // 未登录/接口异常时保留默认 0，不影响主页展示
+  }
+}
+
+const loadMoments = async () => {
+  momentsLoading.value = true
+  try {
+    const res = await request.get(`/api/community/users/${route.params.id}/moments`, {
+      params: { page: page.value, per_page: pageSize.value },
+    })
+    const data = res.data || {}
+    moments.value = data.items || []
+    momentTotal.value = data.total || 0
+  } catch (e) {
+    console.error('加载用户动态失败:', e)
+  } finally {
+    momentsLoading.value = false
+  }
+}
+
+const toggleFollow = async () => {
+  if (followPending.value) return
+  followPending.value = true
+  try {
+    const res = await request.post(`/api/learning/users/${route.params.id}/follow`)
+    const following = !!res.data.following
+    followStats.value.is_following = following
+    followStats.value.fans_count = Math.max(0, (followStats.value.fans_count || 0) + (following ? 1 : -1))
+    followStats.value.is_mutual = following && !!followStats.value.is_followed_by
+    ElMessage.success(following ? '已关注' : '已取消关注')
+  } catch (e) { /* 已提示 */ } finally {
+    followPending.value = false
+  }
+}
+
+const toggleMomentLike = async (m) => {
+  try {
+    const res = m.liked
+      ? await request.delete(`/api/community/moments/${m.id}/like`)
+      : await request.post(`/api/community/moments/${m.id}/like`)
+    m.liked = res.data.liked
+    m.like_count = res.data.like_count
+  } catch (e) { /* 已提示 */ }
+}
+
+const toggleMomentFavorite = async (m) => {
+  try {
+    const res = m.favorited
+      ? await request.delete(`/api/community/moments/${m.id}/favorite`)
+      : await request.post(`/api/community/moments/${m.id}/favorite`)
+    m.favorited = res.data.favorited
+    m.favorite_count = res.data.favorite_count
+  } catch (e) { /* 已提示 */ }
+}
+
 const onPage = (p) => {
   page.value = p
-  load()
+  if (tab.value === 'moments') loadMoments()
+  else load()
 }
 const onTabChange = () => {
   page.value = 1
-  load()
+  if (tab.value === 'moments') loadMoments()
+  else load()
 }
 
 onMounted(load)
@@ -195,6 +317,10 @@ onMounted(load)
 .name { margin: 0 0 6px; display: flex; align-items: center; gap: 8px; font-size: 22px; }
 .joined { margin: 0; font-size: 13px; color: var(--el-text-color-secondary, #909399); }
 .self-tag { margin-left: 10px; color: #14b8a6; }
+.name-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.follow-nums { margin-left: 12px; color: var(--el-text-color-secondary, #909399); }
+.moment-list { display: flex; flex-direction: column; gap: 12px; }
+.moments-loading { height: 120px; }
 
 .stats {
   display: grid;

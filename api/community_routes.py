@@ -19,19 +19,26 @@
 """
 import re
 from collections import Counter
+from datetime import timedelta
 
 from flask import Blueprint, request, jsonify
-from sqlalchemy import desc, or_, func
+from sqlalchemy import desc, or_, and_, func
 from sqlalchemy.exc import IntegrityError
 
 from database import db
 from database.models import (
-    User, Course, Question, Exam, WrongAnswerRecord,
+    User, Course, Question, Exam, WrongAnswerRecord, UserFollow,
     CommunityPost, CommunityComment, CommunityLike,
     CommunityFavorite, CommunityNotification, CommunityReport,
     CommunityPollOption, CommunityPollVote, CommunityUserStat, CommunityPointLog,
     CommunityCategoryEnum, CommunityLinkTypeEnum,
+    CommunityMoment, CommunityMomentComment, CommunityTopic,
+    CommunityMomentTopic, CommunityMomentFavorite,
+    CommunityMomentVisibilityEnum, CommunityRepostTypeEnum,
+    CommunityDmConversation, CommunityDmMessage, CommunityUserBlock,
+    CommunityDmAccessLog,
 )
+from utils.notify import create_notification
 from homework.models import Homework
 from utils.security import verify_token, limiter
 from utils.permissions import require_login, require_teacher
@@ -276,7 +283,8 @@ def _extract_mentions(text):
     return User.query.filter(User.username.in_(names)).all()
 
 
-def _notify(user_id, actor_id, ntype, post_id=None, comment_id=None, content=None):
+def _notify(user_id, actor_id, ntype, post_id=None, comment_id=None, content=None,
+            moment_id=None, moment_comment_id=None):
     """写一条社区通知；自己触发的动作不再通知自己。"""
     if not user_id or user_id == actor_id:
         return None
@@ -286,6 +294,8 @@ def _notify(user_id, actor_id, ntype, post_id=None, comment_id=None, content=Non
         type=ntype,
         post_id=post_id,
         comment_id=comment_id,
+        moment_id=moment_id,
+        moment_comment_id=moment_comment_id,
         content=(content or '')[:200] or None,
     )
     db.session.add(n)
@@ -296,6 +306,14 @@ def _notify_mentions(text, actor_id, post_id, comment_id=None):
     for u in _extract_mentions(text):
         _notify(u.id, actor_id, 'mention', post_id=post_id,
                 comment_id=comment_id, content=f'@{u.username} 你被提及了')
+
+
+def _notify_moment_mentions(text, actor_id, moment_id, moment_comment_id=None):
+    """动态/动态评论里的 @ 提及：落到通知中心的 moment_id 上。"""
+    for u in _extract_mentions(text):
+        _notify(u.id, actor_id, 'mention', moment_id=moment_id,
+                moment_comment_id=moment_comment_id,
+                content=f'@{u.username} 你被提及了')
 
 
 # ── 举报折叠 ─────────────────────────────────────────────
@@ -313,6 +331,12 @@ def _auto_fold_if_needed(target_type, obj):
         if target_type == 'post':
             _notify(obj.author_id, None, 'hidden', post_id=obj.id,
                     content='你的帖子因多次举报已被折叠，管理员会尽快处理')
+        elif target_type == 'moment':
+            _notify(obj.author_id, None, 'hidden', moment_id=obj.id,
+                    content='你的动态因多次举报已被折叠，管理员会尽快处理')
+        elif target_type == 'mcomment':
+            _notify(obj.author_id, None, 'hidden', moment_id=obj.moment_id,
+                    moment_comment_id=obj.id, content='你的评论因多次举报已被折叠')
         else:
             _notify(obj.author_id, None, 'hidden', comment_id=obj.id,
                     post_id=obj.post_id, content='你的评论因多次举报已被折叠')
@@ -643,8 +667,9 @@ def delete_post(post_id):
 def _toggle_like(target_type, target_id, user, value):
     """点赞/取消点赞；value=True 点赞，value=False 取消。
 
+    target_type: post/comment（论坛）与 moment/mcomment（动态）共用同一张点赞表。
     返回 (ok, error, status_code)"""
-    if target_type not in ('post', 'comment'):
+    if target_type not in ('post', 'comment', 'moment', 'mcomment'):
         return False, '无效点赞目标类型', 400
 
     # 校验目标存在
@@ -652,8 +677,16 @@ def _toggle_like(target_type, target_id, user, value):
         obj = db.session.get(CommunityPost, target_id)
         if not obj or obj.deleted:
             return False, '帖子不存在或已删除', 404
-    else:
+    elif target_type == 'comment':
         obj = db.session.get(CommunityComment, target_id)
+        if not obj or obj.deleted:
+            return False, '评论不存在或已删除', 404
+    elif target_type == 'moment':
+        obj = db.session.get(CommunityMoment, target_id)
+        if not obj or obj.deleted:
+            return False, '动态不存在或已删除', 404
+    else:
+        obj = db.session.get(CommunityMomentComment, target_id)
         if not obj or obj.deleted:
             return False, '评论不存在或已删除', 404
 
@@ -1075,22 +1108,38 @@ def _require_teacher_or_admin():
     return user, None
 
 
+REPORT_TARGET_TYPES = ('post', 'comment', 'moment', 'mcomment', 'dm_message')
+
+
+def _load_report_target(target_type, target_id):
+    model_map = {
+        'post': CommunityPost,
+        'comment': CommunityComment,
+        'moment': CommunityMoment,
+        'mcomment': CommunityMomentComment,
+        'dm_message': CommunityDmMessage,
+    }
+    model = model_map.get(target_type)
+    return db.session.get(model, target_id) if model else None
+
+
 def _report_target(rep):
     """举报队列展示用：带出被举报内容的摘要。"""
     data = rep.to_dict()
-    target = None
-    if rep.target_type == 'post':
-        target = db.session.get(CommunityPost, rep.target_id)
-    else:
-        target = db.session.get(CommunityComment, rep.target_id)
+    target = _load_report_target(rep.target_type, rep.target_id)
     if target:
         data['target_title'] = getattr(target, 'title', None)
         data['target_content'] = (target.content or '')[:200]
-        data['target_author_id'] = target.author_id
-        data['target_deleted'] = target.deleted
-        data['target_hidden'] = target.hidden
+        data['target_author_id'] = (target.sender_id if rep.target_type == 'dm_message'
+                                    else target.author_id)
+        data['target_deleted'] = bool(getattr(target, 'deleted', False))
+        data['target_hidden'] = bool(getattr(target, 'hidden', False))
         if rep.target_type == 'comment':
             data['target_post_id'] = target.post_id
+        elif rep.target_type == 'mcomment':
+            data['target_moment_id'] = target.moment_id
+        elif rep.target_type == 'dm_message':
+            data['target_conversation_id'] = target.conversation_id
     return data
 
 
@@ -1106,19 +1155,21 @@ def create_report():
     target_id = data.get('target_id')
     reason = (data.get('reason') or '').strip()
 
-    if target_type not in ('post', 'comment'):
+    if target_type not in REPORT_TARGET_TYPES:
         return _err('无效举报对象类型')
     if not target_id or not reason or len(reason) > 200:
         return _err('举报理由必填且 ≤ 200 字')
 
-    if target_type == 'post':
-        target = db.session.get(CommunityPost, target_id)
-    else:
-        target = db.session.get(CommunityComment, target_id)
-    if not target or target.deleted:
+    target = _load_report_target(target_type, target_id)
+    if not target:
         return _err('举报的内容不存在或已删除', 404)
-    if target.author_id == user.id:
+    target_author_id = target.sender_id if target_type == 'dm_message' else target.author_id
+    if target_author_id == user.id:
         return _err('不能举报自己的内容')
+    if target_type == 'dm_message' and user.id not in (target.sender_id, target.receiver_id):
+        return _err('无权举报该私信', 403)
+    if target_type != 'dm_message' and target.deleted:
+        return _err('举报的内容不存在或已删除', 404)
 
     existing = CommunityReport.query.filter_by(
         target_type=target_type, target_id=target.id, reporter_id=user.id
@@ -1134,13 +1185,21 @@ def create_report():
     )
     db.session.add(rep)
     db.session.flush()
-    pending = _auto_fold_if_needed(target_type, target)
+    if target_type == 'dm_message':
+        # 私信按合规要求保留原文，仅进入人工队列，不做自动折叠
+        pending = CommunityReport.query.filter_by(
+            target_type=target_type, target_id=target.id, status='pending'
+        ).count()
+        hidden = False
+    else:
+        pending = _auto_fold_if_needed(target_type, target)
+        hidden = target.hidden
     db.session.commit()
 
     return _ok({
         'report': rep.to_dict(),
         'report_count': pending,
-        'hidden': target.hidden,
+        'hidden': hidden,
     }), 201
 
 
@@ -1188,26 +1247,32 @@ def handle_report(report_id):
     if action not in ('dismiss', 'remove'):
         return _err('action 只能是 dismiss 或 remove')
 
-    target = None
-    if rep.target_type == 'post':
-        target = db.session.get(CommunityPost, rep.target_id)
-    else:
-        target = db.session.get(CommunityComment, rep.target_id)
+    target = _load_report_target(rep.target_type, rep.target_id)
 
-    if action == 'remove' and target and not target.deleted:
+    if rep.target_type == 'dm_message':
+        # 私信正文按合规要求留存，处理结论只影响举报状态，不删改原文
+        if action == 'remove' and target:
+            _notify(target.sender_id, user.id, 'report', content='你的一条私信因违规被管理员处理')
+    elif action == 'remove' and target and not target.deleted:
         target.deleted = True
         if rep.target_type == 'post':
             _notify(target.author_id, user.id, 'report', post_id=target.id,
                     content='你的帖子因违规已被管理员删除')
-        else:
+        elif rep.target_type == 'comment':
             _notify(target.author_id, user.id, 'report', post_id=target.post_id,
                     comment_id=target.id, content='你的评论因违规已被管理员删除')
+        elif rep.target_type == 'moment':
+            _notify(target.author_id, user.id, 'report', moment_id=target.id,
+                    content='你的动态因违规已被管理员删除')
+        else:
+            _notify(target.author_id, user.id, 'report', moment_id=target.moment_id,
+                    moment_comment_id=target.id, content='你的评论因违规已被管理员删除')
 
     rep.status = 'handled' if action == 'remove' else 'dismissed'
     rep.handled_by = user.id
     rep.handled_at = utcnow()
 
-    if target:
+    if target and rep.target_type != 'dm_message':
         _auto_fold_if_needed(rep.target_type, target)
     db.session.commit()
 
@@ -1848,4 +1913,1361 @@ def my_points():
             'related_id': l.related_id,
             'created_at': l.created_at.isoformat() if l.created_at else None,
         } for l in logs],
+    })
+
+
+# ═══════════════════════════════════════════════════════════
+# v7.25 微博化：动态（moment）
+# 与论坛帖并行：一句话/短文 + 转发引用 + 话题 + 关注流 + 私信（P2 另段）
+# ═══════════════════════════════════════════════════════════
+
+def _moment_visibility_clause(viewer):
+    """当前 viewer 可见的可见范围条件（不含 deleted/hidden）。"""
+    public = CommunityMoment.visibility == CommunityMomentVisibilityEnum.PUBLIC
+    if viewer is None:
+        return public
+    own = CommunityMoment.author_id == viewer.id
+    followers_only = CommunityMoment.visibility == CommunityMomentVisibilityEnum.FOLLOWERS
+    if viewer.role in ('teacher', 'admin'):
+        return or_(public, followers_only, own)
+    # 仅关注者可见：作者本人 + 关注了作者的人（相关 EXISTS 命中索引）
+    followed_by_viewer = db.session.query(UserFollow.id).filter(
+        UserFollow.follower_id == viewer.id,
+        UserFollow.followee_id == CommunityMoment.author_id,
+    ).exists()
+    return or_(public, own, and_(followers_only, followed_by_viewer))
+
+
+def _apply_moment_filters(query, viewer):
+    """统一叠加 deleted / hidden / visibility 过滤（与帖子列表口径对齐）。"""
+    query = query.filter(CommunityMoment.deleted == False)  # noqa: E712
+    if not (viewer and viewer.role in ('teacher', 'admin')):
+        query = query.filter(or_(
+            CommunityMoment.hidden == False,  # noqa: E712
+            CommunityMoment.author_id == (viewer.id if viewer else -1),
+        ))
+    return query.filter(_moment_visibility_clause(viewer))
+
+
+def _can_view_moment(moment, viewer):
+    if not moment or moment.deleted:
+        return False
+    if viewer and moment.author_id == viewer.id:
+        return True
+    if moment.visibility == CommunityMomentVisibilityEnum.PUBLIC:
+        return True
+    if viewer is None:
+        return False
+    if viewer.role in ('teacher', 'admin'):
+        return moment.visibility != CommunityMomentVisibilityEnum.PRIVATE
+    if moment.visibility == CommunityMomentVisibilityEnum.FOLLOWERS:
+        return UserFollow.query.filter_by(
+            follower_id=viewer.id, followee_id=moment.author_id
+        ).first() is not None
+    return False
+
+
+def _moment_topics_map(moment_ids):
+    """批量查动态话题，避免卡片逐条查询。"""
+    if not moment_ids:
+        return {}
+    rows = db.session.query(
+        CommunityMomentTopic.moment_id, CommunityTopic.id, CommunityTopic.name,
+    ).join(
+        CommunityTopic, CommunityTopic.id == CommunityMomentTopic.topic_id
+    ).filter(CommunityMomentTopic.moment_id.in_(moment_ids)).all()
+    mapping = {}
+    for moment_id, topic_id, name in rows:
+        mapping.setdefault(moment_id, []).append({'id': topic_id, 'name': name})
+    return mapping
+
+
+def _moment_author_followed_ids(viewer, moments):
+    if not viewer or not moments:
+        return set()
+    author_ids = {m.author_id for m in moments if not m.is_anonymous or m.author_id == viewer.id}
+    if not author_ids:
+        return set()
+    return {row[0] for row in db.session.query(UserFollow.followee_id).filter(
+        UserFollow.follower_id == viewer.id,
+        UserFollow.followee_id.in_(author_ids),
+    ).all()}
+
+
+def _moment_serialize(moment, viewer, liked_ids=None, fav_ids=None,
+                      topics_map=None, followed_ids=None):
+    data = moment.to_dict(viewer=viewer)
+    data['liked'] = bool(viewer and (
+        moment.id in liked_ids if liked_ids is not None else _is_liked('moment', moment.id, viewer)
+    ))
+    if viewer:
+        data['favorited'] = bool(
+            moment.id in fav_ids if fav_ids is not None else _is_moment_favorited(moment.id, viewer)
+        )
+    else:
+        data['favorited'] = False
+    data['like_count'] = _hot_like_count('moment', moment.id, moment.like_count)
+    if topics_map is None:
+        data['topics'] = _moment_topics_map([moment.id]).get(moment.id, [])
+    else:
+        data['topics'] = topics_map.get(moment.id, [])
+    data['author_followed'] = bool(
+        viewer and not moment.is_anonymous and moment.author_id in (followed_ids or set())
+    )
+    return data
+
+
+def _serialize_moments(moments, viewer):
+    """feed / 列表统一序列化：一次预查点赞、收藏、话题、关注关系。"""
+    ids = [m.id for m in moments]
+    liked_ids, fav_ids = set(), set()
+    if viewer and ids:
+        liked_ids = {row[0] for row in db.session.query(CommunityLike.target_id).filter(
+            CommunityLike.user_id == viewer.id,
+            CommunityLike.target_type == 'moment',
+            CommunityLike.target_id.in_(ids),
+        ).all()}
+        fav_ids = {row[0] for row in db.session.query(CommunityMomentFavorite.moment_id).filter(
+            CommunityMomentFavorite.user_id == viewer.id,
+            CommunityMomentFavorite.moment_id.in_(ids),
+        ).all()}
+    topics_map = _moment_topics_map(ids)
+    followed_ids = _moment_author_followed_ids(viewer, moments)
+    return [
+        _moment_serialize(m, viewer, liked_ids, fav_ids, topics_map, followed_ids)
+        for m in moments
+    ]
+
+
+def _is_moment_favorited(moment_id, user):
+    if not user:
+        return False
+    return CommunityMomentFavorite.query.filter_by(
+        moment_id=moment_id, user_id=user.id
+    ).first() is not None
+
+
+def _mcomment_serialize(comment, viewer, liked_ids=None):
+    data = comment.to_dict(viewer=viewer)
+    data['liked'] = bool(viewer and (
+        comment.id in liked_ids if liked_ids is not None
+        else _is_liked('mcomment', comment.id, viewer)
+    ))
+    data['like_count'] = _hot_like_count('mcomment', comment.id, comment.like_count)
+    return data
+
+
+def _moment_snapshot(moment):
+    """转发快照：只读、脱敏，原动态删除后仍可展示。"""
+    return {
+        'id': moment.id,
+        'author_id': moment.author_id,
+        'display_username': moment.author.username if moment.author else '未知用户',
+        'content': (moment.content or '')[:500],
+        'created_at': moment.created_at.isoformat() if moment.created_at else None,
+    }
+
+
+def _attach_topics(moment, raw_topics, user):
+    """写入话题关联：同名复用，最多 4 个、每个 ≤ 30 字。返回错误消息或 None。"""
+    if raw_topics in (None, ''):
+        return None
+    if not isinstance(raw_topics, list):
+        return '话题格式无效'
+    names = []
+    for item in raw_topics:
+        name = str(item or '').strip().lstrip('#').rstrip('#')
+        if not name:
+            continue
+        if len(name) > 30:
+            return '单个话题 ≤ 30 字'
+        if name not in names:
+            names.append(name)
+    if len(names) > 4:
+        return '最多选择 4 个话题'
+    for name in names:
+        topic = CommunityTopic.query.filter_by(name=name).first()
+        if not topic:
+            topic = CommunityTopic(name=name, created_by=user.id)
+            db.session.add(topic)
+            db.session.flush()
+        topic.moment_count = (topic.moment_count or 0) + 1
+        db.session.add(CommunityMomentTopic(moment_id=moment.id, topic_id=topic.id))
+    return None
+
+
+def _detach_topics(moment):
+    links = CommunityMomentTopic.query.filter_by(moment_id=moment.id).all()
+    for link in links:
+        topic = db.session.get(CommunityTopic, link.topic_id)
+        if topic:
+            topic.moment_count = max(0, (topic.moment_count or 0) - 1)
+        db.session.delete(link)
+
+
+def _parse_moment_payload(data, partial=False):
+    """解析并校验动态正文。返回 (fields, error)。"""
+    fields = {}
+    if not partial or 'content' in data:
+        content = (data.get('content') or '').strip()
+        if len(content) > 500:
+            return None, '短动态正文 ≤ 500 字'
+        fields['content'] = content
+    if not partial or 'long_body' in data:
+        long_body = (data.get('long_body') or '').strip() or None
+        if long_body and len(long_body) > 20000:
+            return None, '长文正文 ≤ 20000 字'
+        fields['long_body'] = long_body
+        fields['is_long'] = bool(long_body)
+    if not partial:
+        if not fields.get('content') and not fields.get('long_body'):
+            return None, '动态内容不能为空'
+        visibility = data.get('visibility') or CommunityMomentVisibilityEnum.PUBLIC
+        if visibility not in CommunityMomentVisibilityEnum.ALL:
+            return None, '无效的可见范围'
+        fields['visibility'] = visibility
+        fields['is_anonymous'] = bool(data.get('is_anonymous', False))
+    return fields, None
+
+
+@api_community_bp.route('/community/feed', methods=['GET'])
+@limiter.limit('120/minute')
+def moment_feed():
+    """动态流：recommend 推荐 / follow 关注 / user 个人 / topic 话题。
+
+    公开流用 before_id 游标（倒序插入下不会翻页漂移）。"""
+    viewer = verify_token()
+    tab = (request.args.get('tab') or 'recommend').strip()
+    before_id = request.args.get('before_id', type=int)
+    limit = min(50, max(1, request.args.get('limit', 20, type=int)))
+
+    query = CommunityMoment.query
+    if tab == 'follow':
+        user, err = require_login()
+        if err:
+            return err
+        viewer = user
+        query = query.filter(db.session.query(UserFollow.id).filter(
+            UserFollow.follower_id == viewer.id,
+            UserFollow.followee_id == CommunityMoment.author_id,
+        ).exists())
+    elif tab == 'user':
+        user_id = request.args.get('user_id', type=int)
+        if not user_id:
+            return _err('缺少 user_id')
+        author = db.session.get(User, user_id)
+        if not author:
+            return _err('用户不存在', 404)
+        query = query.filter(CommunityMoment.author_id == user_id)
+        can_see_anon = viewer is not None and (
+            viewer.id == user_id or viewer.role in ('teacher', 'admin')
+        )
+        if not can_see_anon:
+            query = query.filter(CommunityMoment.is_anonymous == False)  # noqa: E712
+    elif tab == 'topic':
+        topic_id = request.args.get('topic_id', type=int)
+        if not topic_id:
+            return _err('缺少 topic_id')
+        query = query.filter(db.session.query(CommunityMomentTopic.id).filter(
+            CommunityMomentTopic.topic_id == topic_id,
+            CommunityMomentTopic.moment_id == CommunityMoment.id,
+        ).exists())
+    elif tab != 'recommend':
+        return _err('无效的动态流类型')
+
+    query = _apply_moment_filters(query, viewer)
+    if before_id:
+        query = query.filter(CommunityMoment.id < before_id)
+    rows = query.order_by(desc(CommunityMoment.id)).limit(limit + 1).all()
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+    items = _serialize_moments(rows, viewer)
+    return _ok({
+        'items': items,
+        'next_cursor': rows[-1].id if (has_more and rows) else None,
+        'has_more': has_more,
+    })
+
+
+@api_community_bp.route('/community/moments/<int:moment_id>', methods=['GET'])
+@limiter.limit('120/minute')
+def get_moment(moment_id):
+    viewer = verify_token()
+    moment = db.session.get(CommunityMoment, moment_id)
+    if not moment or not _can_view_moment(moment, viewer):
+        return _err('动态不存在或已删除', 404)
+
+    comments = CommunityMomentComment.query.filter_by(
+        moment_id=moment_id, deleted=False
+    ).order_by(CommunityMomentComment.created_at.asc()).all()
+    comment_ids = [c.id for c in comments]
+    liked_ids = set()
+    if viewer and comment_ids:
+        liked_ids = {row[0] for row in db.session.query(CommunityLike.target_id).filter(
+            CommunityLike.user_id == viewer.id,
+            CommunityLike.target_type == 'mcomment',
+            CommunityLike.target_id.in_(comment_ids),
+        ).all()}
+
+    data = _serialize_moments([moment], viewer)[0]
+    data['comments'] = [_mcomment_serialize(c, viewer, liked_ids) for c in comments]
+    return _ok(data)
+
+
+@api_community_bp.route('/community/moments', methods=['POST'])
+@limiter.limit('10/minute')
+def create_moment():
+    user, err = require_login()
+    if err:
+        return err
+
+    data = request.get_json(silent=True) or {}
+    fields, payload_err = _parse_moment_payload(data)
+    if payload_err:
+        return _err(payload_err)
+
+    anon_index = None
+    if fields['is_anonymous']:
+        max_idx = db.session.query(func.max(CommunityMoment.anon_index)).filter(
+            CommunityMoment.author_id == user.id,
+            CommunityMoment.is_anonymous == True,  # noqa: E712
+        ).scalar()
+        anon_index = (max_idx or 0) + 1
+
+    moment = CommunityMoment(
+        author_id=user.id,
+        content=fields['content'],
+        long_body=fields['long_body'],
+        is_long=fields['is_long'],
+        visibility=fields['visibility'],
+        is_anonymous=fields['is_anonymous'],
+        anon_index=anon_index,
+    )
+    db.session.add(moment)
+    db.session.flush()
+
+    topic_err = _attach_topics(moment, data.get('topics'), user)
+    if topic_err:
+        db.session.rollback()
+        return _err(topic_err)
+
+    _notify_moment_mentions(
+        f"{fields['content']}\n{fields['long_body'] or ''}", user.id, moment.id
+    )
+    db.session.commit()
+    return _ok(_moment_serialize(moment, user)), 201
+
+
+@api_community_bp.route('/community/moments/<int:moment_id>', methods=['PUT'])
+@limiter.limit('60/minute')
+def update_moment(moment_id):
+    user, err = require_login()
+    if err:
+        return err
+
+    moment = db.session.get(CommunityMoment, moment_id)
+    if not moment or moment.deleted:
+        return _err('动态不存在或已删除', 404)
+    if moment.author_id != user.id:
+        return _err('无权编辑他人动态', 403)
+
+    data = request.get_json(silent=True) or {}
+    fields, payload_err = _parse_moment_payload(data, partial=True)
+    if payload_err:
+        return _err(payload_err)
+    if 'visibility' in data:
+        visibility = data.get('visibility')
+        if visibility not in CommunityMomentVisibilityEnum.ALL:
+            return _err('无效的可见范围')
+        fields['visibility'] = visibility
+    for key, value in fields.items():
+        setattr(moment, key, value)
+    if not moment.content and not moment.long_body:
+        db.session.rollback()
+        return _err('动态内容不能为空')
+    if 'content' in fields or 'long_body' in fields:
+        _notify_moment_mentions(
+            f"{moment.content or ''}\n{moment.long_body or ''}", user.id, moment.id
+        )
+
+    db.session.commit()
+    return _ok(_moment_serialize(moment, user))
+
+
+@api_community_bp.route('/community/moments/<int:moment_id>', methods=['DELETE'])
+@limiter.limit('60/minute')
+def delete_moment(moment_id):
+    user, err = require_login()
+    if err:
+        return err
+
+    moment = db.session.get(CommunityMoment, moment_id)
+    if not moment or moment.deleted:
+        return _err('动态不存在或已删除', 404)
+    if moment.author_id != user.id and user.role not in ('teacher', 'admin'):
+        return _err('无权删除', 403)
+
+    _detach_topics(moment)
+    moment.deleted = True
+    db.session.commit()
+    return _ok({'deleted': True})
+
+
+@api_community_bp.route('/community/users/<int:user_id>/moments', methods=['GET'])
+@limiter.limit('120/minute')
+def list_user_moments(user_id):
+    """个人主页动态列表（匿名动态只对本人/教师可见）。"""
+    viewer = verify_token()
+    author = db.session.get(User, user_id)
+    if not author:
+        return _err('用户不存在', 404)
+
+    page = max(1, request.args.get('page', 1, type=int))
+    per_page = min(50, max(1, request.args.get('per_page', 20, type=int)))
+
+    query = _apply_moment_filters(CommunityMoment.query.filter_by(author_id=user_id), viewer)
+    can_see_anon = viewer is not None and (
+        viewer.id == user_id or viewer.role in ('teacher', 'admin')
+    )
+    if not can_see_anon:
+        query = query.filter(CommunityMoment.is_anonymous == False)  # noqa: E712
+
+    paginated = query.order_by(desc(CommunityMoment.id)).paginate(
+        page=page, per_page=per_page, error_out=False
+    )
+    return _ok({
+        'items': _serialize_moments(paginated.items, viewer),
+        'page': page,
+        'per_page': per_page,
+        'total': paginated.total,
+        'pages': paginated.pages,
+    })
+
+
+# ── 互动：点赞 / 收藏 / 评论 ─────────────────────────────
+
+@api_community_bp.route('/community/moments/<int:moment_id>/like', methods=['POST', 'DELETE'])
+@limiter.limit('60/minute')
+def like_moment(moment_id):
+    user, err = require_login()
+    if err:
+        return err
+
+    value = request.method == 'POST'
+    ok, error, code = _toggle_like('moment', moment_id, user, value)
+    if not ok:
+        return _err(error, code)
+    moment = db.session.get(CommunityMoment, moment_id)
+    return _ok({'liked': value, 'like_count': moment.like_count})
+
+
+@api_community_bp.route('/community/moment-comments/<int:comment_id>/like', methods=['POST', 'DELETE'])
+@limiter.limit('60/minute')
+def like_moment_comment(comment_id):
+    user, err = require_login()
+    if err:
+        return err
+
+    value = request.method == 'POST'
+    ok, error, code = _toggle_like('mcomment', comment_id, user, value)
+    if not ok:
+        return _err(error, code)
+    comment = db.session.get(CommunityMomentComment, comment_id)
+    return _ok({'liked': value, 'like_count': comment.like_count})
+
+
+@api_community_bp.route('/community/moments/<int:moment_id>/favorite', methods=['POST', 'DELETE'])
+@limiter.limit('60/minute')
+def favorite_moment(moment_id):
+    user, err = require_login()
+    if err:
+        return err
+
+    moment = db.session.get(CommunityMoment, moment_id)
+    if not moment or moment.deleted or not _can_view_moment(moment, user):
+        return _err('动态不存在或已删除', 404)
+
+    existing = CommunityMomentFavorite.query.filter_by(
+        moment_id=moment_id, user_id=user.id
+    ).first()
+    if request.method == 'POST':
+        if not existing:
+            db.session.add(CommunityMomentFavorite(moment_id=moment_id, user_id=user.id))
+            moment.favorite_count = (moment.favorite_count or 0) + 1
+            db.session.commit()
+        favorited = True
+    else:
+        if existing:
+            db.session.delete(existing)
+            moment.favorite_count = max(0, (moment.favorite_count or 0) - 1)
+            db.session.commit()
+        favorited = False
+    return _ok({'favorited': favorited, 'favorite_count': moment.favorite_count})
+
+
+@api_community_bp.route('/community/moments/favorites', methods=['GET'])
+@limiter.limit('120/minute')
+def list_moment_favorites():
+    user, err = require_login()
+    if err:
+        return err
+
+    page = max(1, request.args.get('page', 1, type=int))
+    per_page = min(50, max(1, request.args.get('per_page', 20, type=int)))
+    query = CommunityMoment.query.join(
+        CommunityMomentFavorite, CommunityMomentFavorite.moment_id == CommunityMoment.id
+    ).filter(
+        CommunityMomentFavorite.user_id == user.id,
+        CommunityMoment.deleted == False,  # noqa: E712
+    ).order_by(desc(CommunityMomentFavorite.created_at))
+
+    paginated = query.paginate(page=page, per_page=per_page, error_out=False)
+    return _ok({
+        'items': _serialize_moments(paginated.items, user),
+        'page': page,
+        'per_page': per_page,
+        'total': paginated.total,
+        'pages': paginated.pages,
+    })
+
+
+@api_community_bp.route('/community/moments/<int:moment_id>/comments', methods=['GET'])
+@limiter.limit('120/minute')
+def list_moment_comments(moment_id):
+    viewer = verify_token()
+    moment = db.session.get(CommunityMoment, moment_id)
+    if not moment or not _can_view_moment(moment, viewer):
+        return _err('动态不存在或已删除', 404)
+
+    comments = CommunityMomentComment.query.filter_by(
+        moment_id=moment_id, deleted=False
+    ).order_by(CommunityMomentComment.created_at.asc()).all()
+    comment_ids = [c.id for c in comments]
+    liked_ids = set()
+    if viewer and comment_ids:
+        liked_ids = {row[0] for row in db.session.query(CommunityLike.target_id).filter(
+            CommunityLike.user_id == viewer.id,
+            CommunityLike.target_type == 'mcomment',
+            CommunityLike.target_id.in_(comment_ids),
+        ).all()}
+    return _ok([_mcomment_serialize(c, viewer, liked_ids) for c in comments])
+
+
+@api_community_bp.route('/community/moments/<int:moment_id>/comments', methods=['POST'])
+@limiter.limit('30/minute')
+def create_moment_comment(moment_id):
+    user, err = require_login()
+    if err:
+        return err
+
+    moment = db.session.get(CommunityMoment, moment_id)
+    if not moment or not _can_view_moment(moment, user):
+        return _err('动态不存在或已删除', 404)
+
+    data = request.get_json(silent=True) or {}
+    content = (data.get('content') or '').strip()
+    is_anonymous = bool(data.get('is_anonymous', False))
+    parent_id = data.get('parent_id')
+    if not content or len(content) > 2000:
+        return _err('评论内容必填且 ≤ 2000 字')
+
+    parent = None
+    if parent_id:
+        try:
+            parent_id = int(parent_id)
+        except (TypeError, ValueError):
+            return _err('无效的回复目标')
+        parent = db.session.get(CommunityMomentComment, parent_id)
+        if not parent or parent.deleted or parent.moment_id != moment_id:
+            return _err('回复的评论不存在或不属于该动态')
+
+    anon_index = None
+    if is_anonymous:
+        max_idx = db.session.query(func.max(CommunityMomentComment.anon_index)).filter(
+            CommunityMomentComment.author_id == user.id,
+            CommunityMomentComment.is_anonymous == True,  # noqa: E712
+        ).scalar()
+        anon_index = (max_idx or 0) + 1
+
+    comment = CommunityMomentComment(
+        moment_id=moment_id,
+        author_id=user.id,
+        content=content,
+        parent_id=parent_id or None,
+        is_anonymous=is_anonymous,
+        anon_index=anon_index,
+    )
+    db.session.add(comment)
+    moment.comment_count = (moment.comment_count or 0) + 1
+    db.session.flush()
+
+    if parent:
+        _notify(parent.author_id, user.id, 'moment_reply', moment_id=moment_id,
+                moment_comment_id=comment.id, content=content)
+    else:
+        _notify(moment.author_id, user.id, 'moment_comment', moment_id=moment_id,
+                moment_comment_id=comment.id, content=content)
+    _notify_moment_mentions(content, user.id, moment_id, comment.id)
+
+    db.session.commit()
+    return _ok(_mcomment_serialize(comment, user)), 201
+
+
+@api_community_bp.route('/community/moment-comments/<int:comment_id>', methods=['DELETE'])
+@limiter.limit('60/minute')
+def delete_moment_comment(comment_id):
+    user, err = require_login()
+    if err:
+        return err
+
+    comment = db.session.get(CommunityMomentComment, comment_id)
+    if not comment or comment.deleted:
+        return _err('评论不存在或已删除', 404)
+
+    moment = db.session.get(CommunityMoment, comment.moment_id)
+    is_moment_author = moment and moment.author_id == user.id
+    if (comment.author_id != user.id
+            and not is_moment_author
+            and user.role not in ('teacher', 'admin')):
+        return _err('无权删除', 403)
+
+    to_delete = [comment]
+    queue = [comment.id]
+    while queue:
+        children = CommunityMomentComment.query.filter(
+            CommunityMomentComment.parent_id == queue.pop(0),
+            CommunityMomentComment.deleted == False,  # noqa: E712
+        ).all()
+        for child in children:
+            to_delete.append(child)
+            queue.append(child.id)
+    for c in to_delete:
+        c.deleted = True
+    if moment:
+        moment.comment_count = max(0, (moment.comment_count or 0) - len(to_delete))
+    db.session.commit()
+    return _ok({'deleted': True, 'affected': len(to_delete)})
+
+
+# ── 转发 / 引用 ──────────────────────────────────────────
+
+@api_community_bp.route('/community/moments/<int:moment_id>/repost', methods=['POST'])
+@limiter.limit('20/minute')
+def repost_moment(moment_id):
+    user, err = require_login()
+    if err:
+        return err
+
+    target = db.session.get(CommunityMoment, moment_id)
+    if not target or target.deleted:
+        return _err('动态不存在或已删除', 404)
+    if target.repost_of_id:
+        return _err('不能转发一条转发动态', 400)
+    if target.is_anonymous:
+        return _err('匿名动态不可转发', 400)
+    if target.visibility != CommunityMomentVisibilityEnum.PUBLIC:
+        return _err('仅公开动态可转发', 400)
+
+    data = request.get_json(silent=True) or {}
+    quote = (data.get('quote') or '').strip()
+    if len(quote) > 500:
+        return _err('引用评论 ≤ 500 字')
+
+    moment = CommunityMoment(
+        author_id=user.id,
+        content=quote,
+        repost_of_id=target.id,
+        repost_type=CommunityRepostTypeEnum.QUOTE if quote else CommunityRepostTypeEnum.REPOST,
+        repost_snapshot=_moment_snapshot(target),
+    )
+    db.session.add(moment)
+    target.repost_count = (target.repost_count or 0) + 1
+    db.session.flush()
+
+    _notify(target.author_id, user.id,
+            'quote' if quote else 'repost',
+            moment_id=target.id, content=quote or '转发了你的动态')
+    if quote:
+        _notify_moment_mentions(quote, user.id, moment.id)
+    db.session.commit()
+    return _ok(_moment_serialize(moment, user)), 201
+
+
+@api_community_bp.route('/community/moments/<int:moment_id>/repost', methods=['DELETE'])
+@limiter.limit('60/minute')
+def cancel_repost(moment_id):
+    user, err = require_login()
+    if err:
+        return err
+
+    repost = CommunityMoment.query.filter_by(
+        repost_of_id=moment_id, author_id=user.id, deleted=False
+    ).order_by(desc(CommunityMoment.id)).first()
+    if not repost:
+        return _err('你还没有转发过该动态', 404)
+
+    repost.deleted = True
+    target = db.session.get(CommunityMoment, moment_id)
+    if target:
+        target.repost_count = max(0, (target.repost_count or 0) - 1)
+    db.session.commit()
+    return _ok({'deleted': True})
+
+
+@api_community_bp.route('/community/moments/<int:moment_id>/reposts', methods=['GET'])
+@limiter.limit('120/minute')
+def list_reposts(moment_id):
+    viewer = verify_token()
+    target = db.session.get(CommunityMoment, moment_id)
+    if not target or target.deleted:
+        return _err('动态不存在或已删除', 404)
+
+    page = max(1, request.args.get('page', 1, type=int))
+    per_page = min(50, max(1, request.args.get('per_page', 20, type=int)))
+    query = _apply_moment_filters(
+        CommunityMoment.query.filter_by(repost_of_id=moment_id), viewer
+    )
+    paginated = query.order_by(desc(CommunityMoment.id)).paginate(
+        page=page, per_page=per_page, error_out=False
+    )
+    return _ok({
+        'items': _serialize_moments(paginated.items, viewer),
+        'total': paginated.total,
+        'page': page,
+        'pages': paginated.pages,
+    })
+
+
+# ── 话题 / @ 补全 / 提及 ─────────────────────────────────
+
+@api_community_bp.route('/community/topics', methods=['GET'])
+@limiter.limit('120/minute')
+def list_topics():
+    q = (request.args.get('q') or '').strip()
+    sort = (request.args.get('sort') or 'hot').strip()
+    limit = min(50, max(1, request.args.get('limit', 20, type=int)))
+
+    query = CommunityTopic.query.filter_by(is_hidden=False)
+    if q:
+        query = query.filter(CommunityTopic.name.ilike(f'%{q}%'))
+    if sort == 'new':
+        query = query.order_by(desc(CommunityTopic.created_at))
+    else:
+        query = query.order_by(desc(CommunityTopic.moment_count), desc(CommunityTopic.created_at))
+    return _ok([t.to_dict() for t in query.limit(limit).all()])
+
+
+@api_community_bp.route('/community/topics', methods=['POST'])
+@limiter.limit('60/minute')
+def create_topic():
+    user, err = require_login()
+    if err:
+        return err
+
+    data = request.get_json(silent=True) or {}
+    name = (data.get('name') or '').strip().lstrip('#').rstrip('#')
+    if not name or len(name) > 30:
+        return _err('话题名必填且 ≤ 30 字')
+
+    topic = CommunityTopic.query.filter_by(name=name).first()
+    if not topic:
+        topic = CommunityTopic(name=name, created_by=user.id)
+        db.session.add(topic)
+        db.session.commit()
+    return _ok(topic.to_dict()), 201
+
+
+@api_community_bp.route('/community/topics/<int:topic_id>/moments', methods=['GET'])
+@limiter.limit('120/minute')
+def list_topic_moments(topic_id):
+    viewer = verify_token()
+    topic = db.session.get(CommunityTopic, topic_id)
+    if not topic or topic.is_hidden:
+        return _err('话题不存在', 404)
+
+    before_id = request.args.get('before_id', type=int)
+    limit = min(50, max(1, request.args.get('limit', 20, type=int)))
+    query = _apply_moment_filters(
+        CommunityMoment.query.filter(db.session.query(CommunityMomentTopic.id).filter(
+            CommunityMomentTopic.topic_id == topic_id,
+            CommunityMomentTopic.moment_id == CommunityMoment.id,
+        ).exists()), viewer
+    )
+    if before_id:
+        query = query.filter(CommunityMoment.id < before_id)
+    rows = query.order_by(desc(CommunityMoment.id)).limit(limit + 1).all()
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+    return _ok({
+        'topic': topic.to_dict(),
+        'items': _serialize_moments(rows, viewer),
+        'next_cursor': rows[-1].id if (has_more and rows) else None,
+        'has_more': has_more,
+    })
+
+
+@api_community_bp.route('/community/users/autocomplete', methods=['GET'])
+@limiter.limit('120/minute')
+def username_autocomplete():
+    viewer = verify_token()
+    q = (request.args.get('q') or '').strip()
+    if not q:
+        return _ok([])
+    users = User.query.filter(User.username.ilike(f'%{q}%')).order_by(User.username).limit(20).all()
+    return _ok([{
+        'id': u.id,
+        'username': u.username,
+        'role': u.role,
+        'is_self': bool(viewer and viewer.id == u.id),
+    } for u in users])
+
+
+@api_community_bp.route('/community/mentions', methods=['GET'])
+@limiter.limit('120/minute')
+def list_mentions():
+    """提到我的：直接复用通知中心里的 mention（moment_id 落点）。"""
+    user, err = require_login()
+    if err:
+        return err
+
+    before_id = request.args.get('before_id', type=int)
+    limit = min(50, max(1, request.args.get('limit', 20, type=int)))
+    query = CommunityNotification.query.filter_by(user_id=user.id, type='mention').filter(
+        CommunityNotification.moment_id.isnot(None)
+    )
+    if before_id:
+        query = query.filter(CommunityNotification.id < before_id)
+    rows = query.order_by(desc(CommunityNotification.id)).limit(limit + 1).all()
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+    return _ok({
+        'items': [n.to_dict() for n in rows],
+        'next_cursor': rows[-1].id if (has_more and rows) else None,
+        'has_more': has_more,
+    })
+
+
+# ── 关注关系读取（写入复用 /api/learning/users/<uid>/follow）────
+
+@api_community_bp.route('/community/users/<int:user_id>/relations', methods=['GET'])
+@limiter.limit('120/minute')
+def list_relations(user_id):
+    viewer = verify_token()
+    target = db.session.get(User, user_id)
+    if not target:
+        return _err('用户不存在', 404)
+
+    rel_type = (request.args.get('type') or 'following').strip()
+    if rel_type not in ('following', 'fans', 'mutual'):
+        return _err('type 只能是 following / fans / mutual')
+    page = max(1, request.args.get('page', 1, type=int))
+    per_page = min(50, max(1, request.args.get('per_page', 20, type=int)))
+
+    if rel_type == 'following':
+        query = User.query.join(UserFollow, UserFollow.followee_id == User.id).filter(
+            UserFollow.follower_id == user_id
+        ).order_by(desc(UserFollow.created_at))
+    elif rel_type == 'fans':
+        query = User.query.join(UserFollow, UserFollow.follower_id == User.id).filter(
+            UserFollow.followee_id == user_id
+        ).order_by(desc(UserFollow.created_at))
+    else:
+        f1 = db.aliased(UserFollow)
+        f2 = db.aliased(UserFollow)
+        query = User.query.join(f1, f1.followee_id == User.id).join(
+            f2, and_(f2.follower_id == User.id, f2.followee_id == user_id)
+        ).filter(f1.follower_id == user_id).order_by(desc(f1.created_at))
+
+    paginated = query.paginate(page=page, per_page=per_page, error_out=False)
+    items = paginated.items
+
+    # 预批量查互关关系，避免逐行查询
+    mutual_ids = set()
+    followed_ids = set()
+    if viewer and items:
+        uids = [u.id for u in items]
+        followed_ids = {row[0] for row in db.session.query(UserFollow.followee_id).filter(
+            UserFollow.follower_id == viewer.id, UserFollow.followee_id.in_(uids)
+        ).all()}
+        mutual_ids = {row[0] for row in db.session.query(UserFollow.follower_id).filter(
+            UserFollow.followee_id == viewer.id, UserFollow.follower_id.in_(uids)
+        ).all()}
+
+    return _ok({
+        'type': rel_type,
+        'items': [{
+            'id': u.id,
+            'username': u.username,
+            'role': u.role,
+            'is_self': bool(viewer and viewer.id == u.id),
+            'is_following': u.id in followed_ids,
+            'is_mutual': u.id in mutual_ids,
+        } for u in items],
+        'page': page,
+        'per_page': per_page,
+        'total': paginated.total,
+        'pages': paginated.pages,
+    })
+
+
+@api_community_bp.route('/community/users/<int:user_id>/follow-stats', methods=['GET'])
+@limiter.limit('120/minute')
+def follow_stats(user_id):
+    viewer = verify_token()
+    target = db.session.get(User, user_id)
+    if not target:
+        return _err('用户不存在', 404)
+
+    following_count = UserFollow.query.filter_by(follower_id=user_id).count()
+    fans_count = UserFollow.query.filter_by(followee_id=user_id).count()
+    f1 = db.aliased(UserFollow)
+    f2 = db.aliased(UserFollow)
+    mutual_count = db.session.query(func.count(f1.id)).filter(
+        f1.follower_id == user_id,
+        db.session.query(f2.id).filter(
+            f2.follower_id == f1.followee_id,
+            f2.followee_id == user_id,
+        ).exists(),
+    ).scalar() or 0
+
+    is_following = bool(viewer and UserFollow.query.filter_by(
+        follower_id=viewer.id, followee_id=user_id
+    ).first())
+    is_followed_by = bool(viewer and UserFollow.query.filter_by(
+        follower_id=user_id, followee_id=viewer.id
+    ).first())
+
+    return _ok({
+        'user_id': user_id,
+        'following_count': following_count,
+        'fans_count': fans_count,
+        'mutual_count': int(mutual_count),
+        'is_following': is_following,
+        'is_followed_by': is_followed_by,
+        'is_mutual': is_following and is_followed_by,
+        'is_self': bool(viewer and viewer.id == user_id),
+    })
+
+
+# ═══════════════════════════════════════════════════════════
+# v7.25 微博化 · P2：私信 / 拉黑 / 合规留痕
+# ═══════════════════════════════════════════════════════════
+
+def _are_mutual(a_id, b_id):
+    return bool(
+        UserFollow.query.filter_by(follower_id=a_id, followee_id=b_id).first()
+        and UserFollow.query.filter_by(follower_id=b_id, followee_id=a_id).first()
+    )
+
+
+def _block_row(a_id, b_id):
+    return CommunityUserBlock.query.filter(or_(
+        and_(CommunityUserBlock.blocker_id == a_id, CommunityUserBlock.blocked_id == b_id),
+        and_(CommunityUserBlock.blocker_id == b_id, CommunityUserBlock.blocked_id == a_id),
+    )).first()
+
+
+def _dm_rate_guard(sender_id, receiver_id):
+    """非互关的首条后限 1 条/分钟、10 条/天（应用层滑动窗口）。"""
+    if _are_mutual(sender_id, receiver_id):
+        return None
+    now = utcnow()
+    last_minute = CommunityDmMessage.query.filter(
+        CommunityDmMessage.sender_id == sender_id,
+        CommunityDmMessage.receiver_id == receiver_id,
+        CommunityDmMessage.created_at >= now - timedelta(minutes=1),
+    ).count()
+    if last_minute >= 1:
+        return '对方尚未关注你，1 分钟内只能发送 1 条私信'
+    last_day = CommunityDmMessage.query.filter(
+        CommunityDmMessage.sender_id == sender_id,
+        CommunityDmMessage.receiver_id == receiver_id,
+        CommunityDmMessage.created_at >= now - timedelta(days=1),
+    ).count()
+    if last_day >= 10:
+        return '对方尚未关注你，今日私信已达上限（10 条）'
+    return None
+
+
+def _get_or_create_conversation(a_id, b_id):
+    lo, hi = (a_id, b_id) if a_id < b_id else (b_id, a_id)
+    conv = CommunityDmConversation.query.filter_by(user_a_id=lo, user_b_id=hi).first()
+    if not conv:
+        conv = CommunityDmConversation(user_a_id=lo, user_b_id=hi)
+        db.session.add(conv)
+        db.session.flush()
+    return conv
+
+
+def _create_dm_message(conv, sender, receiver, content, content_type='text'):
+    """落一条私信并维护会话最后消息/未读；返回 (消息, 接收方此前是否已有未读)。"""
+    was_unread = conv.unread_of(receiver.id) > 0
+    now = utcnow()
+    msg = CommunityDmMessage(
+        conversation_id=conv.id,
+        sender_id=sender.id,
+        receiver_id=receiver.id,
+        content=(content or '')[:2000],
+        content_type=content_type,
+        created_at=now,
+    )
+    db.session.add(msg)
+    db.session.flush()
+
+    conv.last_message_id = msg.id
+    conv.last_message_at = now
+    if conv.user_a_id == receiver.id:
+        conv.a_unread = (conv.a_unread or 0) + 1
+    else:
+        conv.b_unread = (conv.b_unread or 0) + 1
+    conv.restore_for(receiver.id)
+    conv.restore_for(sender.id)
+    return msg, was_unread
+
+
+def _dm_conv_serialize(conv, viewer_id, last_map=None, mutual_ids=None,
+                       blocked_by_me=None, blocked_me=None):
+    peer = conv.peer_of(viewer_id)
+    last = (last_map or {}).get(conv.last_message_id)
+    if last is None and last_map is None and conv.last_message_id:
+        last = db.session.get(CommunityDmMessage, conv.last_message_id)
+    preview = ''
+    if last:
+        if last.recalled:
+            preview = '［消息已撤回］'
+        elif last.content_type == 'image':
+            preview = '［图片］'
+        else:
+            preview = (last.content or '')[:40]
+    if peer is None:
+        is_mutual = False
+        is_blocked_by_me = is_blocked_me = False
+    else:
+        is_mutual = (peer.id in mutual_ids) if mutual_ids is not None else _are_mutual(viewer_id, peer.id)
+        is_blocked_by_me = (peer.id in blocked_by_me) if blocked_by_me is not None else bool(
+            CommunityUserBlock.query.filter_by(blocker_id=viewer_id, blocked_id=peer.id).first())
+        is_blocked_me = (peer.id in blocked_me) if blocked_me is not None else bool(
+            CommunityUserBlock.query.filter_by(blocker_id=peer.id, blocked_id=viewer_id).first())
+    return {
+        'id': conv.id,
+        'peer': {'id': peer.id, 'username': peer.username, 'role': peer.role} if peer else None,
+        'last_preview': preview,
+        'last_message_at': conv.last_message_at.isoformat() if conv.last_message_at else None,
+        'unread': conv.unread_of(viewer_id),
+        'is_mutual': is_mutual,
+        'is_blocked_by_me': is_blocked_by_me,
+        'is_blocked_me': is_blocked_me,
+        'is_blocked': is_blocked_by_me or is_blocked_me,
+        'created_at': conv.created_at.isoformat() if conv.created_at else None,
+    }
+
+
+def _dm_prefetch(uid):
+    """一次算好互关/双向拉黑集合，避免会话列表 N+1。"""
+    followed = {row[0] for row in db.session.query(UserFollow.followee_id).filter(
+        UserFollow.follower_id == uid).all()}
+    fans = {row[0] for row in db.session.query(UserFollow.follower_id).filter(
+        UserFollow.followee_id == uid).all()}
+    my_blocks = {row[0] for row in db.session.query(CommunityUserBlock.blocked_id).filter(
+        CommunityUserBlock.blocker_id == uid).all()}
+    blocked_me = {row[0] for row in db.session.query(CommunityUserBlock.blocker_id).filter(
+        CommunityUserBlock.blocked_id == uid).all()}
+    return followed & fans, my_blocks, blocked_me
+
+
+@api_community_bp.route('/community/dm/conversations', methods=['GET'])
+@limiter.limit('120/minute')
+def list_dm_conversations():
+    user, err = require_login()
+    if err:
+        return err
+
+    convs = CommunityDmConversation.query.filter(
+        or_(
+            and_(CommunityDmConversation.user_a_id == user.id,
+                 CommunityDmConversation.a_deleted_at.is_(None)),
+            and_(CommunityDmConversation.user_b_id == user.id,
+                 CommunityDmConversation.b_deleted_at.is_(None)),
+        )
+    ).order_by(desc(func.coalesce(
+        CommunityDmConversation.last_message_at, CommunityDmConversation.created_at
+    ))).all()
+
+    last_ids = [c.last_message_id for c in convs if c.last_message_id]
+    last_map = {}
+    if last_ids:
+        last_map = {m.id: m for m in CommunityDmMessage.query.filter(
+            CommunityDmMessage.id.in_(last_ids)).all()}
+    mutual_ids, my_blocks, blocked_me = _dm_prefetch(user.id)
+
+    unread_total = sum(c.unread_of(user.id) for c in convs)
+    return _ok({
+        'items': [_dm_conv_serialize(c, user.id, last_map, mutual_ids, my_blocks, blocked_me)
+                  for c in convs],
+        'unread_total': unread_total,
+    })
+
+
+@api_community_bp.route('/community/dm/unread-count', methods=['GET'])
+@limiter.limit('120/minute')
+def dm_unread_count():
+    user, err = require_login()
+    if err:
+        return err
+
+    rows = db.session.query(
+        CommunityDmConversation.a_unread, CommunityDmConversation.b_unread,
+        CommunityDmConversation.user_a_id, CommunityDmConversation.user_b_id,
+        CommunityDmConversation.a_deleted_at, CommunityDmConversation.b_deleted_at,
+    ).filter(or_(
+        CommunityDmConversation.user_a_id == user.id,
+        CommunityDmConversation.user_b_id == user.id,
+    )).all()
+    unread = 0
+    for a_unread, b_unread, a_id, _b_id, a_del, b_del in rows:
+        if a_id == user.id:
+            if a_del is None:
+                unread += a_unread or 0
+        elif b_del is None:
+            unread += b_unread or 0
+    return _ok({'unread': unread})
+
+
+@api_community_bp.route('/community/dm/conversations', methods=['POST'])
+@limiter.limit('10/minute')
+def create_dm_conversation():
+    user, err = require_login()
+    if err:
+        return err
+
+    data = request.get_json(silent=True) or {}
+    peer_id = data.get('peer_id')
+    try:
+        peer_id = int(peer_id)
+    except (TypeError, ValueError):
+        return _err('缺少有效的 peer_id')
+    if peer_id == user.id:
+        return _err('不能给自己发私信', 400)
+
+    peer = db.session.get(User, peer_id)
+    if not peer or peer.role == 'bot':
+        return _err('收信人不存在', 404)
+    if _block_row(user.id, peer.id):
+        return _err('你们之间存在拉黑关系，无法发起私信', 403)
+
+    content = (data.get('content') or '').strip()
+    if content and len(content) > 2000:
+        return _err('私信内容 ≤ 2000 字')
+
+    if content:
+        guard = _dm_rate_guard(user.id, peer.id)
+        if guard:
+            return _err(guard, 429)
+
+    conv = _get_or_create_conversation(user.id, peer.id)
+    conv.restore_for(user.id)
+    payload = None
+    if content:
+        msg, was_unread = _create_dm_message(conv, user, peer, content)
+        payload = msg.to_dict()
+        if not was_unread:
+            create_notification(
+                peer.id, '收到一条私信', content[:60],
+                type='info', related_type='dm', related_id=conv.id, commit=False,
+            )
+    db.session.commit()
+    return _ok({
+        'conversation': _dm_conv_serialize(conv, user.id),
+        'message': payload,
+    }), 201
+
+
+@api_community_bp.route('/community/dm/conversations/<int:conv_id>/messages', methods=['GET'])
+@limiter.limit('120/minute')
+def list_dm_messages(conv_id):
+    user, err = require_login()
+    if err:
+        return err
+
+    conv = db.session.get(CommunityDmConversation, conv_id)
+    if not conv or user.id not in (conv.user_a_id, conv.user_b_id):
+        return _err('会话不存在', 404)
+
+    before_id = request.args.get('before_id', type=int)
+    limit = min(50, max(1, request.args.get('limit', 30, type=int)))
+    query = CommunityDmMessage.query.filter_by(conversation_id=conv_id)
+    if before_id:
+        query = query.filter(CommunityDmMessage.id < before_id)
+    rows = query.order_by(desc(CommunityDmMessage.id)).limit(limit + 1).all()
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+    rows.reverse()
+    return _ok({
+        'items': [m.to_dict() for m in rows],
+        'next_cursor': rows[0].id if (has_more and rows) else None,
+        'has_more': has_more,
+        'peer': {
+            'id': conv.peer_of(user.id).id,
+            'username': conv.peer_of(user.id).username,
+            'role': conv.peer_of(user.id).role,
+        } if conv.peer_of(user.id) else None,
+    })
+
+
+@api_community_bp.route('/community/dm/conversations/<int:conv_id>/messages', methods=['POST'])
+@limiter.limit('10/minute')
+def send_dm_message(conv_id):
+    user, err = require_login()
+    if err:
+        return err
+
+    conv = db.session.get(CommunityDmConversation, conv_id)
+    if not conv or user.id not in (conv.user_a_id, conv.user_b_id):
+        return _err('会话不存在', 404)
+
+    peer = conv.peer_of(user.id)
+    if not peer:
+        return _err('会话不存在', 404)
+    if _block_row(user.id, peer.id):
+        return _err('你们之间存在拉黑关系，无法发送私信', 403)
+
+    data = request.get_json(silent=True) or {}
+    content = (data.get('content') or '').strip()
+    if not content or len(content) > 2000:
+        return _err('私信内容必填且 ≤ 2000 字')
+
+    guard = _dm_rate_guard(user.id, peer.id)
+    if guard:
+        return _err(guard, 429)
+
+    msg, was_unread = _create_dm_message(conv, user, peer, content)
+    if not was_unread:
+        create_notification(
+            peer.id, '收到一条私信', content[:60],
+            type='info', related_type='dm', related_id=conv.id, commit=False,
+        )
+    db.session.commit()
+    return _ok(msg.to_dict()), 201
+
+
+@api_community_bp.route('/community/dm/conversations/<int:conv_id>/read', methods=['PUT'])
+@limiter.limit('120/minute')
+def mark_dm_read(conv_id):
+    user, err = require_login()
+    if err:
+        return err
+
+    conv = db.session.get(CommunityDmConversation, conv_id)
+    if not conv or user.id not in (conv.user_a_id, conv.user_b_id):
+        return _err('会话不存在', 404)
+
+    now = utcnow()
+    CommunityDmMessage.query.filter(
+        CommunityDmMessage.conversation_id == conv_id,
+        CommunityDmMessage.receiver_id == user.id,
+        CommunityDmMessage.is_read == False,  # noqa: E712
+    ).update({'is_read': True, 'read_at': now}, synchronize_session=False)
+    if conv.user_a_id == user.id:
+        conv.a_unread = 0
+    else:
+        conv.b_unread = 0
+    db.session.commit()
+    return _ok({'unread': 0})
+
+
+@api_community_bp.route('/community/dm/conversations/<int:conv_id>', methods=['DELETE'])
+@limiter.limit('60/minute')
+def hide_dm_conversation(conv_id):
+    user, err = require_login()
+    if err:
+        return err
+
+    conv = db.session.get(CommunityDmConversation, conv_id)
+    if not conv or user.id not in (conv.user_a_id, conv.user_b_id):
+        return _err('会话不存在', 404)
+
+    conv.hide_for(user.id)
+    db.session.commit()
+    return _ok({'hidden': True})
+
+
+@api_community_bp.route('/community/users/<int:user_id>/block', methods=['POST', 'DELETE'])
+@limiter.limit('60/minute')
+def block_user(user_id):
+    user, err = require_login()
+    if err:
+        return err
+    if user_id == user.id:
+        return _err('不能拉黑自己', 400)
+
+    target = db.session.get(User, user_id)
+    if not target:
+        return _err('用户不存在', 404)
+
+    existing = CommunityUserBlock.query.filter_by(
+        blocker_id=user.id, blocked_id=user_id).first()
+    if request.method == 'POST':
+        if not existing:
+            data = request.get_json(silent=True) or {}
+            reason = (data.get('reason') or '').strip()[:200] or None
+            db.session.add(CommunityUserBlock(
+                blocker_id=user.id, blocked_id=user_id, reason=reason))
+            db.session.commit()
+        return _ok({'blocked': True, 'user_id': user_id})
+    if existing:
+        db.session.delete(existing)
+        db.session.commit()
+    return _ok({'blocked': False, 'user_id': user_id})
+
+
+@api_community_bp.route('/community/dm/blocks', methods=['GET'])
+@limiter.limit('120/minute')
+def list_blocks():
+    user, err = require_login()
+    if err:
+        return err
+
+    rows = CommunityUserBlock.query.filter_by(blocker_id=user.id).order_by(
+        desc(CommunityUserBlock.created_at)).all()
+    return _ok([r.to_dict() for r in rows])
+
+
+@api_community_bp.route('/community/dm/conversations/<int:conv_id>/context', methods=['GET'])
+@limiter.limit('30/minute')
+def dm_context_for_teacher(conv_id):
+    """教师/管理员凭举报查看会话最近 50 条，并写入 access log。"""
+    user, err = _require_teacher_or_admin()
+    if err:
+        return err
+
+    conv = db.session.get(CommunityDmConversation, conv_id)
+    if not conv:
+        return _err('会话不存在', 404)
+
+    report_id = request.args.get('report_id', type=int)
+    if not report_id:
+        return _err('必须携带 report_id')
+    rep = db.session.get(CommunityReport, report_id)
+    target = _load_report_target('dm_message', rep.target_id) if rep and rep.target_type == 'dm_message' else None
+    if not rep or not target or target.conversation_id != conv_id:
+        return _err('举报记录与该会话不匹配', 403)
+
+    messages = CommunityDmMessage.query.filter_by(conversation_id=conv_id).order_by(
+        desc(CommunityDmMessage.id)).limit(50).all()
+    messages.reverse()
+
+    log = CommunityDmAccessLog(
+        admin_id=user.id, conversation_id=conv_id, report_id=rep.id)
+    db.session.add(log)
+    db.session.commit()
+
+    return _ok({
+        'conversation_id': conv_id,
+        'access_log_id': log.id,
+        'participants': [
+            {'id': conv.user_a.id, 'username': conv.user_a.username, 'role': conv.user_a.role},
+            {'id': conv.user_b.id, 'username': conv.user_b.username, 'role': conv.user_b.role},
+        ],
+        'report': rep.to_dict(),
+        'messages': [m.to_dict() for m in messages],
     })

@@ -17,7 +17,7 @@
           @change="reload"
         />
         <el-button :icon="Check" :disabled="!unread" @click="readAll">全部已读</el-button>
-        <el-button :icon="ChatDotRound" @click="router.push('/community')">回到论坛</el-button>
+        <el-button :icon="ChatDotRound" @click="router.push('/community')">回到社区</el-button>
       </div>
     </div>
 
@@ -42,6 +42,9 @@
           </div>
           <div v-if="n.post_title" class="notice-target">
             帖子：{{ n.post_title }}
+          </div>
+          <div v-else-if="n.moment_preview" class="notice-target">
+            动态：{{ n.moment_preview }}
           </div>
           <div v-if="n.content" class="notice-content">{{ n.content }}</div>
         </div>
@@ -93,6 +96,10 @@ const unreadOnly = ref(false)
 const typeIcon = (type) => ({
   comment: ChatDotRound,
   reply: ChatLineSquare,
+  moment_comment: ChatDotRound,
+  moment_reply: ChatLineSquare,
+  repost: Star,
+  quote: Star,
   mention: Star,
   resolve: Check,
   hidden: Warning,
@@ -160,6 +167,7 @@ const markRead = async (n) => {
 const openNotification = async (n) => {
   await markRead(n)
   if (n.post_id) router.push(`/community/${n.post_id}`)
+  else if (n.moment_id) router.push(`/community/moment/${n.moment_id}`)
 }
 
 const readAll = async () => {
