@@ -8,6 +8,10 @@ from utils.permissions import require_teacher
 
 api_chapter_bp = Blueprint('api_chapter', __name__)
 
+# Chapter.name 与 Course/Major/Department 都是 String(50)；
+# 独立常量，避免跨文件 import 循环。
+_NAME_MAX = 50
+
 @api_chapter_bp.route('/chapters', methods=['GET'])
 def get_chapters():
     # 全民学习：章节为公共目录数据，登录即可读（原教师-only 导致学生侧章节筛选恒空）
@@ -45,24 +49,26 @@ def create_chapter():
         return err
     
     data = request.get_json()
-    name = data.get('name')
+    name = (data.get('name') or '').strip()
     course_id = data.get('course_id')
-    
+
     if not name or not course_id:
         return jsonify({'error': '缺少必要参数'}), 400
-    
+    if len(name) > _NAME_MAX:
+        return jsonify({'error': f'章节名称长度不能超过 {_NAME_MAX} 字符'}), 400
+
     course = db.session.get(Course, course_id)
     if not course:
         return jsonify({'error': '课程不存在'}), 404
-    
+
     existing_chapter = Chapter.query.filter_by(course_id=course_id, name=name).first()
     if existing_chapter:
         return jsonify({'error': '章节名称已存在'}), 400
-    
+
     chapter = Chapter(
         name=name,
         course_id=course_id,
-        description=data.get('description', ''),
+        description=(data.get('description') or '').strip(),
         order_num=data.get('order_num', 0)
     )
     db.session.add(chapter)
@@ -108,8 +114,11 @@ def update_chapter(chapter_id):
         return jsonify({'error': '章节不存在'}), 404
     
     data = request.get_json()
-    name = data.get('name')
-    
+    name = (data.get('name') or '').strip() or None
+
+    if name is not None and len(name) > _NAME_MAX:
+        return jsonify({'error': f'章节名称长度不能超过 {_NAME_MAX} 字符'}), 400
+
     if name:
         existing_chapter = Chapter.query.filter(
             Chapter.course_id == chapter.course_id,

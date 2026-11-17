@@ -19,6 +19,9 @@ from utils.permissions import require_teacher
 
 api_exam_bp = Blueprint('api_exam', __name__)
 
+# Exam.title 是 db.String(100)；与其他模块的 50 区分开。
+_TITLE_MAX = 100
+
 
 # ── v4.3 考务配置字段：读取校验 + 序列化 ─────────────────────────────
 
@@ -161,12 +164,18 @@ def api_create_exam():
         end_time = parse_dt(data['end_time'])
     except:
         return jsonify({'message': '时间格式错误'}), 400
-    
+
+    title = (data.get('title') or '').strip()
+    if not title:
+        return jsonify({'message': '缺少必要参数（title）'}), 400
+    if len(title) > _TITLE_MAX:
+        return jsonify({'message': f'考试标题长度不能超过 {_TITLE_MAX} 字符'}), 400
+
     if start_time >= end_time:
         return jsonify({'message': '开始时间必须早于结束时间'}), 400
-    
+
     exam = Exam(
-        title=data['title'],
+        title=title,
         description=data.get('description', ''),
         start_time=start_time,
         end_time=end_time,
@@ -247,11 +256,17 @@ def api_update_exam(id):
         end_time = parse_dt(data['end_time'])
     except:
         return jsonify({'message': '时间格式错误'}), 400
-    
+
+    title = (data.get('title') or '').strip()
+    if not title:
+        return jsonify({'message': '缺少必要参数（title）'}), 400
+    if len(title) > _TITLE_MAX:
+        return jsonify({'message': f'考试标题长度不能超过 {_TITLE_MAX} 字符'}), 400
+
     if start_time >= end_time:
         return jsonify({'message': '开始时间必须早于结束时间'}), 400
-    
-    exam.title = data['title']
+
+    exam.title = title
     exam.description = data.get('description', '')
     exam.start_time = start_time
     exam.end_time = end_time

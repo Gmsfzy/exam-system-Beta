@@ -7,6 +7,11 @@ from utils.security import verify_token
 
 api_major_bp = Blueprint('api_major', __name__)
 
+# Major / Department / Course / Chapter 四个模型都有 String(50) 名字列；
+# 统一常量，改数据库迁移时这里必须同步。
+_NAME_MAX = 50
+_DESC_MAX = 500   # description 是 db.Text 所以实际上无上限；此处是"展示长度"的软提示，非 DB 约束
+
 def _require_teacher():
     """委托 utils.permissions 统一实现（RBAC 收敛）。"""
     from utils.permissions import require_teacher
@@ -47,11 +52,15 @@ def api_add_major():
     if err:
         return err
     data = request.get_json(silent=True) or {}
-    if not data.get('name'):
+    name = (data.get('name') or '').strip()
+    description = (data.get('description') or '').strip() or None
+    if not name:
         return jsonify({'message': '缺少必要参数（name）'}), 400
-    if Major.query.filter_by(name=data['name']).first():
+    if len(name) > _NAME_MAX:
+        return jsonify({'message': f'专业名称长度不能超过 {_NAME_MAX} 字符'}), 400
+    if Major.query.filter_by(name=name).first():
         return jsonify({'message': '专业已存在'}), 400
-    m = Major(name=data['name'], description=data.get('description', ''))
+    m = Major(name=name, description=description)
     db.session.add(m)
     db.session.commit()
     invalidate_major_cache()
@@ -64,12 +73,16 @@ def api_update_major(id):
         return err
     m = Major.query.get_or_404(id)
     data = request.get_json(silent=True) or {}
-    if not data.get('name'):
+    name = (data.get('name') or '').strip()
+    description = (data.get('description') or '').strip() or None
+    if not name:
         return jsonify({'message': '缺少必要参数（name）'}), 400
-    if Major.query.filter(Major.name == data['name'], Major.id != id).first():
+    if len(name) > _NAME_MAX:
+        return jsonify({'message': f'专业名称长度不能超过 {_NAME_MAX} 字符'}), 400
+    if Major.query.filter(Major.name == name, Major.id != id).first():
         return jsonify({'message': '专业已存在'}), 400
-    m.name = data['name']
-    m.description = data.get('description', '')
+    m.name = name
+    m.description = description
     db.session.commit()
     invalidate_major_cache(id)
     return jsonify({'message': '更新成功'})

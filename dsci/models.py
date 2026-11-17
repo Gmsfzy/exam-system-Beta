@@ -32,7 +32,7 @@ class Dataset(db.Model):
     created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
 
     competition = db.relationship('Competition', backref=db.backref('datasets', lazy=True))
-    owner = db.relationship('User', foreign_keys=[owner_id], backref='datasets')
+    owner = db.relationship('User', foreign_keys=[owner_id], backref=db.backref('datasets', cascade='all, delete-orphan'))
     files = db.relationship('DatasetFile', backref='dataset', lazy=True,
                             cascade='all, delete-orphan')
 
@@ -95,7 +95,7 @@ class DsSubmission(db.Model):
     scored_at = db.Column(UTCDateTime)
 
     competition = db.relationship('Competition', backref=db.backref('ds_submissions', lazy=True))
-    user = db.relationship('User', foreign_keys=[user_id], backref='ds_submissions')
+    user = db.relationship('User', foreign_keys=[user_id], backref=db.backref('ds_submissions', cascade='all, delete-orphan'))
 
     def to_dict(self, with_private=False, with_user=False):
         d = {'id': self.id, 'competition_id': self.competition_id,
@@ -129,4 +129,4 @@ class DsNotebookRun(db.Model):
     created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
 
     competition = db.relationship('Competition', backref=db.backref('ds_runs', lazy=True))
-    user = db.relationship('User', foreign_keys=[user_id], backref='ds_runs')
+    user = db.relationship('User', foreign_keys=[user_id], backref=db.backref('ds_runs', cascade='all, delete-orphan'))

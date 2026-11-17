@@ -2,6 +2,8 @@ from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from flask_wtf.csrf import CSRFProtect, generate_csrf
 from flask import request, jsonify, current_app
+from werkzeug.routing import Map, Rule
+from werkzeug.exceptions import NotFound, MethodNotAllowed
 from config import Config
 import logging
 
@@ -9,6 +11,42 @@ logger = logging.getLogger(__name__)
 
 limiter = None
 csrf = None
+
+# CSRF 验证只对不安全方法（有写副作用的请求）生效；Flask-WTF 内部默认也是这个口径。
+_UNSAFE_METHODS = frozenset(('POST', 'PUT', 'PATCH', 'DELETE'))
+
+# CSRF 前置要排除的 endpoint：SPA 兜底 + 静态资源。
+# SPA catch-all 在 CSRF handler 之后才会执行自己的 api/socket.io/uploads 前缀判断，
+# 如果不排除，POST 打到任何路径（哪怕完全不存在）都会先被它"接到"，werkzeug 抛 MethodNotAllowed，
+# 让我们误以为"路径存在但方法不对"，实际应该让请求真正走到 Flask 的 404/405 handler。
+_CSRF_PRE_ENDPOINT_BLACKLIST = frozenset(('spa_entry', 'static'))
+
+
+def _route_status(method, path):
+    """查询 (method, path) 在排除 SPA 兜底/静态资源的路由表里的匹配状态。
+
+    返回三元组，区分三种情况：
+      ("ok", endpoint, params)       —— 路由真实存在，方法合法，endpoint 就是业务 handler
+      ("not_found", None, None)      —— 没有任何业务路由匹配这个路径，应该让 Flask 返回 404
+      ("method_not_allowed", None, None) —— 路径存在但方法不匹配，应该让 Flask 返回 405
+    """
+    real_map = Map()
+    for rule in current_app.url_map.iter_rules():
+        if rule.endpoint in _CSRF_PRE_ENDPOINT_BLACKLIST:
+            continue
+        real_map.add(Rule(str(rule), methods=rule.methods, endpoint=rule.endpoint))
+    try:
+        adapter = real_map.bind(request.host)
+        endpoint, params = adapter.match(path, method=method)
+        return ("ok", endpoint, params)
+    except MethodNotAllowed:
+        return ("method_not_allowed", None, None)
+    except NotFound:
+        return ("not_found", None, None)
+    except Exception:
+        # 其他异常（RequestRedirect 等）同样视为"不是我们要拦的"，让 Flask 自己处理
+        return ("not_found", None, None)
+
 
 def init_security(app):
     global limiter, csrf
@@ -47,6 +85,25 @@ def init_security(app):
 
     @app.before_request
     def _smart_csrf_check():
+        # 只对不安全方法（POST/PUT/PATCH/DELETE）验 CSRF；Flask-WTF 内部也是这个口径
+        if request.method not in _UNSAFE_METHODS:
+            return
+
+        # v7.24.2：先做一次真实路由匹配（排除 SPA catch-all / static），
+        # 用不同的跳过/终止策略让错误码语义回归正确：
+        #   "ok"                → 路径+方法都合法，继续 Bearer/豁免/csrf.protect() 校验
+        #   "not_found"         → 路径不存在，跳过 CSRF，让 Flask 自然走到 spa_entry → 404
+        #   "method_not_allowed" → 路径存在但方法不匹配，**直接 abort(405)**，
+        #                         因为 spa_entry 也注册了 PUT/DELETE 等不安全方法，
+        #                         会把这个请求接住然后 abort(404)，吞掉真实的 405
+        status, _ep, _params = _route_status(request.method, request.path)
+        if status == "not_found":
+            return  # Flask 自然走到 SPA catch-all → api/socket.io/uploads 前缀 abort(404)
+        if status == "method_not_allowed":
+            from flask import abort
+            abort(405)
+
+        # 后续逻辑：只在"路径真实存在且方法合法"时执行 CSRF 保护
         # 携带非空 Bearer token 的 API 请求豁免 CSRF（攻击者跨源无法自动附加 Authorization 头）；
         # 伪造/格式不符的 Authorization 头不再享有豁免，回落 CSRF 校验（v4.6.1 收紧）
         auth = request.headers.get('Authorization', '')

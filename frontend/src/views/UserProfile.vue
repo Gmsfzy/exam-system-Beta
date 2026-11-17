@@ -170,7 +170,7 @@ const saveProfile = async () => {
         ElMessage.error('请填写旧密码')
         return
       }
-      await request.post('/api/auth/change-password', {
+      await request.post('/api/change-password', {
         old_password: passwordForm.value.oldPassword,
         new_password: passwordForm.value.newPassword,
       })

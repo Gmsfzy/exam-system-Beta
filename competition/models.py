@@ -66,7 +66,7 @@ class Competition(db.Model):
     ds_scorer_code = db.Column(db.Text)                        # 自定义 scorer（metric=custom 时启用）
     created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
 
-    creator = db.relationship('User', foreign_keys=[creator_id], backref='competitions', lazy=True)
+    creator = db.relationship('User', foreign_keys=[creator_id], backref=db.backref('competitions', cascade='all, delete-orphan'), lazy=True)
     reviewer = db.relationship('User', foreign_keys=[reviewer_id])
     questions = db.relationship('CompetitionQuestion', backref='competition',
                                 lazy=True, cascade='all, delete-orphan',
@@ -147,7 +147,7 @@ class CompetitionParticipant(db.Model):
     flagged = db.Column(db.Boolean, nullable=False, default=False)  # 公平性异常标记
     created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
 
-    user = db.relationship('User', backref='competition_participants', lazy=True)
+    user = db.relationship('User', backref=db.backref('competition_participants', cascade='all, delete-orphan'), lazy=True)
     answers = db.relationship('CompetitionAnswer', backref='participant',
                               lazy=True, cascade='all, delete-orphan')
 
@@ -218,7 +218,7 @@ class PkBattle(db.Model):
     delta_opponent = db.Column(db.Integer, nullable=False, default=0)
 
     competition = db.relationship('Competition', backref='pk_battles')
-    challenger = db.relationship('User', foreign_keys=[challenger_id], backref='pk_as_challenger')
+    challenger = db.relationship('User', foreign_keys=[challenger_id], backref=db.backref('pk_as_challenger', cascade='all, delete-orphan'))
     opponent = db.relationship('User', foreign_keys=[opponent_id], backref='pk_as_opponent')
     winner = db.relationship('User', foreign_keys=[winner_id])
 
@@ -287,7 +287,7 @@ class UserPointsProfile(db.Model):
     updated_at = db.Column(UTCDateTime, nullable=False, default=utcnow,
                            onupdate=utcnow)
 
-    user = db.relationship('User', backref='points_profiles')
+    user = db.relationship('User', backref=db.backref('points_profiles', cascade='all, delete-orphan'))
 
     __table_args__ = (
         db.UniqueConstraint('user_id', 'season', name='_profile_season_uc'),
@@ -331,7 +331,7 @@ class SeasonArchive(db.Model):
     timed_finished = db.Column(db.Integer, nullable=False, default=0)
     created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
 
-    user = db.relationship('User', backref='season_archives')
+    user = db.relationship('User', backref=db.backref('season_archives', cascade='all, delete-orphan'))
 
     __table_args__ = (
         db.UniqueConstraint('season', 'user_id', name='_season_archive_uc'),
@@ -349,7 +349,7 @@ class UserBadge(db.Model):
     related_id = db.Column(db.Integer)
     granted_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
 
-    user = db.relationship('User', backref='badges')
+    user = db.relationship('User', backref=db.backref('badges', cascade='all, delete-orphan'))
 
     __table_args__ = (
         db.UniqueConstraint('user_id', 'badge_code', 'season', name='_user_badge_uc'),
@@ -368,7 +368,7 @@ class Team(db.Model):
     shared_streak_days = db.Column(db.Integer, default=0)      # 战队共同打卡天数
     last_sync_date = db.Column(db.Date, nullable=True)         # 最近一次共同打卡同步日（每日只 +1）
 
-    captain = db.relationship('User', foreign_keys=[captain_id], backref='captained_teams')
+    captain = db.relationship('User', foreign_keys=[captain_id], backref=db.backref('captained_teams', cascade='all, delete-orphan'))
     members = db.relationship('TeamMember', backref='team',
                               lazy=True, cascade='all, delete-orphan')
 
@@ -382,7 +382,7 @@ class TeamMember(db.Model):
     role = db.Column(db.String(10), nullable=False, default='member')  # captain / member
     joined_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
 
-    user = db.relationship('User', backref='team_memberships')
+    user = db.relationship('User', backref=db.backref('team_memberships', cascade='all, delete-orphan'))
 
     __table_args__ = (
         db.UniqueConstraint('user_id', name='_team_member_one_uc'),  # 一人同时只属一队
@@ -401,7 +401,7 @@ class ArenaRating(db.Model):
     games = db.Column(db.Integer, nullable=False, default=0)   # 已计入 Elo 的对战场次（定 K 值）
     updated_at = db.Column(UTCDateTime, nullable=False, default=utcnow, onupdate=utcnow)
 
-    user = db.relationship('User', backref='arena_rating')
+    user = db.relationship('User', backref=db.backref('arena_rating', cascade='all, delete-orphan'))
 
     def to_dict(self):
         return {'elo': self.elo, 'peak_elo': self.peak_elo, 'games': self.games}
@@ -419,7 +419,7 @@ class PointsHistory(db.Model):
     elo = db.Column(db.Integer, nullable=False, default=1200)
     updated_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
 
-    user = db.relationship('User', backref='points_histories')
+    user = db.relationship('User', backref=db.backref('points_histories', cascade='all, delete-orphan'))
 
     __table_args__ = (
         db.UniqueConstraint('user_id', 'season', 'day', name='_points_history_uc'),
@@ -438,7 +438,7 @@ class CompetitionSeries(db.Model):
     creator_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
 
-    creator = db.relationship('User', backref='created_series')
+    creator = db.relationship('User', backref=db.backref('created_series', cascade='all, delete-orphan'))
 
     def to_dict(self):
         return {
@@ -463,7 +463,7 @@ class DiscussionPost(db.Model):
     content = db.Column(db.Text, nullable=False)
     created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
 
-    author = db.relationship('User', backref='discussion_posts', lazy=True)
+    author = db.relationship('User', backref=db.backref('discussion_posts', cascade='all, delete-orphan'), lazy=True)
     competition = db.relationship('Competition', backref='discussions')
     parent = db.relationship('DiscussionPost', remote_side=[id],
                              backref='reply_list', lazy=True)
@@ -487,7 +487,7 @@ class CompetitionCertificate(db.Model):
     summary = db.Column(JSONType)   # {season_label, grade_label, pk_total, timed_finished, earned_date}
     earned_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
 
-    author = db.relationship('User', backref='season_certificates', lazy=True)
+    author = db.relationship('User', backref=db.backref('season_certificates', cascade='all, delete-orphan'), lazy=True)
 
     __table_args__ = (
         db.UniqueConstraint('user_id', 'season', name='_season_cert_uc'),
@@ -507,7 +507,7 @@ class CompetitionAnnouncement(db.Model):
     created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
 
     competition = db.relationship('Competition', backref='announcements')
-    author = db.relationship('User', backref='competition_announcements')
+    author = db.relationship('User', backref=db.backref('competition_announcements', cascade='all, delete-orphan'))
 
 
 class CompetitionResource(db.Model):
@@ -523,7 +523,7 @@ class CompetitionResource(db.Model):
     created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
 
     competition = db.relationship('Competition', backref='resources')
-    uploader = db.relationship('User', backref='competition_resources')
+    uploader = db.relationship('User', backref=db.backref('competition_resources', cascade='all, delete-orphan'))
 
 
 class CompetitionWork(db.Model):
@@ -545,7 +545,7 @@ class CompetitionWork(db.Model):
     updated_at = db.Column(UTCDateTime, nullable=False, default=utcnow, onupdate=utcnow)
 
     competition = db.relationship('Competition', backref='works')
-    user = db.relationship('User', foreign_keys=[user_id], backref='competition_works')
+    user = db.relationship('User', foreign_keys=[user_id], backref=db.backref('competition_works', cascade='all, delete-orphan'))
     scorer = db.relationship('User', foreign_keys=[scored_by])
 
     __table_args__ = (

@@ -232,7 +232,7 @@ class Exam(db.Model):
     rank_bonus_tier = db.Column(db.String(20), nullable=True)    # 段位门槛（bronze/silver/gold/...），NULL=不启用
     rank_bonus_score = db.Column(db.Float, nullable=False, default=0)  # 达段位学生的加分（0=关闭）
 
-    creator = db.relationship('User', backref='exams', lazy=True)
+    creator = db.relationship('User', backref=db.backref('exams', cascade='all, delete-orphan'), lazy=True)
     course = db.relationship('Course', backref='exams')
     # 删除考试时 ORM 级联清理题目配置/受邀学生/会话/成绩（依赖记录无独立存在意义）
     exam_questions = db.relationship('ExamQuestion', backref='exam', lazy=True,
@@ -292,7 +292,7 @@ class ExamSession(db.Model):
     assigned_question_ids = db.Column(JSONType)                    # paper_mode=random 时本次抽到的题 id 列表
     option_map = db.Column(JSONType)                               # 选项乱序映射 {qid: [原索引...]}（仅含被打乱的题）
 
-    student = db.relationship('User', backref='exam_sessions', lazy=True)
+    student = db.relationship('User', backref=db.backref('exam_sessions', cascade='all, delete-orphan'), lazy=True)
     answers = db.relationship('Answer', backref='session', lazy=True,
                               cascade='all, delete-orphan')
 
@@ -342,7 +342,7 @@ class Result(db.Model):
         db.UniqueConstraint('exam_id', 'student_id', name='_result_exam_student_uc'),
     )
 
-    student = db.relationship('User', backref='results', lazy=True)
+    student = db.relationship('User', backref=db.backref('results', cascade='all, delete-orphan'), lazy=True)
 
 class NotificationTypeEnum:
     SUCCESS = "success"
@@ -361,7 +361,7 @@ class Notification(db.Model):
     related_id = db.Column(db.Integer)       # 关联的实体ID
     created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
 
-    user = db.relationship('User', backref='notifications', lazy=True)
+    user = db.relationship('User', backref=db.backref('notifications', cascade='all, delete-orphan'), lazy=True)
 
 
 # ── 自我学习模块 ──────────────────────────────────────────────────────
@@ -390,7 +390,7 @@ class WrongAnswerRecord(db.Model):
         db.UniqueConstraint('user_id', 'question_id', name='_wrong_question_uc'),
     )
 
-    user = db.relationship('User', backref='wrong_records', lazy=True)
+    user = db.relationship('User', backref=db.backref('wrong_records', cascade='all, delete-orphan'), lazy=True)
     question = db.relationship('Question')
 
 
@@ -408,7 +408,7 @@ class PracticeSession(db.Model):
     start_time = db.Column(UTCDateTime, nullable=False, default=utcnow)
     end_time = db.Column(UTCDateTime)
 
-    user = db.relationship('User', backref='practice_sessions', lazy=True)
+    user = db.relationship('User', backref=db.backref('practice_sessions', cascade='all, delete-orphan'), lazy=True)
     answers = db.relationship('PracticeAnswer', backref='session', lazy=True,
                               cascade='all, delete-orphan')
 
@@ -442,7 +442,7 @@ class StudyPlan(db.Model):
     status = db.Column(db.String(20), nullable=False, default='active')  # active / completed / paused
     created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
 
-    user = db.relationship('User', backref='study_plans', lazy=True)
+    user = db.relationship('User', backref=db.backref('study_plans', cascade='all, delete-orphan'), lazy=True)
     tasks = db.relationship('StudyPlanTask', backref='plan', lazy=True,
                             cascade='all, delete-orphan', order_by='StudyPlanTask.order_num, StudyPlanTask.id')
 
@@ -486,7 +486,7 @@ class StudyLog(db.Model):
     time_spent_sec = db.Column(db.Integer, default=0)
     studied_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
 
-    user = db.relationship('User', backref='study_logs', lazy=True)
+    user = db.relationship('User', backref=db.backref('study_logs', cascade='all, delete-orphan'), lazy=True)
 
 
 # ── 专业学习路径 + 知识图谱 ──────────────────────────────────────────
@@ -694,7 +694,7 @@ class UserPathEnrollment(db.Model):
         db.Index('ix_enroll_user', 'user_id'),
     )
 
-    user = db.relationship('User', backref='path_enrollments')
+    user = db.relationship('User', backref=db.backref('path_enrollments', cascade='all, delete-orphan'))
     path = db.relationship('LearningPath', backref='enrollments')
     current_node = db.relationship('LearningPathNode')
 
@@ -753,7 +753,7 @@ class KnowledgeMastery(db.Model):
         db.Index('ix_mastery_user', 'user_id'),
     )
 
-    user = db.relationship('User', backref='kp_masteries')
+    user = db.relationship('User', backref=db.backref('kp_masteries', cascade='all, delete-orphan'))
     knowledge_point = db.relationship('KnowledgePoint', backref='masteries')
 
 
@@ -771,7 +771,7 @@ class UserKpNote(db.Model):
         db.Index('ix_note_user', 'user_id'),
     )
 
-    user = db.relationship('User', backref='kp_notes')
+    user = db.relationship('User', backref=db.backref('kp_notes', cascade='all, delete-orphan'))
     knowledge_point = db.relationship('KnowledgePoint', backref='notes')
 
 
@@ -794,7 +794,7 @@ class QuizAttempt(db.Model):
         db.Index('ix_quiz_user_scope', 'user_id', 'scope_type'),
     )
 
-    user = db.relationship('User', backref='quiz_attempts')
+    user = db.relationship('User', backref=db.backref('quiz_attempts', cascade='all, delete-orphan'))
     node = db.relationship('LearningPathNode')
     path = db.relationship('LearningPath')
     answers = db.relationship('QuizAttemptAnswer', backref='attempt', lazy=True,
@@ -831,7 +831,7 @@ class ReviewItem(db.Model):
         db.Index('ix_review_user_due', 'user_id', 'status', 'due_at'),
     )
 
-    user = db.relationship('User', backref='review_items')
+    user = db.relationship('User', backref=db.backref('review_items', cascade='all, delete-orphan'))
     question = db.relationship('Question')
 
 
@@ -852,7 +852,7 @@ class StudyCheckin(db.Model):
         db.Index('ix_checkin_user_day', 'user_id', 'day'),
     )
 
-    user = db.relationship('User', backref='checkins')
+    user = db.relationship('User', backref=db.backref('checkins', cascade='all, delete-orphan'))
 
 
 class PathCertificate(db.Model):
@@ -869,7 +869,7 @@ class PathCertificate(db.Model):
         db.UniqueConstraint('user_id', 'path_id', name='_user_path_cert_uc'),
     )
 
-    user = db.relationship('User', backref='certificates')
+    user = db.relationship('User', backref=db.backref('certificates', cascade='all, delete-orphan'))
     path = db.relationship('LearningPath', backref='certificates')
 
 
@@ -918,7 +918,7 @@ class UserCertificate(db.Model):
         db.Index('ix_usercert_status', 'verify_status'),
     )
 
-    owner = db.relationship('User', foreign_keys=[user_id], backref='social_certificates')
+    owner = db.relationship('User', foreign_keys=[user_id], backref=db.backref('social_certificates', cascade='all, delete-orphan'))
     verifier = db.relationship('User', foreign_keys=[verified_by])
 
 
@@ -964,7 +964,7 @@ class CertificateDisplay(db.Model):
         db.Index('ix_cert_display_public', 'is_public'),
     )
 
-    user = db.relationship('User', backref='certificate_displays')
+    user = db.relationship('User', backref=db.backref('certificate_displays', cascade='all, delete-orphan'))
 
 
 class StudyInsight(db.Model):
@@ -1006,7 +1006,7 @@ class StudyInsight(db.Model):
         db.Index('ix_insight_public', 'is_public'),
     )
 
-    user = db.relationship('User', backref='study_insights')
+    user = db.relationship('User', backref=db.backref('study_insights', cascade='all, delete-orphan'))
     plan = db.relationship('StudyPlan')
     knowledge_point = db.relationship('KnowledgePoint')
 
@@ -1030,7 +1030,7 @@ class DailyTask(db.Model):
         db.Index('ix_daily_task_user_day', 'user_id', 'day'),
     )
 
-    user = db.relationship('User', backref='daily_tasks')
+    user = db.relationship('User', backref=db.backref('daily_tasks', cascade='all, delete-orphan'))
 
 
 # ── v4.4 学习体验升级：AI 会话持久化 / 专注计时 / 自由笔记 / 讲解卡 ────
@@ -1048,7 +1048,7 @@ class AiChatConversation(db.Model):
         db.Index('ix_ai_conv_user_updated', 'user_id', 'updated_at'),
     )
 
-    user = db.relationship('User', backref='ai_conversations')
+    user = db.relationship('User', backref=db.backref('ai_conversations', cascade='all, delete-orphan'))
     messages = db.relationship('AiChatMessage', backref='conversation',
                                cascade='all, delete-orphan', lazy=True)
 
@@ -1085,7 +1085,7 @@ class FocusSession(db.Model):
         db.Index('ix_focus_user_started', 'user_id', 'started_at'),
     )
 
-    user = db.relationship('User', backref='focus_sessions')
+    user = db.relationship('User', backref=db.backref('focus_sessions', cascade='all, delete-orphan'))
 
 
 class StudyNote(db.Model):
@@ -1107,7 +1107,7 @@ class StudyNote(db.Model):
         db.Index('ix_study_note_user_updated', 'user_id', 'updated_at'),
     )
 
-    user = db.relationship('User', backref='study_notes')
+    user = db.relationship('User', backref=db.backref('study_notes', cascade='all, delete-orphan'))
 
 
 class ExplainCard(db.Model):
@@ -1123,7 +1123,7 @@ class ExplainCard(db.Model):
         db.Index('ix_explain_card_user_created', 'user_id', 'created_at'),
     )
 
-    user = db.relationship('User', backref='explain_cards')
+    user = db.relationship('User', backref=db.backref('explain_cards', cascade='all, delete-orphan'))
     knowledge_point = db.relationship('KnowledgePoint')
 
 
@@ -1142,7 +1142,7 @@ class StudyFolder(db.Model):
         db.Index('ix_folder_user', 'user_id'),
     )
 
-    user = db.relationship('User', backref='study_folders')
+    user = db.relationship('User', backref=db.backref('study_folders', cascade='all, delete-orphan'))
 
 
 class StudyMaterial(db.Model):
@@ -1186,7 +1186,7 @@ class StudyMaterial(db.Model):
         db.Index('ix_material_plan', 'plan_id'),
     )
 
-    user = db.relationship('User', backref='study_materials')
+    user = db.relationship('User', backref=db.backref('study_materials', cascade='all, delete-orphan'))
     folder = db.relationship('StudyFolder', backref='materials')
     knowledge_point = db.relationship('KnowledgePoint')
 
@@ -1246,7 +1246,7 @@ class MaterialFavorite(db.Model):
         db.UniqueConstraint('user_id', 'material_id', name='_user_material_fav_uc'),
     )
 
-    user = db.relationship('User', backref='material_favorites')
+    user = db.relationship('User', backref=db.backref('material_favorites', cascade='all, delete-orphan'))
     material = db.relationship('StudyMaterial', backref='favorites')
 
 
@@ -1269,7 +1269,7 @@ class MaterialReport(db.Model):
     )
 
     material = db.relationship('StudyMaterial', backref='reports')
-    reporter = db.relationship('User', foreign_keys=[reporter_id], backref='material_reports')
+    reporter = db.relationship('User', foreign_keys=[reporter_id], backref=db.backref('material_reports', cascade='all, delete-orphan'))
     handler = db.relationship('User', foreign_keys=[handler_id])
 
 
@@ -1287,8 +1287,8 @@ class UserFollow(db.Model):
         db.Index('ix_follow_followee', 'followee_id'),
     )
 
-    follower = db.relationship('User', foreign_keys=[follower_id], backref='followings')
-    followee = db.relationship('User', foreign_keys=[followee_id], backref='followers')
+    follower = db.relationship('User', foreign_keys=[follower_id], backref=db.backref('followings', cascade='all, delete-orphan'))
+    followee = db.relationship('User', foreign_keys=[followee_id], backref=db.backref('followers', cascade='all, delete-orphan'))
 
 
 class AiUsageLog(db.Model):
@@ -1306,18 +1306,19 @@ class AiUsageLog(db.Model):
         db.Index('ix_ai_log_user_created', 'user_id', 'created_at'),
     )
 
-    user = db.relationship('User', backref='ai_usage_logs')
+    user = db.relationship('User', backref=db.backref('ai_usage_logs', cascade='all, delete-orphan'))
 
 
 class AiQuota(db.Model):
     """AI 每日生成配额：默认 30 次/天，教师可按用户调整；跨天惰性重置"""
     __tablename__ = 'ai_quota'
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), primary_key=True)
+    # ondelete='CASCADE' 让 DB 层删 User 时连带删 quota；cascade 让 ORM 层同步（#34）
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id', ondelete='CASCADE'), primary_key=True)
     daily_limit = db.Column(db.Integer, nullable=False, default=30)
     used_today = db.Column(db.Integer, nullable=False, default=0)
     reset_date = db.Column(db.Date, nullable=False)
 
-    user = db.relationship('User', backref='ai_quotas')
+    user = db.relationship('User', backref=db.backref('ai_quotas', cascade='all, delete-orphan', uselist=False))
 
 
 class AiAskRecord(db.Model):
@@ -1353,7 +1354,7 @@ class AiAskRecord(db.Model):
         db.Index('ix_ai_ask_created', 'created_at'),
     )
 
-    user = db.relationship('User', backref='ai_ask_records')
+    user = db.relationship('User', backref=db.backref('ai_ask_records', cascade='all, delete-orphan'))
     question = db.relationship('Question')
 
 
@@ -1450,7 +1451,7 @@ class CommunityPost(db.Model):
     )
 
     # resolved_by 也指向 user.id，author 关系必须显式指定外键
-    author = db.relationship('User', foreign_keys=[author_id], backref='community_posts')
+    author = db.relationship('User', foreign_keys=[author_id], backref=db.backref('community_posts', cascade='all, delete-orphan'))
     course = db.relationship('Course')
     comments = db.relationship('CommunityComment', backref='post', lazy=True,
                                cascade='all, delete-orphan',
@@ -1533,7 +1534,7 @@ class CommunityComment(db.Model):
 
     created_at = db.Column(UTCDateTime, nullable=False, default=utcnow, index=True)
 
-    author = db.relationship('User', backref='community_comments')
+    author = db.relationship('User', backref=db.backref('community_comments', cascade='all, delete-orphan'))
     parent = db.relationship('CommunityComment', remote_side=[id], backref='replies')
 
     def to_dict(self, viewer=None):
@@ -1606,7 +1607,7 @@ class CommunityPollVote(db.Model):
     )
 
     option = db.relationship('CommunityPollOption', backref='votes')
-    user = db.relationship('User', backref='community_poll_votes')
+    user = db.relationship('User', backref=db.backref('community_poll_votes', cascade='all, delete-orphan'))
 
 
 # ──────────────────────────────────────────────────────────────
@@ -1622,7 +1623,7 @@ class CommunityUserStat(db.Model):
     points = db.Column(db.Integer, nullable=False, default=0)
     updated_at = db.Column(UTCDateTime, nullable=False, default=utcnow, onupdate=utcnow)
 
-    user = db.relationship('User', backref='community_stat')
+    user = db.relationship('User', backref=db.backref('community_stat', cascade='all, delete-orphan'))
 
 
 class CommunityPointLog(db.Model):
@@ -1657,7 +1658,7 @@ class CommunityLike(db.Model):
         db.Index('ix_community_like_user', 'user_id'),
     )
 
-    user = db.relationship('User', backref='community_likes')
+    user = db.relationship('User', backref=db.backref('community_likes', cascade='all, delete-orphan'))
 
 
 class CommunityFavorite(db.Model):
@@ -1674,7 +1675,7 @@ class CommunityFavorite(db.Model):
     )
 
     post = db.relationship('CommunityPost', backref='favorites')
-    user = db.relationship('User', backref='community_favorites')
+    user = db.relationship('User', backref=db.backref('community_favorites', cascade='all, delete-orphan'))
 
 
 class CommunityNotification(db.Model):
@@ -1696,7 +1697,7 @@ class CommunityNotification(db.Model):
     )
 
     actor = db.relationship('User', foreign_keys=[actor_id], backref='community_notifications_sent')
-    recipient = db.relationship('User', foreign_keys=[user_id], backref='community_notifications')
+    recipient = db.relationship('User', foreign_keys=[user_id], backref=db.backref('community_notifications', cascade='all, delete-orphan'))
     post = db.relationship('CommunityPost', backref='notifications')
 
     TYPE_LABELS = {
@@ -1744,7 +1745,7 @@ class CommunityReport(db.Model):
         db.Index('ix_community_report_status_created', 'status', 'created_at'),
     )
 
-    reporter = db.relationship('User', foreign_keys=[reporter_id], backref='community_reports')
+    reporter = db.relationship('User', foreign_keys=[reporter_id], backref=db.backref('community_reports', cascade='all, delete-orphan'))
     handler = db.relationship('User', foreign_keys=[handled_by])
 
     def to_dict(self):

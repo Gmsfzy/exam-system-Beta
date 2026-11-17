@@ -105,7 +105,7 @@ class Homework(db.Model):
     # v5.17 订正重做闭环：开启后教师可将已批提交退回订正（区别 allow_resubmit：截止前覆盖 vs 批改后退回）
     allow_revision = db.Column(db.Boolean, nullable=False, default=False)
 
-    teacher = db.relationship('User', foreign_keys=[teacher_id], backref='homeworks')
+    teacher = db.relationship('User', foreign_keys=[teacher_id], backref=db.backref('homeworks', cascade='all, delete-orphan'))
     course = db.relationship('Course', backref='homeworks')
     hw_questions = db.relationship('HomeworkQuestion', backref='homework', lazy=True,
                                    cascade='all, delete-orphan')
@@ -278,7 +278,7 @@ class HomeworkSubmission(db.Model):
     showcase_anon = db.Column(db.Boolean, nullable=False, default=False)
     showcase_at = db.Column(UTCDateTime)
 
-    student = db.relationship('User', foreign_keys=[student_id], backref='homework_submissions')
+    student = db.relationship('User', foreign_keys=[student_id], backref=db.backref('homework_submissions', cascade='all, delete-orphan'))
     grader = db.relationship('User', foreign_keys=[graded_by])
     group = db.relationship('HomeworkGroup', foreign_keys=[group_id])
     answers = db.relationship('HomeworkAnswer', backref='submission', lazy=True,

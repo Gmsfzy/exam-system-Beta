@@ -7,6 +7,12 @@ from utils.security import verify_token
 
 api_course_bp = Blueprint('api_course', __name__)
 
+# Course / Chapter / Major / Department 四个模型都有 String(50) 名字列；
+# 统一常量（major_routes.py 里同名常量也是 50，这里独立避免跨文件 import 循环）。
+_NAME_MAX = 50
+_SEMESTER_MAX = 20   # db.String(20)
+_DESC_SOFT_MAX = 1000   # description 是 db.Text，这里只是展示层软限，非 DB 约束
+
 def _require_teacher():
     """委托 utils.permissions 统一实现（RBAC 收敛）。"""
     from utils.permissions import require_teacher
@@ -56,13 +62,23 @@ def api_add_course():
     if err:
         return err
     data = request.get_json(silent=True) or {}
-    if not data.get('name') or data.get('major_id') is None:
+    name = (data.get('name') or '').strip()
+    if not name or data.get('major_id') is None:
         return jsonify({'message': '缺少必要参数（name/major_id）'}), 400
+    if len(name) > _NAME_MAX:
+        return jsonify({'message': f'课程名称长度不能超过 {_NAME_MAX} 字符'}), 400
+    semester = (data.get('semester') or '').strip()
+    if semester and len(semester) > _SEMESTER_MAX:
+        return jsonify({'message': f'学期字段长度不能超过 {_SEMESTER_MAX} 字符'}), 400
+    # FK 前置校验：major_id 不存在直接 400，不然 commit 时才 IntegrityError
+    major = Major.query.get(data['major_id'])
+    if not major:
+        return jsonify({'message': '所属专业不存在'}), 400
     course = Course(
-        name=data['name'],
-        description=data.get('description', ''),
+        name=name,
+        description=(data.get('description') or '').strip(),
         credit=data.get('credit'),
-        semester=data.get('semester', ''),
+        semester=semester,
         major_id=data['major_id']
     )
     db.session.add(course)
@@ -77,12 +93,19 @@ def api_update_course(id):
         return err
     course = Course.query.get_or_404(id)
     data = request.get_json(silent=True) or {}
-    if not data.get('name'):
+    name = (data.get('name') or '').strip()
+    if not name:
         return jsonify({'message': '缺少必要参数（name）'}), 400
-    course.name = data['name']
-    course.description = data.get('description', '')
+    if len(name) > _NAME_MAX:
+        return jsonify({'message': f'课程名称长度不能超过 {_NAME_MAX} 字符'}), 400
+    course.name = name
+    course.description = (data.get('description') or '').strip()
     course.credit = data.get('credit')
-    course.semester = data.get('semester', '')
+    if 'semester' in data:
+        semester = (data.get('semester') or '').strip()
+        if semester and len(semester) > _SEMESTER_MAX:
+            return jsonify({'message': f'学期字段长度不能超过 {_SEMESTER_MAX} 字符'}), 400
+        course.semester = semester
     db.session.commit()
     invalidate_course_cache(id)
     return jsonify({'message': '更新成功'})

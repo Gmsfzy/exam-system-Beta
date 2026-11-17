@@ -70,7 +70,7 @@ class Bounty(db.Model):
     updated_at = db.Column(UTCDateTime, nullable=False, default=utcnow, onupdate=utcnow)
     closed_at = db.Column(UTCDateTime)
 
-    publisher = db.relationship('User', foreign_keys=[publisher_id], backref='bounties', lazy=True)
+    publisher = db.relationship('User', foreign_keys=[publisher_id], backref=db.backref('bounties', cascade='all, delete-orphan'), lazy=True)
     target_question = db.relationship('Question', foreign_keys=[target_question_id], lazy=True)
     major = db.relationship('Major', foreign_keys=[major_id], lazy=True)
     submissions = db.relationship(
@@ -260,7 +260,7 @@ class BountyComment(db.Model):
     content = db.Column(db.Text, nullable=False)
     created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
 
-    author = db.relationship('User', backref='bounty_comments', lazy=True)
+    author = db.relationship('User', backref=db.backref('bounty_comments', cascade='all, delete-orphan'), lazy=True)
     submission = db.relationship('BountySubmission', backref='comments')
 
     def to_dict(self):
@@ -281,7 +281,7 @@ class BountyVote(db.Model):
     value = db.Column(db.Integer, nullable=False, default=1)
     created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
 
-    voter = db.relationship('User', backref='bounty_votes', lazy=True)
+    voter = db.relationship('User', backref=db.backref('bounty_votes', cascade='all, delete-orphan'), lazy=True)
 
     __table_args__ = (
         db.UniqueConstraint('submission_id', 'user_id', name='_bounty_vote_uc'),
@@ -299,7 +299,7 @@ class BountyReport(db.Model):
     status = db.Column(db.String(20), nullable=False, default='pending')  # pending/resolved/dismissed
     created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
 
-    reporter = db.relationship('User', foreign_keys=[reporter_id], backref='bounty_reports')
+    reporter = db.relationship('User', foreign_keys=[reporter_id], backref=db.backref('bounty_reports', cascade='all, delete-orphan'))
     submission = db.relationship('BountySubmission', backref='reports')
 
     __table_args__ = (

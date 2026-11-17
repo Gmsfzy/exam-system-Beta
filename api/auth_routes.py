@@ -11,6 +11,13 @@ import datetime as dt
 
 api_auth_bp = Blueprint('api_auth', __name__)
 
+# 字段上限，和 User 模型保持同源（改模型时这里必须同步）。
+_USERNAME_MIN, _USERNAME_MAX = 2, 20
+_PASSWORD_MIN = 6
+_EMAIL_MAX = 120
+_ROLE_ALLOWED = frozenset(('student', 'teacher', 'admin'))
+
+
 def generate_token(user):
     payload = {
         'user_id': user.id,
@@ -28,8 +35,10 @@ def generate_token(user):
 @log_performance
 def api_login():
     data = request.get_json()
-    username = data.get('username')
-    password = data.get('password')
+    username = (data.get('username') or '').strip()
+    password = data.get('password') or ''
+    if not username or not password:
+        return jsonify({'message': '用户名和密码不能为空'}), 400
     user = User.query.filter_by(username=username).first()
     if user and user.check_password(password):
         token = generate_token(user)
@@ -47,14 +56,28 @@ def api_login():
 @log_performance
 def api_register():
     data = request.get_json()
-    username = data.get('username')
-    password = data.get('password')
+    username = (data.get('username') or '').strip()
+    password = data.get('password') or ''
     # 开发阶段保留自选角色（测试需要）；上线前必须收紧为强制 student 或管理员审批，否则可自助提权教师
-    role = data.get('role', 'student')
-    email = data.get('email', '').strip() or None
+    role = (data.get('role') or 'student').strip().lower()
+    email = (data.get('email') or '').strip() or None
 
-    if not username or not password:
-        return jsonify({'message': '用户名和密码不能为空'}), 400
+    # ── 输入长度/格式校验（v7.24.2，和 User 模型字段保持同源，防止 DB 截断） ──
+    if not username:
+        return jsonify({'message': '用户名不能为空'}), 400
+    if len(username) < _USERNAME_MIN or len(username) > _USERNAME_MAX:
+        return jsonify({'message': f'用户名长度需 {_USERNAME_MIN}-{_USERNAME_MAX} 字符'}), 400
+    if not password:
+        return jsonify({'message': '密码不能为空'}), 400
+    if len(password) < _PASSWORD_MIN:
+        return jsonify({'message': f'密码至少 {_PASSWORD_MIN} 位'}), 400
+    if role not in _ROLE_ALLOWED:
+        return jsonify({'message': '角色非法（仅支持 student/teacher/admin）'}), 400
+    if email:
+        if len(email) > _EMAIL_MAX:
+            return jsonify({'message': f'邮箱长度不能超过 {_EMAIL_MAX} 字符'}), 400
+        if '@' not in email or '.' not in email.split('@')[-1]:
+            return jsonify({'message': '邮箱格式不正确'}), 400
 
     if User.query.filter_by(username=username).first():
         return jsonify({'message': '用户名已存在'}), 400
@@ -94,7 +117,10 @@ def api_update_current_user():
     if 'email' in data:
         new_email = (data.get('email') or '').strip() or None
         if new_email:
-            # 格式最基本校验（含 @）
+            # 长度先卡，防止超过 db.String(120) 被 PostgreSQL 拒掉
+            if len(new_email) > _EMAIL_MAX:
+                return jsonify({'message': f'邮箱长度不能超过 {_EMAIL_MAX} 字符'}), 400
+            # 格式最基本校验（含 @ 和顶级域名的点）
             if '@' not in new_email or '.' not in new_email.split('@')[-1]:
                 return jsonify({'message': '邮箱格式不正确'}), 400
             # 唯一性校验（排除自己）
@@ -119,11 +145,13 @@ def api_change_password():
         return jsonify({'message': '未登录'}), 401
     data = request.get_json(silent=True) or {}
     old_pwd = (data.get('old_password') or '').strip()
-    new_pwd = data.get('new_password') or ''
+    new_pwd = (data.get('new_password') or '').strip()
     if not old_pwd or not new_pwd:
         return jsonify({'message': '旧密码和新密码不能为空'}), 400
-    if len(new_pwd) < 6:
-        return jsonify({'message': '新密码至少 6 位'}), 400
+    if len(new_pwd) < _PASSWORD_MIN:
+        return jsonify({'message': f'新密码至少 {_PASSWORD_MIN} 位'}), 400
+    if old_pwd == new_pwd:
+        return jsonify({'message': '新密码不能与旧密码相同'}), 400
     if not user.check_password(old_pwd):
         return jsonify({'message': '旧密码不正确'}), 400
     user.set_password(new_pwd)

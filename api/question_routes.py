@@ -118,6 +118,42 @@ def _normalize_tags(value):
 
 api_question_bp = Blueprint('api_question', __name__)
 
+# ── 同源常量（database/models.py String(N) 必须同步） ──────────────
+_TYPE_MAX = 20          # Question.type          String(20)
+_DIFF_MAX = 20          # Question.difficulty    String(20)
+_SOURCE_MAX = 20        # Question.source        String(20)
+_MG_MAX = 50            # Question.material_group String(50)
+
+_TYPE_ALLOWED = frozenset((
+    QuestionTypeEnum.SINGLE_CHOICE, QuestionTypeEnum.MULTIPLE_CHOICE,
+    QuestionTypeEnum.FILL_BLANK, QuestionTypeEnum.TRUE_FALSE,
+    QuestionTypeEnum.SHORT_ANSWER, QuestionTypeEnum.PROGRAMMING,
+    QuestionTypeEnum.APPLICATION, QuestionTypeEnum.CALCULATION,
+))
+_DIFF_ALLOWED = frozenset((DifficultyEnum.EASY, DifficultyEnum.MEDIUM, DifficultyEnum.HARD))
+
+
+def _validate_question_strings(data):
+    """校验 POST/PUT Question 端点的 String 字段（长度 + 白名单），返回错误消息或 None。"""
+    qtype = (data.get('type') or '').strip()
+    if qtype not in _TYPE_ALLOWED:
+        return '无效的题型（须为 single_choice/multiple_choice/fill_blank/true_false/short_answer/programming/application/calculation）'
+    if len(qtype) > _TYPE_MAX:
+        return f'题型长度不能超过 {_TYPE_MAX} 字符'
+    diff = (data.get('difficulty') or '').strip()
+    if diff not in _DIFF_ALLOWED:
+        return '无效的难度（须为 easy/medium/hard）'
+    if len(diff) > _DIFF_MAX:
+        return f'难度长度不能超过 {_DIFF_MAX} 字符'
+    src = (data.get('source') or '').strip()
+    if src and len(src) > _SOURCE_MAX:
+        return f'题目来源长度不能超过 {_SOURCE_MAX} 字符'
+    mg = (data.get('material_group') or '').strip()
+    if mg and len(mg) > _MG_MAX:
+        return f'材料分组长度不能超过 {_MG_MAX} 字符'
+    return None
+
+
 def _serialize_question(q, is_teacher, uid):
     """题目序列化单一真值：列表与单题详情共用，字段与脱敏口径完全一致。
     答案/解析/OJ 用例仅教师可见（学生视角剔除，防考前拖库）。"""
@@ -227,6 +263,9 @@ def api_add_question():
         tags_val = _normalize_tags(data.get('tags'))
     except ValueError as e:
         return jsonify({'message': str(e)}), 400
+    str_err = _validate_question_strings(data)
+    if str_err:
+        return jsonify({'message': str_err}), 400
     q = Question(
         content=data['content'],
         options=_normalize_options(data.get('options')),
@@ -268,6 +307,9 @@ def api_update_question(id):
         tags_val = _normalize_tags(data.get('tags')) if 'tags' in data else None
     except ValueError as e:
         return jsonify({'message': str(e)}), 400
+    str_err = _validate_question_strings(data)
+    if str_err:
+        return jsonify({'message': str_err}), 400
     q.content = data['content']
     q.options = _normalize_options(data.get('options'))
     q.answer = data.get('answer', '')

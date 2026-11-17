@@ -52,6 +52,18 @@ from ai_service.gate import (check_ai_quota, charge_ai_quota, log_ai_usage,
 
 api_learning_bp = Blueprint('api_learning', __name__)
 
+# ── 同源常量（database/models.py String(N) 必须同步） ──────────────
+_PRACTICE_TITLE_MAX = 100   # PracticeSession.title  String(100)
+_PLAN_TITLE_MAX = 100       # StudyPlan.title         String(100)
+# 长尾字段（#35）：用户输入型 title/category/topic 显式 400，不静默截断
+_AICHAT_TITLE_MAX = 100     # AiChatConversation.title  String(100)
+_AICHAT_CONTEXT_MAX = 60    # AiChatConversation.context String(60)
+_NOTE_TITLE_MAX = 200       # StudyNote.title          String(200)
+_NOTE_CATEGORY_MAX = 50     # StudyNote.category       String(50)
+_FOCUS_TOPIC_MAX = 200      # FocusSession.topic       String(200)
+_INSIGHT_TITLE_MAX = 200    # StudyInsight.title       String(200)
+_DAILY_TASK_TITLE_MAX = 200 # DailyTask.title          String(200)
+
 
 # ── 错题本 ──────────────────────────────────────────────────────────
 
@@ -181,7 +193,9 @@ def api_practice_start():
         return jsonify({'message': '未登录'}), 401
 
     data = request.get_json(silent=True) or {}
-    title = data.get('title', '')
+    title = (data.get('title') or '').strip()
+    if title and len(title) > _PRACTICE_TITLE_MAX:
+        return jsonify({'message': f'练习标题长度不能超过 {_PRACTICE_TITLE_MAX} 字符'}), 400
     major_id = data.get('major_id')
     course_id = data.get('course_id')
     chapter_id = data.get('chapter_id')
@@ -585,9 +599,12 @@ def api_plan_create():
         except (ValueError, TypeError):
             return jsonify({'message': '结束日期格式错误'}), 400
 
+    raw_title = (data.get('title') or '').strip()
+    if raw_title and len(raw_title) > _PLAN_TITLE_MAX:
+        return jsonify({'message': f'学习计划标题长度不能超过 {_PLAN_TITLE_MAX} 字符'}), 400
     plan = StudyPlan(
         user_id=user.id,
-        title=(data.get('title') or '').strip() or '未命名计划',
+        title=raw_title or '未命名计划',
         description=(data.get('description') or '').strip() or None,
         start_date=start_date,
         end_date=end_date,
@@ -613,6 +630,8 @@ def api_plan_update(plan_id):
         title = (data.get('title') or '').strip()
         if not title:
             return jsonify({'message': '标题不能为空'}), 400
+        if len(title) > _PLAN_TITLE_MAX:
+            return jsonify({'message': f'学习计划标题长度不能超过 {_PLAN_TITLE_MAX} 字符'}), 400
         plan.title = title
     if 'description' in data:
         plan.description = data['description']
@@ -3515,8 +3534,10 @@ def api_daily_task_create():
     title = (data.get('title') or '').strip()
     if not title:
         return jsonify({'message': '任务标题不能为空'}), 400
+    if len(title) > _DAILY_TASK_TITLE_MAX:
+        return jsonify({'message': f'任务标题长度不能超过 {_DAILY_TASK_TITLE_MAX} 字符'}), 400
     t = DailyTask(user_id=user.id, day=_parse_day(data.get('date')),
-                  title=title[:200], source='manual')
+                  title=title, source='manual')
     db.session.add(t)
     db.session.commit()
     return jsonify({'message': '已添加', 'task': _daily_task_to_dict(t)})
@@ -4865,9 +4886,12 @@ def api_insight_create():
                                     data.get('period_end'), data.get('period_note'))
     except ValueError as err:
         return jsonify({'message': str(err)}), 400
+    raw_title = str(data.get('title') or '').strip()
+    if raw_title and len(raw_title) > _INSIGHT_TITLE_MAX:
+        return jsonify({'message': f'心得标题长度不能超过 {_INSIGHT_TITLE_MAX} 字符'}), 400
     i = StudyInsight(
         user_id=user.id,
-        title=str(data.get('title') or '').strip()[:200] or f'{INSIGHT_PERIOD_LABELS[period_type]}学习心得',
+        title=raw_title or f'{INSIGHT_PERIOD_LABELS[period_type]}学习心得',
         period_type=period_type, period_start=s, period_end=e, period_note=note,
         tags=_clean_insight_tags(data.get('tags')),
         attachment_json=_normalize_attachments(data.get('attachments')) or None,
@@ -5142,10 +5166,16 @@ def api_ai_conversation_create():
     if not user:
         return jsonify({'message': '未登录'}), 401
     data = request.get_json(silent=True) or {}
+    title = str(data.get('title') or '').strip() or '新的对话'
+    if len(title) > _AICHAT_TITLE_MAX:
+        return jsonify({'message': f'对话标题长度不能超过 {_AICHAT_TITLE_MAX} 字符'}), 400
+    context = str(data.get('context') or '').strip() or None
+    if context and len(context) > _AICHAT_CONTEXT_MAX:
+        return jsonify({'message': f'上下文长度不能超过 {_AICHAT_CONTEXT_MAX} 字符'}), 400
     conv = AiChatConversation(
         user_id=user.id,
-        title=(str(data.get('title') or '').strip() or '新的对话')[:100],
-        context=str(data.get('context') or '').strip()[:60] or None,
+        title=title,
+        context=context,
     )
     db.session.add(conv)
     db.session.commit()
@@ -5329,6 +5359,9 @@ def api_focus_start():
     except (TypeError, ValueError):
         planned = 25
     planned = max(1, min(planned, _FOCUS_MAX_MIN))
+    topic = str(data.get('topic') or '').strip() or None
+    if topic and len(topic) > _FOCUS_TOPIC_MAX:
+        return jsonify({'message': f'专注主题长度不能超过 {_FOCUS_TOPIC_MAX} 字符'}), 400
 
     stale = FocusSession.query.filter_by(user_id=user.id, status='running').all()
     now = utcnow()
@@ -5336,7 +5369,7 @@ def api_focus_start():
         s.status = 'dropped'
         s.actual_sec = max(0, int((now - s.started_at).total_seconds()))
         s.ended_at = now
-    f = FocusSession(user_id=user.id, topic=str(data.get('topic') or '').strip()[:200] or None,
+    f = FocusSession(user_id=user.id, topic=topic,
                      mode=mode, planned_min=planned)
     db.session.add(f)
     db.session.commit()
@@ -5548,10 +5581,15 @@ def api_note_create():
     content = str(data.get('content') or '').strip()
     if not title:
         return jsonify({'message': '笔记标题不能为空'}), 400
+    if len(title) > _NOTE_TITLE_MAX:
+        return jsonify({'message': f'笔记标题长度不能超过 {_NOTE_TITLE_MAX} 字符'}), 400
     if len(content) > _NOTE_CONTENT_MAX:
         return jsonify({'message': f'笔记内容不能超过 {_NOTE_CONTENT_MAX} 字'}), 400
-    n = StudyNote(user_id=user.id, title=title[:200], content=content,
-                  category=str(data.get('category') or '').strip()[:50] or None,
+    category = str(data.get('category') or '').strip() or None
+    if category and len(category) > _NOTE_CATEGORY_MAX:
+        return jsonify({'message': f'笔记分类长度不能超过 {_NOTE_CATEGORY_MAX} 字符'}), 400
+    n = StudyNote(user_id=user.id, title=title, content=content,
+                  category=category,
                   tags=_clean_note_tags(data.get('tags')))
     if 'attachments' in data:
         n.attachment_json = _normalize_attachments(data.get('attachments')) or None
@@ -5585,14 +5623,19 @@ def api_note_update(nid):
         title = str(data.get('title') or '').strip()
         if not title:
             return jsonify({'message': '笔记标题不能为空'}), 400
-        n.title = title[:200]
+        if len(title) > _NOTE_TITLE_MAX:
+            return jsonify({'message': f'笔记标题长度不能超过 {_NOTE_TITLE_MAX} 字符'}), 400
+        n.title = title
     if 'content' in data:
         content = str(data.get('content') or '')
         if len(content) > _NOTE_CONTENT_MAX:
             return jsonify({'message': f'笔记内容不能超过 {_NOTE_CONTENT_MAX} 字'}), 400
         n.content = content
     if 'category' in data:
-        n.category = str(data.get('category') or '').strip()[:50] or None
+        category = str(data.get('category') or '').strip() or None
+        if category and len(category) > _NOTE_CATEGORY_MAX:
+            return jsonify({'message': f'笔记分类长度不能超过 {_NOTE_CATEGORY_MAX} 字符'}), 400
+        n.category = category
     if 'tags' in data:
         n.tags = _clean_note_tags(data.get('tags'))
     if 'attachments' in data:

@@ -113,7 +113,6 @@ from homework.routes import homework_bp
 from api.community_routes import api_community_bp   # v5.29 社区中心 · Phase 1 论坛 MVP
 from api.stats_routes import api_stats_bp            # v6.1 首页公开统计（只读聚合，零鉴权）
 from api.notebook_routes import api_notebook_bp      # v6.6 代码笔记本（Jupyter 式分单元 + 持久 kernel）
-# 注意：api/routes.py 已废弃，路由已拆分到以上独立模块
 
 api_bps = [api_auth_bp,
            api_question_bp,
@@ -526,8 +525,14 @@ box-shadow:0 10px 40px rgba(0,0,0,.08)}code{background:#f3f4f6;padding:2px 6px;b
         resp.headers['Cache-Control'] = 'public, max-age=31536000, immutable'
         return resp
 
-    @app.route('/', defaults={'path': ''})
-    @app.route('/<path:path>')
+    # SPA 兜底同时注册 GET 和所有不安全方法（POST/PUT/PATCH/DELETE），
+    # 这样对 /api/* 等后端前缀的"不存在路径 + 写方法"请求才能进入 spa_entry 内部，
+    # 由路径前缀判断 abort(404)；否则 Werkzeug 会在 catch-all 处因为方法不匹配先抛 405，
+    # 让真实的 404 语义被遮盖。v7.24.2 起修正。
+    _SPA_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE']
+
+    @app.route('/', defaults={'path': ''}, methods=_SPA_METHODS)
+    @app.route('/<path:path>', methods=_SPA_METHODS)
     def spa_entry(path):
         # 后端保留前缀未被各自路由匹配时，不做 SPA 回退
         if path.startswith(('api/', 'socket.io', 'uploads/')):

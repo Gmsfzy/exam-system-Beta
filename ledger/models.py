@@ -25,7 +25,7 @@ class LedgerAccount(db.Model):
     balance = db.Column(db.Integer, nullable=False, default=0)
     updated_at = db.Column(UTCDateTime, nullable=False, default=utcnow, onupdate=utcnow)
 
-    user = db.relationship('User', backref='ledger_accounts')
+    user = db.relationship('User', backref=db.backref('ledger_accounts', cascade='all, delete-orphan'))
 
     __table_args__ = (
         db.UniqueConstraint('user_id', 'currency', 'scope', name='_ledger_acct_uc'),
@@ -60,7 +60,7 @@ class LedgerTxn(db.Model):
     idempotency_key = db.Column(db.String(64), unique=True)
     created_at = db.Column(UTCDateTime, nullable=False, default=utcnow)
 
-    user = db.relationship('User', backref='ledger_txns', lazy=True)
+    user = db.relationship('User', backref=db.backref('ledger_txns', cascade='all, delete-orphan'), lazy=True)
 
     __table_args__ = (
         db.Index('_ledger_txn_user_cur_scope', 'user_id', 'currency', 'scope'),
