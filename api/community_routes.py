@@ -26,11 +26,13 @@ from sqlalchemy.exc import IntegrityError
 
 from database import db
 from database.models import (
-    User, Course, WrongAnswerRecord, CommunityPost, CommunityComment, CommunityLike,
+    User, Course, Question, Exam, WrongAnswerRecord,
+    CommunityPost, CommunityComment, CommunityLike,
     CommunityFavorite, CommunityNotification, CommunityReport,
     CommunityPollOption, CommunityPollVote, CommunityUserStat, CommunityPointLog,
     CommunityCategoryEnum, CommunityLinkTypeEnum,
 )
+from homework.models import Homework
 from utils.security import verify_token, limiter
 from utils.permissions import require_login, require_teacher
 from utils.redis_cache import cache_key, get_cache, set_cache, delete_cache, delete_pattern
@@ -82,11 +84,15 @@ def _refresh_like_cache(target_type, target_id, value):
     set_cache(cache_key('community:like', target_type, target_id), int(value or 0), 120)
 
 
-def _post_serialize(post, viewer):
-    """帖子序列化（viewer 用于匿名权限判断）"""
+def _post_serialize(post, viewer, viewer_liked_ids=None, viewer_fav_ids=None):
+    """帖子序列化（viewer 用于匿名权限判断；viewer_liked_ids/viewer_fav_ids 可预查集合避免 N+1）"""
     data = post.to_dict(viewer=viewer)
-    data['liked'] = _is_liked('post', post.id, viewer) if viewer else False
-    data['favorited'] = _is_favorited(post.id, viewer) if viewer else False
+    if viewer:
+        data['liked'] = (post.id in viewer_liked_ids) if viewer_liked_ids is not None else _is_liked('post', post.id, viewer)
+        data['favorited'] = (post.id in viewer_fav_ids) if viewer_fav_ids is not None else _is_favorited(post.id, viewer)
+    else:
+        data['liked'] = False
+        data['favorited'] = False
     data['like_count'] = _hot_like_count('post', post.id, post.like_count)
     data['poll'] = _poll_serialize(post, viewer)
     return data
@@ -229,9 +235,12 @@ def _award_points(user_id, delta, reason, related_type=None, related_id=None):
     return stat
 
 
-def _comment_serialize(comment, viewer):
+def _comment_serialize(comment, viewer, viewer_liked_ids=None):
     data = comment.to_dict(viewer=viewer)
-    data['liked'] = _is_liked('comment', comment.id, viewer) if viewer else False
+    if viewer:
+        data['liked'] = (comment.id in viewer_liked_ids) if viewer_liked_ids is not None else _is_liked('comment', comment.id, viewer)
+    else:
+        data['liked'] = False
     data['like_count'] = _hot_like_count('comment', comment.id, comment.like_count)
     return data
 
@@ -318,21 +327,15 @@ def _check_link_exists(linked_type, linked_id):
     if not linked_type or not linked_id:
         return True
     model_map = {
-        'question': 'question',
-        'homework': 'homework',
-        'exam': 'exam',
+        'question': Question,
+        'homework': Homework,
+        'exam': Exam,
     }
-    if linked_type not in model_map:
+    M = model_map.get(linked_type)
+    if M is None:
         return False
-    # 动态查：不同表名不同，用 text 直接查
-    from sqlalchemy import text
     try:
-        tbl = model_map[linked_type]
-        row = db.session.execute(
-            text(f'SELECT 1 FROM {tbl} WHERE id = :id LIMIT 1'),
-            {'id': int(linked_id)}
-        ).fetchone()
-        return row is not None
+        return db.session.get(M, int(linked_id)) is not None
     except Exception:
         return False
 
@@ -372,7 +375,15 @@ def list_posts():
     if linked_type and not _validate_linked_type(linked_type):
         return _err('无效关联类型', 400)
 
-    query = CommunityPost.query.filter_by(deleted=False)
+    # hidden 过滤：老师/管理员能看到全部，普通用户只能看到未被折叠的 + 自己的被折叠帖
+    if viewer and viewer.role in ('teacher', 'admin'):
+        query = CommunityPost.query.filter_by(deleted=False)
+    else:
+        query = CommunityPost.query.filter_by(deleted=False)
+        query = query.filter(or_(
+            CommunityPost.hidden == False,  # noqa: E712
+            CommunityPost.author_id == (viewer.id if viewer else -1),
+        ))
     if category:
         query = query.filter_by(category=category)
     if q:
@@ -405,7 +416,25 @@ def list_posts():
 
     paginated = query.paginate(page=page, per_page=per_page, error_out=False)
 
-    posts = [_post_serialize(p, viewer) for p in paginated.items]
+    # N+1 优化：预批量查询 viewer 对这批帖子的点赞/收藏
+    posts_list = paginated.items
+    post_ids = [p.id for p in posts_list]
+    viewer_liked_ids = set()
+    viewer_fav_ids = set()
+    if viewer and post_ids:
+        likes = CommunityLike.query.filter(
+            CommunityLike.user_id == viewer.id,
+            CommunityLike.target_type == 'post',
+            CommunityLike.target_id.in_(post_ids),
+        ).all()
+        viewer_liked_ids = {l.target_id for l in likes}
+        favs = CommunityFavorite.query.filter(
+            CommunityFavorite.user_id == viewer.id,
+            CommunityFavorite.post_id.in_(post_ids),
+        ).all()
+        viewer_fav_ids = {f.post_id for f in favs}
+
+    posts = [_post_serialize(p, viewer, viewer_liked_ids, viewer_fav_ids) for p in posts_list]
     return _ok({
         'items': posts,
         'page': page,
@@ -423,7 +452,7 @@ def list_posts():
 @limiter.limit('120/minute')
 def get_post(post_id):
     viewer = verify_token()
-    post = CommunityPost.query.get(post_id)
+    post = db.session.get(CommunityPost, post_id)
     if not post or post.deleted:
         return _err('帖子不存在或已删除', 404)
 
@@ -478,7 +507,7 @@ def create_post():
             course_id = int(course_id)
         except (TypeError, ValueError):
             return _err('圈子（课程）ID 无效')
-        if not Course.query.get(course_id):
+        if not db.session.get(Course, course_id):
             return _err('圈子（课程）不存在')
     if bounty_points < 0 or bounty_points > 100:
         return _err('悬赏积分须在 0–100 之间')
@@ -538,7 +567,7 @@ def update_post(post_id):
     if err:
         return err
 
-    post = CommunityPost.query.get(post_id)
+    post = db.session.get(CommunityPost, post_id)
     if not post or post.deleted:
         return _err('帖子不存在或已删除', 404)
     if post.author_id != user.id:
@@ -574,7 +603,7 @@ def update_post(post_id):
                 cid = int(cid)
             except (TypeError, ValueError):
                 return _err('圈子（课程）ID 无效')
-            if not Course.query.get(cid):
+            if not db.session.get(Course, cid):
                 return _err('圈子（课程）不存在')
             post.course_id = cid
 
@@ -589,7 +618,7 @@ def delete_post(post_id):
     if err:
         return err
 
-    post = CommunityPost.query.get(post_id)
+    post = db.session.get(CommunityPost, post_id)
     if not post or post.deleted:
         return _err('帖子不存在或已删除', 404)
 
@@ -620,11 +649,11 @@ def _toggle_like(target_type, target_id, user, value):
 
     # 校验目标存在
     if target_type == 'post':
-        obj = CommunityPost.query.get(target_id)
+        obj = db.session.get(CommunityPost, target_id)
         if not obj or obj.deleted:
             return False, '帖子不存在或已删除', 404
     else:
-        obj = CommunityComment.query.get(target_id)
+        obj = db.session.get(CommunityComment, target_id)
         if not obj or obj.deleted:
             return False, '评论不存在或已删除', 404
 
@@ -668,7 +697,7 @@ def like_post(post_id):
     if not ok:
         return _err(error, code)
 
-    post = CommunityPost.query.get(post_id)
+    post = db.session.get(CommunityPost, post_id)
     return _ok({'liked': value, 'like_count': post.like_count})
 
 
@@ -684,7 +713,7 @@ def like_comment(comment_id):
     if not ok:
         return _err(error, code)
 
-    comment = CommunityComment.query.get(comment_id)
+    comment = db.session.get(CommunityComment, comment_id)
     return _ok({'liked': value, 'like_count': comment.like_count})
 
 
@@ -697,7 +726,7 @@ def like_comment(comment_id):
 def list_comments(post_id):
     viewer = verify_token()
 
-    post = CommunityPost.query.get(post_id)
+    post = db.session.get(CommunityPost, post_id)
     if not post or post.deleted:
         return _err('帖子不存在或已删除', 404)
 
@@ -705,7 +734,18 @@ def list_comments(post_id):
         post_id=post_id, deleted=False
     ).order_by(CommunityComment.created_at.asc()).all()
 
-    return _ok([_comment_serialize(c, viewer) for c in comments])
+    # N+1 优化：预批量查询 viewer 对这批评论的点赞
+    comment_ids = [c.id for c in comments]
+    comment_liked_ids = set()
+    if viewer and comment_ids:
+        likes = CommunityLike.query.filter(
+            CommunityLike.user_id == viewer.id,
+            CommunityLike.target_type == 'comment',
+            CommunityLike.target_id.in_(comment_ids),
+        ).all()
+        comment_liked_ids = {l.target_id for l in likes}
+
+    return _ok([_comment_serialize(c, viewer, comment_liked_ids) for c in comments])
 
 
 @api_community_bp.route('/community/posts/<int:post_id>/comments', methods=['POST'])
@@ -715,7 +755,7 @@ def create_comment(post_id):
     if err:
         return err
 
-    post = CommunityPost.query.get(post_id)
+    post = db.session.get(CommunityPost, post_id)
     if not post or post.deleted:
         return _err('帖子不存在或已删除', 404)
 
@@ -733,7 +773,7 @@ def create_comment(post_id):
             parent_id = int(parent_id)
         except (TypeError, ValueError):
             return _err('无效的回复目标')
-        parent = CommunityComment.query.get(parent_id)
+        parent = db.session.get(CommunityComment, parent_id)
         if not parent or parent.deleted or parent.post_id != post_id:
             return _err('回复的评论不存在或不属于该帖子')
 
@@ -781,12 +821,12 @@ def delete_comment(comment_id):
     if err:
         return err
 
-    comment = CommunityComment.query.get(comment_id)
+    comment = db.session.get(CommunityComment, comment_id)
     if not comment or comment.deleted:
         return _err('评论不存在或已删除', 404)
 
     # 权限：评论作者 / 帖子作者 / 老师 / 管理员
-    post = CommunityPost.query.get(comment.post_id)
+    post = db.session.get(CommunityPost, comment.post_id)
     is_post_author = post and post.author_id == user.id
     if (comment.author_id != user.id
             and not is_post_author
@@ -862,7 +902,7 @@ def favorite_post(post_id):
     if err:
         return err
 
-    post = CommunityPost.query.get(post_id)
+    post = db.session.get(CommunityPost, post_id)
     if not post or post.deleted:
         return _err('帖子不存在或已删除', 404)
 
@@ -924,7 +964,7 @@ def resolve_post(post_id):
     if err:
         return err
 
-    post = CommunityPost.query.get(post_id)
+    post = db.session.get(CommunityPost, post_id)
     if not post or post.deleted:
         return _err('帖子不存在或已删除', 404)
 
@@ -1001,7 +1041,7 @@ def read_notification(notification_id):
     if err:
         return err
 
-    n = CommunityNotification.query.get(notification_id)
+    n = db.session.get(CommunityNotification, notification_id)
     if not n or n.user_id != user.id:
         return _err('通知不存在', 404)
     n.is_read = True
@@ -1040,9 +1080,9 @@ def _report_target(rep):
     data = rep.to_dict()
     target = None
     if rep.target_type == 'post':
-        target = CommunityPost.query.get(rep.target_id)
+        target = db.session.get(CommunityPost, rep.target_id)
     else:
-        target = CommunityComment.query.get(rep.target_id)
+        target = db.session.get(CommunityComment, rep.target_id)
     if target:
         data['target_title'] = getattr(target, 'title', None)
         data['target_content'] = (target.content or '')[:200]
@@ -1072,9 +1112,9 @@ def create_report():
         return _err('举报理由必填且 ≤ 200 字')
 
     if target_type == 'post':
-        target = CommunityPost.query.get(target_id)
+        target = db.session.get(CommunityPost, target_id)
     else:
-        target = CommunityComment.query.get(target_id)
+        target = db.session.get(CommunityComment, target_id)
     if not target or target.deleted:
         return _err('举报的内容不存在或已删除', 404)
     if target.author_id == user.id:
@@ -1137,7 +1177,7 @@ def handle_report(report_id):
     if err:
         return err
 
-    rep = CommunityReport.query.get(report_id)
+    rep = db.session.get(CommunityReport, report_id)
     if not rep:
         return _err('举报记录不存在', 404)
     if rep.status != 'pending':
@@ -1150,9 +1190,9 @@ def handle_report(report_id):
 
     target = None
     if rep.target_type == 'post':
-        target = CommunityPost.query.get(rep.target_id)
+        target = db.session.get(CommunityPost, rep.target_id)
     else:
-        target = CommunityComment.query.get(rep.target_id)
+        target = db.session.get(CommunityComment, rep.target_id)
 
     if action == 'remove' and target and not target.deleted:
         target.deleted = True
@@ -1225,7 +1265,7 @@ def vote_post(post_id):
     if err:
         return err
 
-    post = CommunityPost.query.get(post_id)
+    post = db.session.get(CommunityPost, post_id)
     if not post or post.deleted:
         return _err('帖子不存在或已删除', 404)
 
@@ -1267,7 +1307,7 @@ def accept_answer(post_id):
     if err:
         return err
 
-    post = CommunityPost.query.get(post_id)
+    post = db.session.get(CommunityPost, post_id)
     if not post or post.deleted:
         return _err('帖子不存在或已删除', 404)
     if post.author_id != user.id:
@@ -1289,7 +1329,7 @@ def accept_answer(post_id):
     except (TypeError, ValueError):
         return _err('无效的回答 ID')
 
-    comment = CommunityComment.query.get(comment_id)
+    comment = db.session.get(CommunityComment, comment_id)
     if not comment or comment.deleted or comment.post_id != post_id:
         return _err('回答不存在或不属于该帖子', 404)
 
@@ -1363,7 +1403,7 @@ def get_user_profile(user_id):
     匿名内容只对本人和老师/管理员可见，避免通过主页反查匿名作者。"""
     viewer = verify_token()
 
-    user = User.query.get(user_id)
+    user = db.session.get(User, user_id)
     if not user:
         return _err('用户不存在', 404)
 
@@ -1584,7 +1624,7 @@ def admin_set_post_visibility(post_id):
     if err:
         return err
 
-    post = CommunityPost.query.get(post_id)
+    post = db.session.get(CommunityPost, post_id)
     if not post:
         return _err('帖子不存在', 404)
 
@@ -1606,7 +1646,7 @@ def admin_set_comment_visibility(comment_id):
     if err:
         return err
 
-    comment = CommunityComment.query.get(comment_id)
+    comment = db.session.get(CommunityComment, comment_id)
     if not comment:
         return _err('评论不存在', 404)
 
@@ -1667,7 +1707,7 @@ def ask_from_wrong_record():
     except (TypeError, ValueError):
         return _err('错题记录 ID 无效')
 
-    record = WrongAnswerRecord.query.get(record_id)
+    record = db.session.get(WrongAnswerRecord, record_id)
     if not record or record.user_id != user.id:
         return _err('错题记录不存在', 404)
     question = record.question
